@@ -116,6 +116,12 @@ impl Parser {
                     self.pos += 2;
                     return Ok(Some(Stmt::Label(name)));
                 }
+                // `<label> .rs <size>` reserves a variable.
+                if matches!(self.peek_at(1), Some(Tok::Pseudo(p)) if p == "rs") {
+                    self.pos += 2;
+                    let size = self.parse_expr()?;
+                    return Ok(Some(Stmt::Pseudo(Pseudo::Rs(name, size))));
+                }
                 match self.peek_at(1) {
                     Some(Tok::Equ) => {
                         self.pos += 2;
@@ -222,6 +228,21 @@ impl Parser {
             "hibytes" => Pseudo::Hibytes(self.parse_expr_list()?),
             "lobytes" => Pseudo::Lobytes(self.parse_expr_list()?),
             "fill" => Pseudo::Fill(self.parse_expr_list()?),
+            "checksum" => Pseudo::Checksum(self.parse_expr()?),
+            "color" => Pseudo::Color(self.parse_expr_list()?),
+            "endenum" => Pseudo::Endenum,
+            "enum" => {
+                let start = self.parse_expr()?;
+                let inc = if matches!(self.peek(), Some(Tok::Comma)) {
+                    self.pos += 1;
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                Pseudo::Enum(start, inc)
+            }
+            "rsset" => Pseudo::Rsset(self.parse_expr()?),
+            "random" => Pseudo::Random(self.parse_rand_terms()?),
             "inesprg" => Pseudo::InesPrg(self.parse_expr()?),
             "ineschr" => Pseudo::InesChr(self.parse_expr()?),
             "inesmap" => Pseudo::InesMap(self.parse_expr()?),
@@ -257,6 +278,30 @@ impl Parser {
             other => Pseudo::Unsupported(other.to_string()),
         };
         Ok(p)
+    }
+
+    fn parse_rand_terms(&mut self) -> Result<Vec<RandTerm>, ParseError> {
+        let mut out = Vec::new();
+        // `.random` with no arguments is valid.
+        if matches!(self.peek(), Some(Tok::Endl) | None) {
+            return Ok(out);
+        }
+        loop {
+            match self.peek() {
+                Some(Tok::QuotString(s)) => {
+                    let s = strip_quotes(s);
+                    self.pos += 1;
+                    out.push(RandTerm::Str(s));
+                }
+                _ => out.push(RandTerm::Num(self.parse_expr()?)),
+            }
+            if matches!(self.peek(), Some(Tok::Comma)) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     fn parse_expr_list(&mut self) -> Result<Vec<Expr>, ParseError> {

@@ -56,8 +56,18 @@ impl std::fmt::Display for AssembleError {
 
 impl std::error::Error for AssembleError {}
 
-/// Assemble source text into ROM bytes.
-pub fn assemble(source: &str, options: &Options) -> Result<Vec<u8>, AssembleError> {
+/// The result of a successful assembly: output bytes plus any warnings
+/// (emitted, in source order, exactly as the reference tool would).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assembly {
+    /// Final output bytes (raw ROM, or a full iNES file in NES mode).
+    pub rom: Vec<u8>,
+    /// Warnings collected during assembly.
+    pub warnings: Vec<Diag>,
+}
+
+/// Assemble source text into output bytes.
+pub fn assemble(source: &str, options: &Options) -> Result<Assembly, AssembleError> {
     let tokens = lexer::Lexer::new(source).tokenize();
     let lines = parse::parse(tokens).map_err(|e| {
         AssembleError::Diagnostic(Diag {
@@ -66,7 +76,11 @@ pub fn assemble(source: &str, options: &Options) -> Result<Vec<u8>, AssembleErro
         })
     })?;
     let mut asm = assemble::Assembler::new(options.nes, options.undocumented, options.empty_byte);
-    asm.run(&lines).map_err(AssembleError::Diagnostic)
+    let rom = asm.run(&lines).map_err(AssembleError::Diagnostic)?;
+    Ok(Assembly {
+        rom,
+        warnings: asm.take_warnings(),
+    })
 }
 
 #[cfg(test)]
@@ -74,7 +88,9 @@ mod tests {
     use super::*;
 
     fn asm(src: &str) -> Vec<u8> {
-        assemble(src, &Options::default()).expect("assembly succeeds")
+        assemble(src, &Options::default())
+            .expect("assembly succeeds")
+            .rom
     }
 
     #[test]

@@ -70,7 +70,14 @@ pub struct AsciiArg {
     pub negate: bool,
 }
 
-/// A pseudo-op directive (Phase 2 subset; others are `Unsupported`).
+/// A single `.random` argument: a literal number or a string (hashed as a seed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RandTerm {
+    Num(Expr),
+    Str(String),
+}
+
+/// A pseudo-op directive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pseudo {
     Org(Expr),
@@ -80,6 +87,14 @@ pub enum Pseudo {
     Hibytes(Vec<Expr>),
     Lobytes(Vec<Expr>),
     Fill(Vec<Expr>),
+    Checksum(Expr),
+    Random(Vec<RandTerm>),
+    Color(Vec<Expr>),
+    Enum(Expr, Option<Expr>),
+    Endenum,
+    /// `<label> .rs <size>`.
+    Rs(String, Expr),
+    Rsset(Expr),
     InesPrg(Expr),
     InesChr(Expr),
     InesMap(Expr),

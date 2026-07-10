@@ -83,8 +83,14 @@ pub struct Assembler {
 
     symbols: Vec<Symbol>,
 
+    enum_active: bool,
+    enum_value: i64,
+    enum_inc: i64,
+    rsset: i64,
+
     pass: u8,
     errors: Vec<Diag>,
+    warnings: Vec<Diag>,
     aborted: bool,
     cur_line: u32,
 }
@@ -104,40 +110,55 @@ impl Assembler {
             rom: Vec::new(),
             offset_max: 0,
             symbols: Vec::new(),
+            enum_active: false,
+            enum_value: 0,
+            enum_inc: 0,
+            rsset: 0,
             pass: 1,
             errors: Vec::new(),
+            warnings: Vec::new(),
             aborted: false,
             cur_line: 1,
         }
     }
 
-    /// Run both passes over the parsed program, returning ROM bytes or the
-    /// diagnostic that should be reported.
+    /// Warnings collected during assembly (in source order), each with the
+    /// reference-compatible message.
+    pub fn take_warnings(&mut self) -> Vec<Diag> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Run both passes over the parsed program, returning the output bytes
+    /// (including the iNES header in NES mode) or the diagnostic to report.
     pub fn run(&mut self, lines: &[Line]) -> Result<Vec<u8>, Diag> {
         // Pass 1: build symbols, size the ROM.
         self.pass = 1;
-        self.reset_location();
-        self.ines = Ines::default();
+        self.reset_state();
         self.run_pass(lines);
         if let Some(d) = self.errors.last() {
             return Err(d.clone());
+        }
+
+        // In NES mode the ROM is a fixed size (PRG banks + CHR banks); in raw
+        // mode it is the high-water mark computed during pass 1.
+        if self.nes {
+            self.offset_max = (self.ines.prg * BANK_PRG + self.ines.chr * BANK_CHR).max(0) as usize;
         }
 
         // Allocate ROM and run pass 2 to emit.
         self.rom = vec![self.empty_byte; self.offset_max];
         self.pass = 2;
         self.aborted = false;
-        self.reset_location();
-        self.ines = Ines::default();
+        self.reset_state();
         self.run_pass(lines);
         if let Some(d) = self.errors.last() {
             return Err(d.clone());
         }
 
-        Ok(self.rom.clone())
+        Ok(self.build_output())
     }
 
-    fn reset_location(&mut self) {
+    fn reset_state(&mut self) {
         for v in self.prg_offsets.iter_mut() {
             *v = 0;
         }
@@ -147,6 +168,32 @@ impl Assembler {
         self.prg_index = 0;
         self.chr_index = 0;
         self.segment_prg = true;
+        self.ines = Ines::default();
+        self.enum_active = false;
+        self.enum_value = 0;
+        self.enum_inc = 0;
+        self.rsset = 0;
+    }
+
+    /// Assemble the final output bytes: raw ROM, or an iNES file in NES mode.
+    fn build_output(&self) -> Vec<u8> {
+        if !self.nes {
+            return self.rom.clone();
+        }
+        let mut out = Vec::with_capacity(16 + self.rom.len());
+        out.extend_from_slice(b"NES");
+        out.push(0x1A);
+        out.push((self.ines.prg & 0xFF) as u8);
+        out.push((self.ines.chr & 0xFF) as u8);
+        let byte6 =
+            (self.ines.mir & 0x01) | ((self.ines.trn & 0x01) << 2) | ((self.ines.map & 0x0F) << 4);
+        out.push((byte6 & 0xFF) as u8);
+        let byte7 = self.ines.map & 0xF0;
+        out.push((byte7 & 0xFF) as u8);
+        // iNES header bytes 8..15 are zero.
+        out.resize(out.len() + 8, 0x00);
+        out.extend_from_slice(&self.rom);
+        out
     }
 
     fn run_pass(&mut self, lines: &[Line]) {
@@ -171,6 +218,13 @@ impl Assembler {
     fn hard_error(&mut self, message: impl Into<String>) {
         self.error(message);
         self.aborted = true;
+    }
+
+    fn warning(&mut self, message: impl Into<String>) {
+        self.warnings.push(Diag {
+            line: self.cur_line,
+            message: message.into(),
+        });
     }
 
     // -- symbol table -------------------------------------------------------
@@ -279,15 +333,24 @@ impl Assembler {
 
     fn write_byte(&mut self, byte: u8) {
         let offset = self.rom_index();
-        if offset + 1 > self.offset_max {
+        // In raw (non-NES) mode the ROM grows to fit; in NES mode the size is
+        // fixed by the header, so the high-water mark is not tracked.
+        if !self.nes && offset + 1 > self.offset_max {
             self.offset_max = offset + 1;
         }
         if self.pass == 2 && offset < self.rom.len() {
             self.rom[offset] = byte;
         }
         if self.segment_prg {
+            if self.pass == 1 && self.prg_offsets[self.prg_index] >= BANK_PRG {
+                self.warning(format!("Overflowing PRG Bank {}", self.prg_index));
+            }
             self.prg_offsets[self.prg_index] += 1;
         } else {
+            if self.pass == 1 && self.chr_offsets[self.chr_index] >= BANK_CHR {
+                // The reference message uses prg_index here (matched for parity).
+                self.warning(format!("Overflowing CHR Bank {}", self.prg_index));
+            }
             self.chr_offsets[self.chr_index] += 1;
         }
     }
@@ -360,6 +423,80 @@ impl Assembler {
                 let value = if vals.len() < 2 { 0xFF } else { vals[1] };
                 for _ in 0..count.max(0) {
                     self.write_byte((value & 0xFF) as u8);
+                }
+            }
+            Pseudo::Checksum(e) => {
+                let address = self.eval(e).max(0) as usize;
+                let index = self.rom_index();
+                let crc = if self.pass == 2 {
+                    if index < address {
+                        self.hard_error("Checksums may only be performed on preceding data");
+                        return;
+                    }
+                    crc_32(&self.rom[address..index])
+                } else {
+                    0
+                };
+                self.write_byte(((crc >> 24) & 0xFF) as u8);
+                self.write_byte(((crc >> 16) & 0xFF) as u8);
+                self.write_byte(((crc >> 8) & 0xFF) as u8);
+                self.write_byte((crc & 0xFF) as u8);
+            }
+            Pseudo::Random(terms) => {
+                let ints: Vec<i64> = terms
+                    .iter()
+                    .map(|t| match t {
+                        crate::ast::RandTerm::Num(e) => self.eval(e),
+                        crate::ast::RandTerm::Str(s) => str2hash(s) as i64,
+                    })
+                    .collect();
+                let seed = ints.first().copied().unwrap_or(0);
+                let count = if ints.len() < 2 { 1 } else { ints[1] };
+                let mut next = seed as u64;
+                for _ in 0..count.max(0) {
+                    next = next.wrapping_mul(1103515245).wrapping_add(12345);
+                    let r = ((next / 65536) as u32) % 32768;
+                    self.write_byte((r & 0xFF) as u8);
+                }
+            }
+            Pseudo::Color(list) => {
+                let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
+                for v in vals {
+                    let color = (v & 0xFFFFFF) as u32;
+                    let idx = match_color(
+                        ((color >> 16) & 0xFF) as u8,
+                        ((color >> 8) & 0xFF) as u8,
+                        (color & 0xFF) as u8,
+                    );
+                    self.write_byte(idx);
+                }
+            }
+            Pseudo::Enum(v, inc) => {
+                self.enum_active = true;
+                self.enum_value = self.eval(v);
+                self.enum_inc = match inc {
+                    Some(e) => self.eval(e),
+                    None => 1,
+                };
+            }
+            Pseudo::Endenum => {
+                self.enum_active = false;
+                self.enum_value = 0;
+                self.enum_inc = 0;
+            }
+            Pseudo::Rsset(e) => {
+                self.rsset = self.eval(e);
+            }
+            Pseudo::Rs(label, size) => {
+                let size = self.eval(size);
+                if self.enum_active {
+                    let value = self.enum_value;
+                    self.add_symbol(label, value, SymType::Constant);
+                    self.enum_value += size * self.enum_inc;
+                } else {
+                    let value = self.rsset;
+                    self.add_symbol(label, value, SymType::Constant);
+                    self.rsset += size;
                 }
             }
             Pseudo::InesPrg(e) => {
@@ -746,5 +883,77 @@ impl Assembler {
             BinOp::Le => (a <= b) as i64,
             BinOp::Ge => (a >= b) as i64,
         }
+    }
+}
+
+/// CRC-32 (poly 0xEDB88320), matching the reference `crc_32`.
+fn crc_32(data: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (i, entry) in table.iter_mut().enumerate() {
+        let mut rem = i as u32;
+        for _ in 0..8 {
+            if rem & 1 != 0 {
+                rem = (rem >> 1) ^ 0xEDB88320;
+            } else {
+                rem >>= 1;
+            }
+        }
+        *entry = rem;
+    }
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in data {
+        crc = (crc >> 8) ^ table[((crc & 0xFF) ^ b as u32) as usize];
+    }
+    !crc
+}
+
+/// djb2-style hash over the inner characters of a string, matching the
+/// reference `str2hash` (which skips the surrounding quotes).
+fn str2hash(inner: &str) -> u32 {
+    let mut hash: u32 = 5381;
+    for b in inner.bytes() {
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_add(hash)
+            .wrapping_add(b as u32);
+    }
+    hash
+}
+
+/// The 64-entry NES palette (RGB) used by `.color`, from the reference tables.
+const COLORS_FULL: [u32; 64] = [
+    0x7C7C7C, 0x0000FC, 0x0000BC, 0x4428BC, 0x940084, 0xA80020, 0xA81000, 0x881400, 0x503000,
+    0x007800, 0x006800, 0x005800, 0x004058, 0x000000, 0x000000, 0x000000, 0xBCBCBC, 0x0078F8,
+    0x0058F8, 0x6844FC, 0xD800CC, 0xE40058, 0xF83800, 0xE45C10, 0xAC7C00, 0x00B800, 0x00A800,
+    0x00A844, 0x008888, 0x000000, 0x000000, 0x000000, 0xF8F8F8, 0x3CBCFC, 0x6888FC, 0x9878F8,
+    0xF878F8, 0xF85898, 0xF87858, 0xFCA044, 0xF8B800, 0xB8F818, 0x58D854, 0x58F898, 0x00E8D8,
+    0x787878, 0x000000, 0x000000, 0xFCFCFC, 0xA4E4FC, 0xB8B8F8, 0xD8B8F8, 0xF8B8F8, 0xF8A4C0,
+    0xF0D0B0, 0xFCE0A8, 0xF8D878, 0xD8F878, 0xB8F8B8, 0xB8F8D8, 0x00FCFC, 0xF8D8F8, 0x000000,
+    0x000000,
+];
+
+/// Find the nearest NES palette index for an RGB triple, matching the
+/// reference `match_color` (Euclidean distance, truncated to int, first match;
+/// index 0x0D is remapped to 0x0F).
+fn match_color(r1: u8, g1: u8, b1: u8) -> u8 {
+    let mut diff: i32 = 0xFFFFFF;
+    let mut color: usize = 0;
+    for (i, rgb) in COLORS_FULL.iter().enumerate() {
+        let r2 = ((rgb >> 16) & 0xFF) as i32;
+        let g2 = ((rgb >> 8) & 0xFF) as i32;
+        let b2 = (rgb & 0xFF) as i32;
+        let dr = (r2 - r1 as i32) as f64;
+        let dg = (g2 - g1 as i32) as f64;
+        let db = (b2 - b1 as i32) as f64;
+        let next_diff = (dr * dr + dg * dg + db * db).sqrt() as i32;
+        if next_diff < diff {
+            diff = next_diff;
+            color = i;
+        }
+    }
+    if color == 0x0D {
+        0x0F
+    } else {
+        color as u8
     }
 }
