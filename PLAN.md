@@ -215,8 +215,10 @@ subsystem — listed for completeness):
   `wasm32` library retaining the (assembler) playground use case.
 - **G4 — CLI compatibility:** same flags, subcommands, exit codes, and
   primary stdout/stderr contract for the in-scope surface so existing scripts
-  keep working. Out-of-scope subcommands/flags are either omitted or emit a
-  clear "not supported" message (decision pending — see Q).
+  keep working. Out-of-scope options (notably `-d`/`--disassemble`,
+  `-R`/`--reassemble`, `-s`/`--simulate`) are **omitted entirely** — not parsed,
+  not listed in help/usage, not documented, and not surfaced via any
+  "not supported" message. To the `nessemble-rs` user they simply do not exist.
 
 ### 5.2 Non-Goals / Out of Scope (unless requested)
 
@@ -360,10 +362,12 @@ ordered so that the highest-value core lands first and each builds on the last.
 - **Scope:** in-scope `clap` CLI surface & exit codes (assemble/check/coverage +
   `init`, `config`, `reference`, `scripts`, `--version`/`--license`/`--help`);
   `~/.nessemble` layout; `reference` (+QR); pager; i18n framework (strings can be
-  ported incrementally). Out-of-scope subcommands/flags (`-d`/`-R`/`-s`,
-  `registry`, package-manager, user/auth) are omitted or emit a clear
-  "not supported in this build" message (decision pending — see Q).
+  ported incrementally). The disassemble/reassemble/simulate options
+  (`-d`/`-R`/`-s`) are **omitted entirely** — no parser entry, no help/usage
+  line, no docs. The registry/package-manager/user-auth subcommands are
+  likewise not implemented (see §5.2); they are simply absent from the CLI.
 - **Acceptance:** CLI help/usage/exit-code parity for the in-scope surface;
+  help/usage text contains **no reference** to disassemble/reassemble/simulate;
   `init` output matches; config round-trips.
 
 ### Phase 7 — WASM build, scripting host, packaging & cutover
@@ -413,7 +417,7 @@ ordered so that the highest-value core lands first and each builds on the last.
 | Floating-point in expressions (`pow`, `/`) | Off-by-one divergence | Match C integer-cast semantics exactly; property tests |
 | WASM parity (Emscripten FS/EM_ASM hooks) | Playground breakage | Redesign JS interop via `wasm-bindgen`; keep the assembler API used by playground |
 | i18n/gettext catalogs | Localization gaps | Framework early, translate strings incrementally |
-| Out-of-scope flags/subcommands still invoked by users/scripts | Confusing failures | Decide (Q) between omitting them vs. a clear "not supported" message + non-zero exit |
+| Out-of-scope flags/subcommands still invoked by users/scripts | Confusing failures | **Decided:** disassemble/reassemble/simulate are omitted entirely (treated as unknown args by `clap`, standard usage error); never surfaced in help/docs |
 
 ---
 
@@ -433,8 +437,8 @@ ordered so that the highest-value core lands first and each builds on the last.
 1. `nessemble-rs` **assembles** the entire in-scope test corpus with byte parity
    vs C v1.1.1 (assemble/check/coverage, incl. media importers).
 2. In-scope CLI flags, subcommands, and exit codes match documented behavior;
-   out-of-scope commands behave per the agreed decision (omitted vs. clear
-   "not supported").
+   disassemble/reassemble/simulate are omitted entirely and appear nowhere in
+   help, usage, or docs.
 3. Cross-platform native builds + a working `wasm32` assembler playground module.
 4. Clean `cargo fmt`/`clippy`; documented crates; CI differential suite green.
 5. Scripting scope delivered per the agreed product decision.
@@ -451,11 +455,13 @@ These materially affect scope, sequencing, and effort. Grouped by priority.
    **disassembler/reassembler**, **simulator/debugger**, and **package-registry
    functionality** are **out of scope** (§5.2). Please confirm, or flag any of
    these you actually want re-included.
-2. **Out-of-scope CLI flags/commands:** for `-d`/`-R`/`-s`, `registry`, the
-   package manager, and user/auth — should `nessemble-rs` **omit them entirely**
-   (unknown-flag error) or **recognize them and print a clear "not supported in
-   this build" message** with a non-zero exit? (Matters for scripts that call
-   the old binary.)
+2. **Out-of-scope CLI flags/commands:** ✅ **Resolved.** Disassemble
+   (`-d`/`--disassemble`), reassemble (`-R`/`--reassemble`), and simulate
+   (`-s`/`--simulate`) are **omitted entirely** — not parsed, not shown in
+   help/usage, not documented, and never surfaced via a "not supported" message.
+   The registry/package-manager/user-auth subcommands are treated the same way
+   (absent from the CLI) for consistency. *(If the registry commands should
+   instead emit a deprecation notice, say so; default is silent omission.)*
 3. **Parity bar:** Is **byte-for-byte ROM parity** with C v1.1.1 a hard
    requirement, or is "correct + documented behavior" acceptable where the C
    tool has quirks?
