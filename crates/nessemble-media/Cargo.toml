@@ -1,0 +1,12 @@
+[package]
+name = "nessemble-media"
+description = "Asset importers (PNG/CHR, palette, RLE, WAV/DPCM) for nessemble-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
