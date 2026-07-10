@@ -455,6 +455,11 @@ ordered so that the highest-value core lands first and each builds on the last.
   full operator set, `HIGH/LOW/BANK`, parens; standalone evaluator.
 - **Acceptance:** unit tests for tokenization + expression results matching C
   semantics (including integer division/`pow` behavior and truncation).
+- **Status: ✅ complete** (folded into Phase 2). Implemented as a hand-written
+  lexer (`nessemble-core::lexer`, mirroring flex longest-match/rule-order) plus
+  a recursive-descent/Pratt expression parser. Verified that operators are a
+  single precedence level and **right-associative** (matching the reference
+  bison grammar's default shift resolution).
 
 ### Phase 2 — Core assembler: instructions, symbols, two-pass, raw output
 - **Scope:** addressing-mode selection & opcode emission (`instructions.c`),
@@ -464,6 +469,16 @@ ordered so that the highest-value core lands first and each builds on the last.
 - **Acceptance:** byte-identical output for the non-iNES / opcode subset of
   `test/opcodes` and simple `test/examples`; `test/errors` cases produce
   matching failures.
+- **Status: ✅ complete.** `nessemble-core` now lexes, parses, and assembles via
+  a two-pass engine (symbol table, expression eval, syntactic addressing-mode
+  selection, `.org` + non-iNES data directives, reference-matching error text).
+  Parity harness: **78/119** goldens reproduced byte-for-byte — **all** opcode
+  cases (documented + `-u` undocumented), the non-iNES simple examples, and the
+  Phase-2 error cases (undefined symbol, unknown opcode, invalid mode, branch
+  out of range). The remaining failures are Phase 3+ features (iNES output,
+  banking, conditionals, includes, media, and the `enum`/`rs`/`checksum`/etc.
+  directives). Hermetic regression tests live in
+  `crates/nessemble-core/tests/corpus.rs`.
 
 ### Phase 3 — iNES, banking, segments & data/core directives
 - **Scope:** iNES header + trainer, PRG/CHR banking, `.segment`/`.prg`/`.chr`,
