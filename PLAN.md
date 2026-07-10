@@ -411,9 +411,10 @@ existing one; **the docs site may use a clean theme**; both deploy to
   even with the WASM build deferred. Plan: carry over the exact
   CSS/JS/img/font/data assets and template, render `index.html` to static output
   at build time, and adjust only the download links (point at the new releases)
-  and the config values. *(One copy nit: the current page describes nessemble as
-  an "assembler, disassembler, and simulator" — see Q-f about updating that
-  line to assembler-only while keeping the look identical.)*
+  and the config values. **Copy change (Q-f):** the current page describes
+  nessemble as an "assembler, disassembler, and simulator" — this is updated to
+  **"assembler"** only (no mention of disassembler/simulator), keeping the
+  layout/theme identical.
 - **Docs — clean theme.** Author content in Markdown and build with **mdBook**
   (pure Rust). Port the in-scope `docs/pages/*.md` (installation, syntax, usage,
   building, extending, packages, etc.), **omitting** the out-of-scope
@@ -636,15 +637,10 @@ as the authoritative directions for this plan.
 | Q-c | Locales | Ship **`en-US` only**, but make adding locales easy (the Fluent layout does this). |
 | Q-d | Parity host | **Linux parity is authoritative**; macOS/Windows are build/packaging targets. |
 | Q-e | Windows artifacts | Reproduce **both** the `.exe` and the `.msi` for each Windows arch. |
+| Q-f | Website copy | Landing-page copy mentions **assembler only** — no disassembler/simulator — while keeping the layout/theme identical. |
 
-### New question
-
-- **Q-f (website copy):** The existing landing page describes nessemble as an
-  "assembler, disassembler, and simulator." Since `nessemble-rs` is
-  assembler-only and out-of-scope features must not be mentioned, I plan to
-  **update that copy to "assembler"** while keeping the layout/theme identical.
-  Confirm that's acceptable (this is the only intended deviation from
-  "reproduce the website the same"). *Default: make the edit.*
+**All questions are resolved.** The plan is fully specified and ready to execute
+from Phase 0.
 
 ---
 
