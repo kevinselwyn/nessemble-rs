@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nessemble_core::{assemble, AssembleError, Options};
+use nessemble_core::{assemble, assemble_file, AssembleError, Options};
 
 fn corpus_dir() -> PathBuf {
     // crates/nessemble-core -> repo root -> tests/corpus
@@ -30,15 +30,26 @@ fn check_ok(group: &str, name: &str, undocumented: bool) {
     }
 }
 
-/// Assemble an error case and compare the formatted diagnostic to the golden.
+/// Assemble `<dir>/<name>.asm` via the file entry point (so `.include`/
+/// `.inestrn` resolve relative to the file) and compare to the golden.
+fn check_ok_file(group: &str, name: &str) {
+    let dir = corpus_dir().join(group).join(name);
+    let golden = std::fs::read(dir.join(format!("{name}.rom"))).unwrap();
+    match assemble_file(&dir.join(format!("{name}.asm")), &Options::default()) {
+        Ok(a) => assert_eq!(a.rom, golden, "ROM mismatch for {group}/{name}"),
+        Err(e) => panic!("{group}/{name} failed to assemble: {e:?}"),
+    }
+}
+
+/// Assemble an error case and compare the formatted diagnostic to the golden,
+/// using the diagnostic's own file name (which may be an included file).
 fn check_err(name: &str) {
     let dir = corpus_dir().join("errors").join(name);
-    let src = std::fs::read_to_string(dir.join(format!("{name}.asm"))).unwrap();
     let golden = std::fs::read_to_string(dir.join(format!("{name}.rom"))).unwrap();
-    match assemble(&src, &Options::default()) {
+    match assemble_file(&dir.join(format!("{name}.asm")), &Options::default()) {
         Ok(_) => panic!("{name} unexpectedly assembled"),
         Err(AssembleError::Diagnostic(d)) => {
-            let formatted = format!("Error in `{name}.asm` on line {}: {}\n", d.line, d.message);
+            let formatted = format!("Error in `{}` on line {}: {}\n", d.file, d.line, d.message);
             assert_eq!(formatted, golden, "diagnostic mismatch for errors/{name}");
         }
     }
@@ -111,6 +122,37 @@ fn ines_banking_and_directive_examples_match() {
 }
 
 #[test]
+fn macro_and_conditional_examples_match() {
+    // Phase 4: text macros with arguments, and nested conditionals. Neither
+    // uses includes, so the string entry point suffices.
+    for name in ["macro", "ifdef"] {
+        check_ok("examples", name, false);
+    }
+}
+
+#[test]
+fn include_and_trainer_examples_match() {
+    // Phase 4: `.include` (nested, resolved relative to the file) and the
+    // `.inestrn` trainer region.
+    for name in ["include", "trainer"] {
+        check_ok_file("examples", name);
+    }
+}
+
+#[test]
+fn list_file_matches_reference() {
+    // `.rs` reservations list as labels (`BANK/VALUE = name`); this exact
+    // output was verified byte-for-byte against the v1.1.1 oracle's `-l`.
+    let dir = corpus_dir().join("examples").join("rs");
+    let a = assemble_file(&dir.join("rs.asm"), &Options::default()).unwrap();
+    let expected = "[labels]\n\
+                    00/0012 = label_01\n\
+                    00/3456 = label_02\n\
+                    00/3458 = label_03\n";
+    assert_eq!(nessemble_core::render_list_file(&a.symbols), expected);
+}
+
+#[test]
 fn error_cases_match() {
     for name in [
         "undefined-symbol",
@@ -118,6 +160,11 @@ fn error_cases_match() {
         "mode",
         "branch-minus",
         "branch-plus",
+        // Phase 4 include/macro error paths.
+        "include-depth",
+        "no-include",
+        "undefined-macro",
+        "package",
     ] {
         check_err(name);
     }

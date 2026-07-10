@@ -13,11 +13,18 @@ use crate::ast::*;
 const BANK_PRG: i64 = 0x4000;
 const BANK_CHR: i64 = 0x2000;
 const MAX_BANKS: usize = 256;
+/// iNES trainer region size (matches the reference `TRAINER_MAX`).
+const TRAINER_MAX: usize = 512;
+/// Matches the reference `MAX_NESTED_IFS`.
+const MAX_NESTED_IFS: usize = 10;
 
-/// A diagnostic (error) with a 1-based source line and message, matching the
-/// reference tool's wording.
+/// A diagnostic (error) with a source-file display name, 1-based source line,
+/// and message, matching the reference tool's wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diag {
+    /// Display name of the file the diagnostic refers to (the basename of the
+    /// top-level input, or the raw path of an included file).
+    pub file: String,
     pub line: u32,
     pub message: String,
 }
@@ -27,6 +34,21 @@ enum SymType {
     Undefined,
     Label,
     Constant,
+    /// A `.rs` reservation outside an `.enum` block (listed as a label).
+    Rs,
+    /// A `.rs` reservation inside an `.enum` block (listed as a constant).
+    Enum,
+}
+
+/// A defined symbol exposed for the list file (`-l`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListSymbol {
+    pub name: String,
+    pub value: i64,
+    pub bank: usize,
+    /// Whether this is a label (vs. a constant), which selects its list
+    /// section and formatting.
+    pub label: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -39,16 +61,10 @@ struct Symbol {
 
 #[derive(Debug, Clone, Copy)]
 struct Ines {
-    // `chr`, `map`, `mir`, and `trn` are populated by the iNES directives now
-    // but only consumed by the full iNES-header output path (Phase 3).
-    #[allow(dead_code)]
     chr: i64,
-    #[allow(dead_code)]
     map: i64,
-    #[allow(dead_code)]
     mir: i64,
     prg: i64,
-    #[allow(dead_code)]
     trn: i64,
 }
 
@@ -88,15 +104,26 @@ pub struct Assembler {
     enum_inc: i64,
     rsset: i64,
 
+    // Conditional-assembly state (`.if`/`.ifdef`/`.ifndef`/`.else`/`.endif`).
+    if_active: bool,
+    if_depth: usize,
+    if_cond: [bool; MAX_NESTED_IFS],
+
+    // iNES trainer redirection (`.inestrn`).
+    trainer: Vec<u8>,
+    offset_trainer: usize,
+
     pass: u8,
     errors: Vec<Diag>,
     warnings: Vec<Diag>,
     aborted: bool,
     cur_line: u32,
+    cur_file: u32,
+    files: Vec<String>,
 }
 
 impl Assembler {
-    pub fn new(nes: bool, undocumented: bool, empty_byte: u8) -> Self {
+    pub fn new(nes: bool, undocumented: bool, empty_byte: u8, files: Vec<String>) -> Self {
         Assembler {
             nes,
             undocumented,
@@ -114,12 +141,36 @@ impl Assembler {
             enum_value: 0,
             enum_inc: 0,
             rsset: 0,
+            if_active: false,
+            if_depth: 0,
+            if_cond: [false; MAX_NESTED_IFS],
+            trainer: Vec::new(),
+            offset_trainer: 0,
             pass: 1,
             errors: Vec::new(),
             warnings: Vec::new(),
             aborted: false,
             cur_line: 1,
+            cur_file: 0,
+            files,
         }
+    }
+
+    /// Symbols eligible for the list file (`-l`), excluding those only
+    /// referenced but never defined.
+    pub fn list_symbols(&self) -> Vec<ListSymbol> {
+        self.symbols
+            .iter()
+            .filter(|s| s.kind != SymType::Undefined)
+            .map(|s| ListSymbol {
+                name: s.name.clone(),
+                value: s.value,
+                bank: s.bank,
+                // `.rs` reservations list as labels; `.enum` entries and plain
+                // constants list as constants.
+                label: matches!(s.kind, SymType::Label | SymType::Rs),
+            })
+            .collect()
     }
 
     /// Warnings collected during assembly (in source order), each with the
@@ -145,8 +196,10 @@ impl Assembler {
             self.offset_max = (self.ines.prg * BANK_PRG + self.ines.chr * BANK_CHR).max(0) as usize;
         }
 
-        // Allocate ROM and run pass 2 to emit.
+        // Allocate ROM (and trainer, filled with the empty byte) and run pass 2
+        // to emit.
         self.rom = vec![self.empty_byte; self.offset_max];
+        self.trainer = vec![self.empty_byte; TRAINER_MAX];
         self.pass = 2;
         self.aborted = false;
         self.reset_state();
@@ -173,6 +226,23 @@ impl Assembler {
         self.enum_value = 0;
         self.enum_inc = 0;
         self.rsset = 0;
+        self.if_active = false;
+        self.if_depth = 0;
+        self.if_cond = [false; MAX_NESTED_IFS];
+        self.offset_trainer = 0;
+    }
+
+    /// Whether the current statement is suppressed by a false conditional
+    /// block. Mirrors the reference guard used in `write_byte`/`add_symbol`,
+    /// which checks the current level and (when nested) its parent.
+    fn if_suppressed(&self) -> bool {
+        if !self.if_active {
+            return false;
+        }
+        if !self.if_cond[self.if_depth] {
+            return true;
+        }
+        self.if_depth >= 2 && !self.if_cond[self.if_depth - 1]
     }
 
     /// Assemble the final output bytes: raw ROM, or an iNES file in NES mode.
@@ -192,6 +262,10 @@ impl Assembler {
         out.push((byte7 & 0xFF) as u8);
         // iNES header bytes 8..15 are zero.
         out.resize(out.len() + 8, 0x00);
+        // A trainer, when present, sits between the header and the PRG/CHR data.
+        if self.ines.trn == 1 {
+            out.extend_from_slice(&self.trainer);
+        }
         out.extend_from_slice(&self.rom);
         out
     }
@@ -202,6 +276,7 @@ impl Assembler {
                 break;
             }
             self.cur_line = line.line;
+            self.cur_file = line.file;
             self.exec_stmt(&line.stmt);
         }
     }
@@ -210,9 +285,17 @@ impl Assembler {
 
     fn error(&mut self, message: impl Into<String>) {
         self.errors.push(Diag {
+            file: self.file_name(),
             line: self.cur_line,
             message: message.into(),
         });
+    }
+
+    fn file_name(&self) -> String {
+        self.files
+            .get(self.cur_file as usize)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn hard_error(&mut self, message: impl Into<String>) {
@@ -222,6 +305,7 @@ impl Assembler {
 
     fn warning(&mut self, message: impl Into<String>) {
         self.warnings.push(Diag {
+            file: self.file_name(),
             line: self.cur_line,
             message: message.into(),
         });
@@ -235,6 +319,10 @@ impl Assembler {
 
     fn add_symbol(&mut self, name: &str, value: i64, kind: SymType) {
         if self.pass != 1 {
+            return;
+        }
+        // Symbols inside a false conditional block are not recorded.
+        if self.if_suppressed() {
             return;
         }
         let bank = self.prg_index;
@@ -332,6 +420,22 @@ impl Assembler {
     }
 
     fn write_byte(&mut self, byte: u8) {
+        // A byte suppressed by a false conditional is dropped entirely — it does
+        // not advance the location counter (matching the reference).
+        if self.if_suppressed() {
+            return;
+        }
+
+        // While a trainer is active every emitted byte is redirected into the
+        // 512-byte trainer region and does not advance the ROM counters.
+        if self.ines.trn == 1 {
+            if self.pass == 2 && self.offset_trainer < self.trainer.len() {
+                self.trainer[self.offset_trainer] = byte;
+            }
+            self.offset_trainer += 1;
+            return;
+        }
+
         let offset = self.rom_index();
         // In raw (non-NES) mode the ROM grows to fit; in NES mode the size is
         // fixed by the header, so the high-water mark is not tracked.
@@ -491,11 +595,11 @@ impl Assembler {
                 let size = self.eval(size);
                 if self.enum_active {
                     let value = self.enum_value;
-                    self.add_symbol(label, value, SymType::Constant);
+                    self.add_symbol(label, value, SymType::Enum);
                     self.enum_value += size * self.enum_inc;
                 } else {
                     let value = self.rsset;
-                    self.add_symbol(label, value, SymType::Constant);
+                    self.add_symbol(label, value, SymType::Rs);
                     self.rsset += size;
                 }
             }
@@ -522,6 +626,47 @@ impl Assembler {
             Pseudo::Chr(e) => {
                 self.segment_prg = false;
                 self.chr_index = self.eval(e).max(0) as usize % MAX_BANKS;
+            }
+            Pseudo::InesTrn => {
+                self.nes = true;
+                self.ines.trn = 1;
+            }
+            Pseudo::If(e) => {
+                let cond = self.eval(e);
+                self.if_active = true;
+                self.if_depth += 1;
+                if self.if_depth < MAX_NESTED_IFS {
+                    self.if_cond[self.if_depth] = cond != 0;
+                }
+            }
+            Pseudo::Ifdef(name) => {
+                let defined = self.find_symbol(name).is_some();
+                self.if_active = true;
+                self.if_depth += 1;
+                if self.if_depth < MAX_NESTED_IFS {
+                    self.if_cond[self.if_depth] = defined;
+                }
+            }
+            Pseudo::Ifndef(name) => {
+                let defined = self.find_symbol(name).is_some();
+                self.if_active = true;
+                self.if_depth += 1;
+                if self.if_depth < MAX_NESTED_IFS {
+                    self.if_cond[self.if_depth] = !defined;
+                }
+            }
+            Pseudo::Else => {
+                if self.if_depth < MAX_NESTED_IFS {
+                    self.if_cond[self.if_depth] = !self.if_cond[self.if_depth];
+                }
+            }
+            Pseudo::Endif => {
+                if self.if_depth > 0 {
+                    self.if_depth -= 1;
+                }
+                if self.if_depth == 0 {
+                    self.if_active = false;
+                }
             }
             Pseudo::Segment(name) => {
                 if let Some(rest) = name.strip_prefix("PRG") {

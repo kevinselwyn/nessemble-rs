@@ -8,10 +8,11 @@
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
 
-/// A parse error with the offending 1-based line.
+/// A parse error with the offending 1-based line and source-file id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub line: u32,
+    pub file: u32,
     pub message: String,
 }
 
@@ -45,6 +46,14 @@ impl Parser {
             .unwrap_or(1)
     }
 
+    fn cur_file(&self) -> u32 {
+        self.toks
+            .get(self.pos)
+            .or_else(|| self.toks.last())
+            .map(|t| t.file)
+            .unwrap_or(0)
+    }
+
     fn bump(&mut self) -> Option<Tok> {
         let t = self.toks.get(self.pos).map(|t| t.tok.clone());
         if t.is_some() {
@@ -56,6 +65,7 @@ impl Parser {
     fn err<T>(&self, message: impl Into<String>) -> Result<T, ParseError> {
         Err(ParseError {
             line: self.cur_line(),
+            file: self.cur_file(),
             message: message.into(),
         })
     }
@@ -79,10 +89,12 @@ impl Parser {
                 }
             }
             let line_no = self.cur_line();
+            let file_no = self.cur_file();
             if let Some(stmt) = self.parse_stmt(indented)? {
                 lines.push(Line {
                     stmt,
                     line: line_no,
+                    file: file_no,
                 });
             }
             // Consume through end-of-line.
@@ -243,6 +255,14 @@ impl Parser {
             }
             "rsset" => Pseudo::Rsset(self.parse_expr()?),
             "random" => Pseudo::Random(self.parse_rand_terms()?),
+            // The trainer file is spliced in by the preprocessor; this bare
+            // marker only flips the assembler into trainer-redirect mode.
+            "inestrn" => Pseudo::InesTrn,
+            "if" => Pseudo::If(self.parse_expr()?),
+            "ifdef" => Pseudo::Ifdef(self.parse_text_name("ifdef")?),
+            "ifndef" => Pseudo::Ifndef(self.parse_text_name("ifndef")?),
+            "else" => Pseudo::Else,
+            "endif" => Pseudo::Endif,
             "inesprg" => Pseudo::InesPrg(self.parse_expr()?),
             "ineschr" => Pseudo::InesChr(self.parse_expr()?),
             "inesmap" => Pseudo::InesMap(self.parse_expr()?),
@@ -278,6 +298,14 @@ impl Parser {
             other => Pseudo::Unsupported(other.to_string()),
         };
         Ok(p)
+    }
+
+    /// Parse the single symbol name argument to `.ifdef` / `.ifndef`.
+    fn parse_text_name(&mut self, which: &str) -> Result<String, ParseError> {
+        match self.bump() {
+            Some(Tok::Text(name)) => Ok(name),
+            _ => self.err(format!("expected symbol after .{which}")),
+        }
     }
 
     fn parse_rand_terms(&mut self) -> Result<Vec<RandTerm>, ParseError> {

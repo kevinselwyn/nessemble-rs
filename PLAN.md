@@ -503,6 +503,22 @@ ordered so that the highest-value core lands first and each builds on the last.
   limit), stdin/piped input, list-file output (`-l`).
 - **Acceptance:** macro/include/conditional examples byte-identical; list files
   match.
+- **Status: ✅ complete.** A token-stream **preprocessor** (`nessemble-core::
+  preprocess`) resolves `.include` (nested, resolved relative to the top-level
+  file's directory, with the depth-10 limit → `Too many nested includes`) and
+  expands `.macrodef`/`.macro` text macros — substituting `\N` (parenthesised
+  argument tokens), `\#`, and `\@` — the token-level analogue of the reference's
+  re-entrant flex buffers. Conditionals (`.if`/`.ifdef`/`.ifndef`/`.else`/
+  `.endif`, nested) are evaluated by the assembler, gating byte/symbol emission
+  exactly as the reference does (suppressed bytes do not advance the location
+  counter). `.inestrn` splices the trainer file into the 512-byte trainer region
+  (emitted between header and PRG/CHR data). Diagnostics now carry the offending
+  file's basename (top-level or included). The `-l` **list file** is produced and
+  verified byte-for-byte against the v1.1.1 oracle across the corpus (`.rs` lists
+  as a label, `.enum`/constants as constants, anonymous labels included). Parity:
+  **101/119** goldens byte-for-byte; the remaining failures are all Phase 5 media
+  importers (`.incbin/.incpng/.incpal/.incrle/.incwav/.font/.defchr` and the
+  nerdy-nights programs that use them).
 
 ### Phase 5 — Asset importers (media)
 - **Scope:** `nessemble-media`: `.incbin`, `.incpng` (+palette matching),
