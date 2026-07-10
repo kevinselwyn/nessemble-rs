@@ -241,8 +241,9 @@ simulator / package-registry subsystems — listed for completeness, not used):
   (see [§5.4](#54-target-platforms--artifacts)).
 - **G5 — i18n retained:** translation support remains a first-class feature
   (E11), implemented the idiomatic-Rust way (Project Fluent — [§6.5](#65-i18n-approach)).
-- **G6 — Docs & website:** generate the documentation site and project website
-  as build artifacts (C7), without running any server.
+- **G6 — Docs & website:** generate the documentation site (clean mdBook theme)
+  and reproduce the existing project **website look as-is**, both as static
+  artifacts deployable to **GitHub Pages** (C7, Q-b) — no server required.
 - **G7 — Custom pseudo-ops:** retain scriptable custom pseudo-ops via a single
   embedded language ([Rhai](https://rhai.rs)).
 
@@ -373,11 +374,11 @@ arguments and emits bytes/values. Per B5 we consolidate to **one** language.
   directive.
 - **Small, actively maintained, permissive (MIT/Apache-2.0)** license.
 
-*Trade-off / follow-up:* the bundled scripts today are Lua (`src/static/scripts/
-ease.lua`, `scripts.txt`). Adopting Rhai means **porting the bundled scripts** to
-`.rhai` and defining a stable Rhai host API for custom pseudo-ops. This is minor
-(the scripts are small), but see Q-a in the [Decisions Log](#12-decisions-log)
-regarding any external/user scripts we might need to keep working.
+*Migration:* the only bundled script that must exist is `ease` (today
+`src/static/scripts/ease.lua`); per Q-a there is **no external/user script
+ecosystem** to preserve. Adopting Rhai means **porting `ease` to `.rhai`** and
+defining a stable Rhai host API for custom pseudo-ops — a small, self-contained
+task.
 
 ### 6.5 i18n approach
 
@@ -396,20 +397,30 @@ on C tooling; the idiomatic, pure-Rust choice that achieves the same result is
 
 ### 6.6 Documentation & website
 
-C7 requires generating the documentation and website (but not the servers). The
-upstream uses Python **mkdocs** for docs and a **webpack/TS** app for the site.
-Proposed Rust-friendly replacement:
+C7 requires generating the documentation and website (but not the servers).
+Owner direction (Q-b): **the marketing website should look the same** as the
+existing one; **the docs site may use a clean theme**; both deploy to
+**GitHub Pages**.
 
-- **Docs:** author content in Markdown, build a static site with **mdBook**
-  (pure Rust). Port the existing `docs/pages/*.md` (installation, syntax, usage,
-  building, extending, packages, playground, etc.) as the initial content, minus
-  the out-of-scope simulator/disassembler/registry pages.
-- **Website:** a small static landing site generated at build time (mdBook can
-  serve double-duty, or a minimal static template). Output is deployable to any
-  static host (e.g. GitHub Pages) — no running server required.
-- Both are produced as artifacts by an `xtask`/CI step so docs stay in sync with
-  the CLI (e.g. `reference` data and usage text can be generated from the same
-  source of truth). *(See Q-b about desired hosting/branding fidelity.)*
+- **Website — reproduce as-is.** The upstream landing page
+  ([`website/static`](https://github.com/kevinselwyn/nessemble/tree/master/website/static)
+  + `templates/index.html`) is a Bootstrap/"grayscale"-themed single page. Its
+  only Flask templating is a handful of config substitutions (documentation URL,
+  analytics IDs); its demo plays a **pre-built `example.nes` via JSNES** plus an
+  asciinema recording — **no WASM/assembler runtime needed**, so it works fully
+  even with the WASM build deferred. Plan: carry over the exact
+  CSS/JS/img/font/data assets and template, render `index.html` to static output
+  at build time, and adjust only the download links (point at the new releases)
+  and the config values. *(One copy nit: the current page describes nessemble as
+  an "assembler, disassembler, and simulator" — see Q-f about updating that
+  line to assembler-only while keeping the look identical.)*
+- **Docs — clean theme.** Author content in Markdown and build with **mdBook**
+  (pure Rust). Port the in-scope `docs/pages/*.md` (installation, syntax, usage,
+  building, extending, packages, etc.), **omitting** the out-of-scope
+  simulator/disassembler/registry/playground pages.
+- Both are produced by an `xtask`/CI step and published to **GitHub Pages**;
+  where possible, `reference` data and usage text are generated from the same
+  source of truth as the CLI so docs cannot drift.
 
 ---
 
@@ -496,13 +507,15 @@ ordered so that the highest-value core lands first and each builds on the last.
   Rhai host; scripts install to `~/.nessemble/scripts` and resolve at assemble time.
 
 ### Phase 9 — Documentation, website & release packaging
-- **Scope:** mdBook documentation + static website generation (§6.6), ported from
-  the in-scope `docs/pages/*.md`; release pipeline producing the **v1.1.1-matching
-  artifacts** for all five platforms — `.pkg` (macOS), `amd64.deb`, `i386.deb`,
-  `win32.exe`+`.msi`, `win64.exe`+`.msi` — via `cargo-deb`, `cargo-wix`,
-  `pkgbuild`/`cargo-bundle`, and raw target-triple builds.
-- **Acceptance:** docs + website build to static output; all seven release
-  artifacts are produced for the five targets and the CLI binaries run on each.
+- **Scope:** mdBook documentation (clean theme, in-scope `docs/pages/*.md`) + the
+  **existing website reproduced as-is** (§6.6), both published to GitHub Pages;
+  release pipeline producing the **v1.1.1-matching artifacts** for all five
+  platforms — `.pkg` (macOS), `amd64.deb`, `i386.deb`, and **both**
+  `win32.exe`+`win32.msi` and `win64.exe`+`win64.msi` (Q-e) — via `cargo-deb`,
+  `cargo-wix`, `pkgbuild`/`cargo-bundle`, and raw target-triple builds.
+- **Acceptance:** docs + website build to static output deployable to GitHub
+  Pages; all **seven** release artifacts are produced for the five targets and
+  the CLI binaries run on each.
 
 > **A WASM build/playground is deferred (D9)** — a candidate follow-up phase once
 > the native build is complete; not required for this plan.
@@ -549,7 +562,7 @@ ordered so that the highest-value core lands first and each builds on the last.
 | Distinguishing "quirk to drop" from "behavior to match" (A3) | Wrong deviation | Every intentional divergence goes on a reviewed "known deviations" list with rationale |
 | flex/bison edge cases (start-conditions, greedy rules) | Parser mismatch | Hand-written parser mirrored against grammar; targeted lexer tests |
 | Cross-compiling to Linux i386 / win32 / win64 | Broken/absent artifacts | Choose **pure-Rust** deps (Rhai, `image`, Fluent); exercise all five target triples in the release pipeline early |
-| Rhai host API differs from the JS/Lua/Scheme model | Bundled/custom scripts break | Port bundled `ease` script; define & document a stable Rhai pseudo-op API; confirm no external scripts must be preserved (Q-a) |
+| Rhai host API differs from the JS/Lua/Scheme model | `ease` script behavior changes | Port the single bundled `ease` script; define & document a stable Rhai pseudo-op API (no external scripts to preserve, per Q-a) |
 | Floating-point in expressions (`pow`, `/`) | Off-by-one divergence | Match C integer-cast semantics exactly; property tests |
 | Fluent migration from gettext strings | Localization gaps | Seed `en-US.ftl` directly from C strings; verify English output matches the oracle |
 | Packaging tools (`cargo-wix`/`cargo-deb`/`pkgbuild`) per platform | Release friction | Stand up the packaging pipeline in Phase 9 with a smoke-install check per target |
@@ -614,29 +627,24 @@ as the authoritative directions for this plan.
 | E13 | Repo | **Fresh start** — `nessemble-rs` contains **no C code**. |
 | E14 | Parity source | **No CI build of C.** Parity is checked against the **v1.1.1 release binaries**. |
 
-### New follow-up questions
+### Follow-up decisions (resolved)
 
-These are minor and do not block starting Phase 0; sensible defaults are noted.
+| # | Topic | Decision |
+|---|-------|----------|
+| Q-a | Scripting migration | Only the **default `ease` script** needs to exist; port it to the chosen language (**Rhai**). No external/user script ecosystem to preserve. |
+| Q-b | Docs/website | The **marketing website is reproduced the same** (from `website/static`); the **docs site uses a clean theme** (mdBook). **Both deploy to GitHub Pages.** |
+| Q-c | Locales | Ship **`en-US` only**, but make adding locales easy (the Fluent layout does this). |
+| Q-d | Parity host | **Linux parity is authoritative**; macOS/Windows are build/packaging targets. |
+| Q-e | Windows artifacts | Reproduce **both** the `.exe` and the `.msi` for each Windows arch. |
 
-- **Q-a (scripting migration):** Beyond the bundled `ease` script, is there any
-  *external / user-authored* script ecosystem that must keep working? If yes, we
-  should design the Rhai host API to ease migration (or provide a shim).
-  *Default assumption: only the bundled scripts need porting (the registry that
-  distributed third-party scripts is out of scope).*
-- **Q-b (docs/website fidelity & hosting):** For the generated website/docs, do
-  you want to **match the current site's look/branding** (nessemble.com theme),
-  or is a clean modern default fine? And what's the intended **host** (e.g.
-  GitHub Pages)? *Default: clean mdBook theme, output deployable to GitHub Pages.*
-- **Q-c (locales):** Ship only **`en-US`** initially (the only catalog present in
-  C), adding others on demand? *Default: yes, `en-US` first with the framework
-  ready for more.*
-- **Q-d (macOS/Windows parity):** Since there is no CI and parity uses the release
-  binaries, is **Linux-based parity (amd64/i386) authoritative**, with
-  macOS/Windows treated as build/packaging targets? *Default: yes — the assembler
-  output is platform-independent.*
-- **Q-e (`.exe` vs `.msi`):** The release ships **both** a standalone `.exe` and
-  an `.msi` per Windows arch — confirm we should reproduce **both** (not just the
-  installer). *Default: reproduce both.*
+### New question
+
+- **Q-f (website copy):** The existing landing page describes nessemble as an
+  "assembler, disassembler, and simulator." Since `nessemble-rs` is
+  assembler-only and out-of-scope features must not be mentioned, I plan to
+  **update that copy to "assembler"** while keeping the layout/theme identical.
+  Confirm that's acceptable (this is the only intended deviation from
+  "reproduce the website the same"). *Default: make the edit.*
 
 ---
 
