@@ -31,6 +31,14 @@ prioritizes:
    (three embedded scripting languages, the web/registry server stack) pending
    product decisions.
 
+**Scope note:** the **disassembler/reassembler**, the **simulator/debugger**,
+and the **package-registry functionality** (install/publish/search + user auth)
+are **explicitly out of scope** for this reimplementation. `nessemble-rs`
+targets the **assembler** (plus its media importers, CLI, config, and WASM
+build). The sections below retain a full inventory of the original C tool for
+context, but out-of-scope subsystems are marked as such and are **not** part of
+any delivery phase.
+
 The core first-party C code is **~12.7k LOC** plus **~770 lines** of flex/bison
 grammar. Third-party vendored code is **~105k LOC** (mostly the Duktape JS
 engine, Lua 5.1.5, and TinyScheme), almost all of which maps to existing Rust
@@ -44,14 +52,17 @@ Derived from `src/main.c`, `src/usage.c`, the grammar, and `docs/pages/*.md`.
 
 ### 2.1 Primary modes (per-invocation)
 
-| Mode | Flag / command | Description |
-|------|----------------|-------------|
-| Assemble | *(default)* | Assemble `.asm` → raw binary or iNES `.nes` ROM |
-| Disassemble | `-d` / `--disassemble` | ROM/binary → assembly listing |
-| Reassemble | `-R` / `--reassemble` | Disassemble then re-assemble (round-trip) |
-| Simulate | `-s` / `--simulate` | Interactive 6502 CPU simulator / debugger (REPL) |
-| Check | `-c` / `--check` | Parse + validate only, no output |
-| Coverage | `-C` / `--coverage` | Emit code-coverage data for a ROM |
+| Mode | Flag / command | Description | Scope |
+|------|----------------|-------------|-------|
+| Assemble | *(default)* | Assemble `.asm` → raw binary or iNES `.nes` ROM | **In scope** |
+| Check | `-c` / `--check` | Parse + validate only, no output | **In scope** |
+| Coverage | `-C` / `--coverage` | Emit code-coverage data for a ROM | **In scope** |
+| Disassemble | `-d` / `--disassemble` | ROM/binary → assembly listing | **Out of scope** |
+| Reassemble | `-R` / `--reassemble` | Disassemble then re-assemble (round-trip) | **Out of scope** |
+| Simulate | `-s` / `--simulate` | Interactive 6502 CPU simulator / debugger (REPL) | **Out of scope** |
+
+> `-C`/coverage output describes a ROM; the assembler already tracks coverage
+> during emission, so it stays in scope even though disassembly does not.
 
 ### 2.2 Assembler feature set
 
@@ -78,7 +89,9 @@ Derived from `src/main.c`, `src/usage.c`, the grammar, and `docs/pages/*.md`.
 - **List file** output (`-l`), symbol/label tables.
 - Reads from a file, stdin (piped), or (in the JS build) an in-memory FS.
 
-### 2.3 Simulator / debugger
+### 2.3 Simulator / debugger — **OUT OF SCOPE**
+
+*(Retained here for context only; not part of any delivery phase.)*
 
 - Full documented + illegal 6502 opcode execution, cycle counting.
 - REPL commands: registers/flags inspection & set, step/steps, goto, memory
@@ -87,14 +100,20 @@ Derived from `src/main.c`, `src/usage.c`, the grammar, and `docs/pages/*.md`.
 
 ### 2.4 Tooling / ecosystem commands
 
+**In scope:**
+
 - `init` — scaffold a new project.
-- `config` (get/set/list), `registry` (get/set).
-- Package manager: `install`, `uninstall`, `publish`, `info`, `ls`, `search`
-  against an HTTP registry (`http://www.nessemble.com/registry` by default).
-- User/auth: `adduser`, `login`, `logout`, `forgotpassword`, `resetpassword`.
+- `config` (get/set/list).
 - `reference` (opcode/pseudo reference lookup, incl. QR code output),
   `scripts` (install bundled custom-pseudo scripts).
 - `--version`, `--license`, `--help`, man-style usage; **i18n** via gettext.
+
+**Out of scope** (package-registry functionality):
+
+- `registry` (get/set) — configures the registry endpoint.
+- Package manager: `install`, `uninstall`, `publish`, `info`, `ls`, `search`
+  against an HTTP registry (`http://www.nessemble.com/registry` by default).
+- User/auth: `adduser`, `login`, `logout`, `forgotpassword`, `resetpassword`.
 
 ### 2.5 Build targets
 
@@ -122,11 +141,11 @@ First-party sources under `src/` (~12.7k LOC) plus grammar (~770 LOC):
 | Assembler core | `assemble.c`, `instructions.c`, `macro.c`, `math.c` | symbol table, ROM/coverage buffers, addressing-mode emit, iNES banking |
 | Pseudo-ops | `pseudo/*.c` (38 files) | one file per directive |
 | Opcode tables | `static/opcodes.csv` → generated `opcodes.c` | 256 rows; mnemonic, mode, opcode, length, timing, meta |
-| Disassembler | `disassemble.c` | 711 LOC |
-| Simulator | `simulate.c`, `simulate/opcode.c`, `simulate/illegal.c` | ~2.1k LOC CPU + REPL |
-| Media/format | `png.c`, `wav.c`, `zip.c`, `hash.c`, `json.c` | PNG (stb), WAV, tar/gzip (udeflate), SHA/HMAC, JSON (jsmn) |
+| Disassembler | `disassemble.c` | 711 LOC — **OUT OF SCOPE** |
+| Simulator | `simulate.c`, `simulate/opcode.c`, `simulate/illegal.c` | ~2.1k LOC CPU + REPL — **OUT OF SCOPE** |
+| Media/format | `png.c`, `wav.c`, `zip.c`, `hash.c`, `json.c` | PNG (stb), WAV needed by importers; tar/gzip (udeflate), SHA/HMAC, JSON (jsmn) used only by the **out-of-scope** registry |
 | Config/home | `config.c`, `home.c` | `~/.nessemble/` config & paths |
-| Registry/net | `registry.c`, `api.c`, `user.c`, `http.c` | **hand-rolled raw-socket HTTP client** (no TLS lib) |
+| Registry/net | `registry.c`, `api.c`, `user.c`, `http.c` | **hand-rolled raw-socket HTTP client** (no TLS lib) — **OUT OF SCOPE** |
 | Scripting | `scripting/{js,lua,scm,cmd,so}.c` | Duktape / Lua / TinyScheme / shell / shared-object custom pseudo-ops |
 | Output | `list.c`, `coverage.c` | list file, coverage report |
 | Misc | `i18n.c`, `pager.c`, `reference.c`, `scripts.c`, `init.c`, `error.c`, `utils.c` | gettext, pager, reference, scaffolding, `setjmp`-based error handling |
@@ -160,20 +179,26 @@ Vendored C (~105k LOC) and system deps mapped to the Rust ecosystem:
 |--------------|---------|---------------------------|
 | flex / bison | lexer / parser generators | `logos` (lexer) + hand-written parser, or `lalrpop` |
 | `getopt_long` | CLI parsing | `clap` (derive) |
-| jsmn | JSON parsing | `serde` + `serde_json` |
-| udeflate `deflate.c` | gzip/inflate for tar.gz | `flate2` |
-| tar handling (`zip.c`) | untar registry packages | `tar` crate |
 | stb_image / stb_image_write | PNG decode/encode | `image` (or `png`) |
-| hand-rolled SHA/HMAC (`hash.c`) | auth signing | `sha2` + `hmac` |
-| raw-socket HTTP (`http.c`) | registry/user API client | `ureq` (blocking) or `reqwest` — **adds real TLS** |
-| Duktape | embedded JavaScript | `boa_engine` / `rquickjs` — *or drop* (see Q) |
-| Lua 5.1.5 | embedded Lua | `mlua` (Lua 5.1 mode) — *or drop* |
-| TinyScheme | embedded Scheme | `steel` / custom — *or drop* |
-| shared-object (`so.c`) | native plugin pseudo-ops | `libloading` — *or drop* |
 | gettext (`i18n.c`) | translations | `fluent`/`gettext` crate, or defer |
 | QR code (`reference.c`) | terminal QR | `qrcode` crate |
 | pager (`pager.c`) | `$PAGER`/less | small shell-out, or `minus` |
 | Emscripten | WASM build | native `wasm32-unknown-unknown` + `wasm-bindgen` |
+| Duktape | embedded JavaScript (custom pseudo-ops) | `boa_engine` / `rquickjs` — *or drop* (see Q) |
+| Lua 5.1.5 | embedded Lua (custom pseudo-ops) | `mlua` (Lua 5.1 mode) — *or drop* |
+| TinyScheme | embedded Scheme (custom pseudo-ops) | `steel` / custom — *or drop* |
+| shared-object (`so.c`) | native plugin pseudo-ops | `libloading` — *or drop* |
+
+**Out-of-scope dependencies** (only needed by the excluded package-registry
+subsystem — listed for completeness):
+
+| C dependency | Purpose | Rust equivalent (if ever re-scoped) |
+|--------------|---------|-------------------------------------|
+| jsmn | JSON parsing (registry) | `serde` + `serde_json` |
+| udeflate `deflate.c` | gzip/inflate for tar.gz (registry) | `flate2` |
+| tar handling (`zip.c`) | untar registry packages | `tar` crate |
+| hand-rolled SHA/HMAC (`hash.c`) | auth signing (registry) | `sha2` + `hmac` |
+| raw-socket HTTP (`http.c`) | registry/user API client | `ureq` / `reqwest` |
 
 ---
 
@@ -182,23 +207,36 @@ Vendored C (~105k LOC) and system deps mapped to the Rust ecosystem:
 ### 5.1 Goals
 
 - **G1 — Assembler parity:** byte-for-byte identical ROM output vs C v1.1.1 for
-  the existing test corpus (`test/examples`, `test/opcodes`, `test/nerdy-nights`,
+  the in-scope test corpus (`test/examples`, `test/opcodes`, `test/nerdy-nights`,
   `test/errors`) and for the same CLI surface.
-- **G2 — Disassembler & simulator parity:** matching listings and CPU
-  behavior/cycle counts against C output and `test/integration`.
-- **G3 — Memory safety & maintainability:** idiomatic Rust, no global mutable
+- **G2 — Memory safety & maintainability:** idiomatic Rust, no global mutable
   state, structured error/diagnostics, thorough tests.
-- **G4 — Cross-platform + WASM:** Linux/macOS/Windows binaries and a
-  `wasm32` library retaining the playground use case.
-- **G5 — CLI compatibility:** same flags, subcommands, exit codes, and
-  primary stdout/stderr contract so existing scripts keep working.
+- **G3 — Cross-platform + WASM:** Linux/macOS/Windows binaries and a
+  `wasm32` library retaining the (assembler) playground use case.
+- **G4 — CLI compatibility:** same flags, subcommands, exit codes, and
+  primary stdout/stderr contract for the in-scope surface so existing scripts
+  keep working. Out-of-scope subcommands/flags are either omitted or emit a
+  clear "not supported" message (decision pending — see Q).
 
-### 5.2 Non-Goals (unless requested)
+### 5.2 Non-Goals / Out of Scope (unless requested)
 
+- The **disassembler / reassembler** (`-d`, `-R`; `disassemble.c`).
+- The **simulator / debugger** (`-s`; `simulate.c`, `simulate/opcode.c`,
+  `simulate/illegal.c`, and the REPL).
+- The **package-registry functionality**: the package manager
+  (`install`/`uninstall`/`publish`/`info`/`ls`/`search`), the `registry`
+  get/set command, user/auth commands (`adduser`/`login`/`logout`/
+  `forgotpassword`/`resetpassword`), and the underlying HTTP client, JSON,
+  tar/gzip, and HMAC machinery that exist solely to serve them
+  (`registry.c`, `api.c`, `user.c`, `http.c`, `json.c`, `zip.c`, `hash.c`).
 - Reimplementing the **Python Flask registry/website/docs/CDN servers**.
 - Reimplementing the **TypeScript docs frontend**.
 - Bug-for-bug replication of *internal* quirks that no test observes (we will
   match observable behavior, and flag intentional deviations).
+
+> These exclusions are intentional design decisions for this effort, not
+> oversights. If any is later re-scoped, the mapping tables above and the phase
+> list below can be extended without disturbing the assembler core.
 
 ### 5.3 Principles
 
@@ -221,21 +259,19 @@ nessemble-rs/
 ├─ crates/
 │  ├─ nessemble-core/         # lexer, parser, AST, assembler, symbol table,
 │  │                          #   iNES/banking, pseudo-ops, expressions
-│  ├─ nessemble-isa/          # 6502 opcode tables (from opcodes.csv), modes,
-│  │                          #   shared by assembler/disassembler/simulator
-│  ├─ nessemble-disasm/       # disassembler + reassemble
-│  ├─ nessemble-sim/          # 6502 simulator + debugger REPL
+│  ├─ nessemble-isa/          # 6502 opcode tables (from opcodes.csv), modes
 │  ├─ nessemble-media/        # PNG/CHR, palette, RLE, WAV/DPCM importers
-│  ├─ nessemble-registry/     # config, HTTP client, package mgr, user/auth
 │  ├─ nessemble-script/       # custom pseudo-op scripting host (feature-gated)
 │  ├─ nessemble-cli/          # clap CLI, dispatch, i18n, pager, reference, init
-│  └─ nessemble-wasm/         # wasm-bindgen wrapper for the playground
+│  └─ nessemble-wasm/         # wasm-bindgen wrapper for the (assembler) playground
 └─ tests/                     # differential + golden-ROM harness
 ```
 
-Rationale: the ISA tables and core types are shared by assemble/disasm/sim, so
-they live in leaf crates to avoid cycles. Scripting and registry are optional
-(`--features`) so the default build is small and dependency-light.
+Rationale: the ISA tables and core types anchor the assembler, so they live in a
+leaf crate. Scripting is optional (`--features`) so the default build is small
+and dependency-light. The `disasm`, `sim`, and `registry` crates are
+**intentionally absent** — those subsystems are out of scope (§5.2); the layout
+leaves clean seams to add them later if re-scoped.
 
 ### 6.2 Lexer / parser strategy
 
@@ -320,57 +356,47 @@ ordered so that the highest-value core lands first and each builds on the last.
 - **Acceptance:** `incpng/incpal/incrle/incwav/font/defchr` examples
   byte-identical; PNG/WAV edge cases covered.
 
-### Phase 6 — Disassembler & reassemble
-- **Scope:** `nessemble-disasm`: ROM → listing, `-d`, `-R` round-trip, coverage
-  output (`-C`).
-- **Acceptance:** disassembly listings match C output; `-R` round-trips the
-  corpus ROMs; coverage matches.
+### Phase 6 — CLI completeness, config, i18n, reference, init
+- **Scope:** in-scope `clap` CLI surface & exit codes (assemble/check/coverage +
+  `init`, `config`, `reference`, `scripts`, `--version`/`--license`/`--help`);
+  `~/.nessemble` layout; `reference` (+QR); pager; i18n framework (strings can be
+  ported incrementally). Out-of-scope subcommands/flags (`-d`/`-R`/`-s`,
+  `registry`, package-manager, user/auth) are omitted or emit a clear
+  "not supported in this build" message (decision pending — see Q).
+- **Acceptance:** CLI help/usage/exit-code parity for the in-scope surface;
+  `init` output matches; config round-trips.
 
-### Phase 7 — Simulator & debugger REPL
-- **Scope:** `nessemble-sim`: full documented + illegal opcode execution, cycle
-  counting, all REPL commands, recipe-file mode, `test/integration` scenarios.
-- **Acceptance:** `test/integration` recipes reproduce identical register/flag/
-  memory/cycle traces vs C.
+### Phase 7 — WASM build, scripting host, packaging & cutover
+- **Scope:** `wasm32` library + `wasm-bindgen` bindings for the (assembler)
+  playground; scripting host (`nessemble-script`) — scope per product decision
+  (drop / JS-only / all three); custom pseudo-op resolution & `scripts` install;
+  distribution packaging (`.deb`/`.pkg`/`.msi`/npm); docs update.
+- **Acceptance:** the assembler playground works against the WASM build; chosen
+  scripting path passes `test/examples/custom`/`ease`; release artifacts build.
 
-### Phase 8 — CLI completeness, config, i18n, reference, init
-- **Scope:** full `clap` CLI surface & exit codes; `init` scaffolding; `config`
-  get/set/list; `~/.nessemble` layout; `reference` (+QR); `--license`,
-  `--version`, usage text; pager; i18n framework (strings can be ported
-  incrementally).
-- **Acceptance:** CLI help/usage/exit-code parity; `init` output matches; config
-  round-trips.
-
-### Phase 9 — Registry, package manager & auth (networked)
-- **Scope:** `nessemble-registry`: HTTP client (via `ureq`/`reqwest`, **now with
-  TLS**), `install/uninstall/publish/info/ls/search`, `registry` get/set,
-  user `adduser/login/logout/forgot/reset`, tar.gz + JSON handling, HMAC signing.
-- **Acceptance:** integration tests against a mock registry server; `test/registry`
-  scenarios pass. *(Depends on Q about registry availability/TLS.)*
-
-### Phase 10 — WASM build, scripting host, packaging & cutover
-- **Scope:** `wasm32` library + `wasm-bindgen` bindings for the playground;
-  scripting host (`nessemble-script`) — scope per product decision (drop /
-  JS-only / all three); custom pseudo-op resolution & `scripts` install;
-  distribution packaging (`.deb`/`.pkg`/`.msi`/npm); docs update; deprecate C.
-- **Acceptance:** playground works against the WASM build; chosen scripting
-  path passes `test/examples/custom`/`ease`; release artifacts build.
+> **Removed from scope:** the earlier drafts included a disassembler/reassemble
+> phase, a simulator/debugger phase, and a registry/package-manager phase. These
+> are now out of scope (§5.2) and have been dropped from the plan.
 
 ---
 
 ## 8. Testing & Validation Strategy
 
-- **Differential (oracle) testing:** for every corpus input, run both the
-  pinned C binary and `nessemble-rs`, and assert byte-identical ROMs / identical
-  listings / identical simulator traces / identical exit codes & key stderr.
+- **Differential (oracle) testing:** for every in-scope corpus input, run both
+  the pinned C binary and `nessemble-rs`, and assert byte-identical ROMs /
+  identical exit codes & key stderr.
 - **Golden files:** commit C-generated outputs as goldens so CI does not require
   rebuilding the C tool every run (but a scheduled job re-verifies against it).
-- **Existing corpus reuse:** `test/opcodes` (343 files), `test/examples` (157),
-  `test/nerdy-nights` (32), `test/errors` (62), `test/integration` (13),
-  `test/registry` (22) — port the Python drivers into the Rust harness.
-- **Unit tests** per crate (lexer, expression eval, addressing modes, CPU ops).
-- **Property tests** (`proptest`) for expression evaluation and disasm↔asm
-  round-trips.
-- **Fuzzing** (`cargo-fuzz`) on the parser and ROM/PNG/WAV loaders.
+- **Existing corpus reuse (in scope):** `test/opcodes` (343 files),
+  `test/examples` (157), `test/nerdy-nights` (32), `test/errors` (62) — port the
+  Python drivers into the Rust harness. *(`test/integration` targets the
+  simulator and `test/registry` targets the package registry; both are out of
+  scope and excluded.)*
+- **Unit tests** per crate (lexer, expression eval, addressing modes,
+  media importers).
+- **Property tests** (`proptest`) for expression evaluation and iNES/banking
+  offset math.
+- **Fuzzing** (`cargo-fuzz`) on the parser and PNG/WAV asset loaders.
 - **Fixed-cap behaviors:** explicitly test the observable limits/errors the C
   tool enforces (include depth, symbol/macro caps) so we match or consciously
   change them.
@@ -383,13 +409,11 @@ ordered so that the highest-value core lands first and each builds on the last.
 |------|--------|-----------|
 | Undocumented assembler quirks not covered by tests | Silent output divergence | Broad differential testing beyond the shipped corpus; fuzz-generated inputs run through both tools |
 | flex/bison edge cases (start-conditions, greedy rules) | Parser mismatch | Hand-written parser mirrored against grammar; targeted lexer tests |
-| Simulator cycle-accuracy & illegal-opcode nuances | Sim trace mismatch | Port `simulate/opcode.c`+`illegal.c` carefully; trace-diff `test/integration` |
 | Scripting engines (Duktape/Lua/TinyScheme) are huge | Scope blow-up | Feature-gate & likely re-scope (see Q); Lua via `mlua` cheapest to retain |
-| Hand-rolled HTTP has no TLS; Rust adds TLS | Behavior change vs server | Confirm registry endpoints/protocol; likely a net improvement |
-| Registry server may be offline/deprecated | Phase 9 untestable live | Mock server for tests; confirm intent (Q) |
 | Floating-point in expressions (`pow`, `/`) | Off-by-one divergence | Match C integer-cast semantics exactly; property tests |
-| WASM parity (Emscripten FS/EM_ASM hooks) | Playground breakage | Redesign JS interop via `wasm-bindgen`; keep API used by playground |
+| WASM parity (Emscripten FS/EM_ASM hooks) | Playground breakage | Redesign JS interop via `wasm-bindgen`; keep the assembler API used by playground |
 | i18n/gettext catalogs | Localization gaps | Framework early, translate strings incrementally |
+| Out-of-scope flags/subcommands still invoked by users/scripts | Confusing failures | Decide (Q) between omitting them vs. a clear "not supported" message + non-zero exit |
 
 ---
 
@@ -397,23 +421,23 @@ ordered so that the highest-value core lands first and each builds on the last.
 
 - **Critical path:** Phase 0 → 1 → 2 → 3 → 4 (the assembler) delivers the bulk
   of user value and unblocks everything else.
-- **Parallelizable after Phase 2/3:** `nessemble-media` (Phase 5),
-  `nessemble-disasm` (Phase 6), and `nessemble-sim` (Phase 7) share only the
-  ISA crate and can proceed independently.
-- **Independent tracks:** registry/net (Phase 9) and packaging/WASM (Phase 10)
-  depend mostly on the CLI shell (Phase 8), not on assembler internals.
+- **Parallelizable after Phase 2/3:** `nessemble-media` (Phase 5) shares only the
+  core/ISA crates and can proceed independently of the CLI work.
+- **Independent track:** packaging/WASM/scripting (Phase 7) depends mostly on the
+  CLI shell (Phase 6), not on assembler internals.
 
 ---
 
 ## 11. Success Criteria (Definition of Done for the migration)
 
-1. `nessemble-rs` assembles/disassembles/simulates the entire ported test
-   corpus with byte/trace parity vs C v1.1.1.
-2. CLI flags, subcommands, and exit codes match documented behavior.
-3. Cross-platform native builds + a working `wasm32` playground module.
+1. `nessemble-rs` **assembles** the entire in-scope test corpus with byte parity
+   vs C v1.1.1 (assemble/check/coverage, incl. media importers).
+2. In-scope CLI flags, subcommands, and exit codes match documented behavior;
+   out-of-scope commands behave per the agreed decision (omitted vs. clear
+   "not supported").
+3. Cross-platform native builds + a working `wasm32` assembler playground module.
 4. Clean `cargo fmt`/`clippy`; documented crates; CI differential suite green.
-5. Registry/package features work against the (mocked or live) registry.
-6. Scripting scope delivered per the agreed product decision.
+5. Scripting scope delivered per the agreed product decision.
 
 ---
 
@@ -422,51 +446,56 @@ ordered so that the highest-value core lands first and each builds on the last.
 These materially affect scope, sequencing, and effort. Grouped by priority.
 
 ### A. Scope & priorities
-1. **Primary objective:** Is the goal a faithful 1:1 port of *all* features, or
-   primarily a best-in-class **assembler/disassembler/simulator** with the
-   registry/scripting/WASM pieces as optional/later?
-2. **Parity bar:** Is **byte-for-byte ROM parity** with C v1.1.1 a hard
+1. **Confirmed scope:** the effort targets the **assembler** (assemble / check /
+   coverage + media importers + CLI/config/init/reference + WASM). The
+   **disassembler/reassembler**, **simulator/debugger**, and **package-registry
+   functionality** are **out of scope** (§5.2). Please confirm, or flag any of
+   these you actually want re-included.
+2. **Out-of-scope CLI flags/commands:** for `-d`/`-R`/`-s`, `registry`, the
+   package manager, and user/auth — should `nessemble-rs` **omit them entirely**
+   (unknown-flag error) or **recognize them and print a clear "not supported in
+   this build" message** with a non-zero exit? (Matters for scripts that call
+   the old binary.)
+3. **Parity bar:** Is **byte-for-byte ROM parity** with C v1.1.1 a hard
    requirement, or is "correct + documented behavior" acceptable where the C
    tool has quirks?
-3. **Version pin:** Should we target the current `master` of upstream, the
+4. **Version pin:** Should we target the current `master` of upstream, the
    v1.1.1 release, or the latest published binary? (Analysis here is v1.1.1.)
 
-### B. Scripting subsystem (largest scope lever)
-4. **Custom pseudo-op scripting:** Keep it at all? If so, which engines —
+### B. Scripting subsystem (largest remaining scope lever)
+5. **Custom pseudo-op scripting:** Keep it at all? If so, which engines —
    **all three** (JS/Lua/Scheme), **JS-only**, **Lua-only**, or replace with a
    single modern embedded language? (This decides whether we pull in
    `boa`/`rquickjs`, `mlua`, and/or `steel`.)
-5. **Native `.so` plugins** (`scripting/so.c`): retain via `libloading`, or drop
+6. **Native `.so` plugins** (`scripting/so.c`): retain via `libloading`, or drop
    for safety/portability?
 
-### C. Registry / network / ecosystem
-6. **Registry server:** Is `nessemble.com/registry` still operational and in
-   scope? Should the Rust client talk to the existing protocol, or is the
-   package-manager feature being retired?
-7. **TLS:** OK to introduce real HTTPS (the C client is plaintext-socket)? Any
-   constraint on `reqwest` (rustls vs native-tls) vs the lighter `ureq`?
-8. **Server components** (Python Flask registry/website/docs/CDN + TS frontend):
-   confirmed **out of scope**?
+### C. Ecosystem
+7. **Server components** (Python Flask registry/website/docs/CDN + TS frontend):
+   confirmed **out of scope**? *(The client-side package-registry commands are
+   already out of scope per §5.2; this confirms the server side too.)*
 
 ### D. Platforms & distribution
-9. **Target platforms:** Which must ship — Linux, macOS (Intel/ARM), Windows,
+8. **Target platforms:** Which must ship — Linux, macOS (Intel/ARM), Windows,
    WASM? Any 32-bit or specific-MSRV requirement?
-10. **WASM/playground:** Must the docs "playground" keep working? If so, is a
-    `wasm-bindgen` API redesign acceptable, or must the existing JS module API
-    be preserved exactly?
-11. **Packaging:** Do we need the same artifacts (`.deb`, `.pkg`, `.msi`, npm),
+9. **WASM/playground:** Must the docs "playground" keep working (assembler-only,
+   now that the simulator/disassembler are out of scope)? If so, is a
+   `wasm-bindgen` API redesign acceptable, or must the existing JS module API
+   be preserved exactly?
+10. **Packaging:** Do we need the same artifacts (`.deb`, `.pkg`, `.msi`, npm),
     or is `cargo install` / GitHub releases sufficient initially?
 
 ### E. Compatibility & process
-12. **i18n:** Retain gettext-style translations (any locales beyond `en-US`
+11. **i18n:** Retain gettext-style translations (any locales beyond `en-US`
     actually used?), or defer localization?
-13. **CLI contract:** Must every flag/exit-code/stdout string match exactly
-    (for downstream scripts), or is a cleaned-up but documented CLI acceptable?
-14. **Repo strategy:** Build `nessemble-rs` in this repo alongside/replacing the
+12. **CLI contract:** Must every in-scope flag/exit-code/stdout string match
+    exactly (for downstream scripts), or is a cleaned-up but documented CLI
+    acceptable?
+13. **Repo strategy:** Build `nessemble-rs` in this repo alongside/replacing the
     C tree, or as a fresh tree? Any commit/PR granularity or licensing
     (GPL — `COPYING`) constraints to preserve?
-15. **Reference-tool availability:** Can CI build the C `nessemble` (flex, bison,
-    Lua, Emscripten toolchains) for differential testing, or should we rely
+14. **Reference-tool availability:** Can CI build the C `nessemble` (flex, bison,
+    Emscripten toolchains) for differential testing, or should we rely
     solely on committed golden files?
 
 ---
