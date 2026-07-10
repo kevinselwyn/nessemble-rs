@@ -442,6 +442,12 @@ ordered so that the highest-value core lands first and each builds on the last.
   through both the release binary and `nessemble-rs` and diffs bytes.
 - **Acceptance:** harness produces baseline golden ROMs from the v1.1.1 binary and
   a diff report scaffold.
+- **Status: ✅ complete.** Workspace + crate seams build clean (`fmt`/`clippy`/
+  `test` green); `nessemble-isa` generates the 256-entry opcode table from
+  `opcodes.csv` (with tests); minimal `nessemble` CLI runs; 122 assemble fixtures
+  imported to `tests/corpus/`; `xtask` implements `fetch-oracle`, `verify-goldens`,
+  and `parity`. `verify-goldens` confirms the v1.1.1 oracle reproduces **all 119**
+  non-scripting goldens (3 scripting cases deferred to Phase 8).
 
 ### Phase 1 — Lexer + expression/number evaluation
 - **Scope:** `logos` lexer covering all tokens in `nessemble.l`; number bases,

@@ -1,0 +1,20 @@
+[package]
+name = "nessemble-cli"
+description = "Command-line interface for nessemble-rs, a 6502/NES assembler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "nessemble"
+path = "src/main.rs"
+
+[dependencies]
+nessemble-core.workspace = true
+clap.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

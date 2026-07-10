@@ -1,0 +1,12 @@
+[package]
+name = "nessemble-isa"
+description = "6502 instruction set tables (opcodes, addressing modes) for nessemble-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,18 @@
+[package]
+name = "nessemble-script"
+description = "Custom pseudo-op scripting host (Rhai) for nessemble-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Scripting is opt-in; the default build stays lean. The Rhai engine is wired
+# up in Phase 8.
+default = []
+rhai = []
+
+[lints.rust]
+unsafe_code = "forbid"
