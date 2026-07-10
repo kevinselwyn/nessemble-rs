@@ -13,6 +13,18 @@ use std::process::ExitCode;
 use clap::Parser;
 use nessemble_core::{assemble, AssembleError, Options};
 
+/// The source name reported in diagnostics (basename, like the reference tool).
+fn source_name(input: &Option<PathBuf>) -> String {
+    match input {
+        Some(path) => path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("stdin")
+            .to_string(),
+        None => "stdin".to_string(),
+    }
+}
+
 /// Return codes mirroring the reference tool (`RETURN_OK` / `RETURN_EPERM`).
 const RETURN_OK: u8 = 0;
 const RETURN_EPERM: u8 = 1;
@@ -132,12 +144,15 @@ fn run(cli: Cli) -> ExitCode {
             }
             ExitCode::from(RETURN_OK)
         }
-        Err(AssembleError::NotImplemented) => {
-            eprintln!("nessemble: the assembler is not yet implemented (work in progress)");
-            ExitCode::from(RETURN_EPERM)
-        }
-        Err(e) => {
-            eprintln!("nessemble: {e}");
+        Err(AssembleError::Diagnostic(d)) => {
+            // Matches the reference format:
+            // `Error in `<file>` on line <line>: <message>`
+            eprintln!(
+                "Error in `{}` on line {}: {}",
+                source_name(&cli.input),
+                d.line,
+                d.message
+            );
             ExitCode::from(RETURN_EPERM)
         }
     }
