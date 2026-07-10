@@ -115,6 +115,20 @@ pub enum Pseudo {
     Else,
     /// `.endif` — end the current conditional block.
     Endif,
+    /// `.incbin "file"[, offset[, limit]]` — raw binary include.
+    Incbin(String, Option<Expr>, Option<Expr>),
+    /// `.incpng "file"[, offset[, limit]]` — PNG → CHR tiles.
+    Incpng(String, Option<Expr>, Option<Expr>),
+    /// `.incpal "file"` — PNG → palette.
+    Incpal(String),
+    /// `.incrle "file"` — run-length-encoded binary include.
+    Incrle(String),
+    /// `.incwav "file"[, amplitude]` — WAV → DPCM.
+    Incwav(String, Option<Expr>),
+    /// `.font <start>[, <end>]` — bundled font glyphs for an ASCII range.
+    Font(Vec<Expr>),
+    /// `.defchr <8 rows>` — an 8×8 tile defined inline (8 tile-digit rows).
+    Defchr(Vec<Expr>),
     /// A directive not yet implemented in this phase.
     Unsupported(String),
 }

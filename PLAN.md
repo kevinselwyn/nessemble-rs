@@ -525,6 +525,26 @@ ordered so that the highest-value core lands first and each builds on the last.
   `.incpal`, `.incrle`, `.incwav` (DPCM), `.font`, `.defchr`, `.chr`.
 - **Acceptance:** `incpng/incpal/incrle/incwav/font/defchr` examples
   byte-identical; PNG/WAV edge cases covered.
+- **Status: ✅ complete.** `nessemble-media` implements every importer as a pure
+  function returning the emitted bytes (the assembler writes them through its
+  normal `write_byte` path, so banking/coverage/conditional-gating still apply):
+  `.incbin` (offset/absolute-limit slicing), `.incpng` (PNG→CHR, two bitplanes
+  per 8×8 tile with tile offset/limit), `.incpal` (nearest-NES-palette scan, ≤4
+  colors), `.incrle` (run/literal RLE), `.incwav` (mono PCM→DPCM delta
+  modulation), `.font` (bundled glyphs over an ASCII range), and `.defchr`
+  (inline 8-row tiles). PNG decoding uses the pure-Rust **`image`** crate
+  (`to_rgb8`, matching `stbi_load(..., 3)`); the NES palette / 2-bit grayscale
+  matchers and the WAV parser reproduce `png.c`/`wav.c` exactly. The bundled
+  font is committed as `font.chr` — the byte-for-byte `.incpng` conversion of the
+  upstream `font.png` (regenerable via `cargo run -p nessemble-media --bin
+  gen-font`). Media file paths and the four `.incwav` error messages
+  (open/read/not-a-WAV/not-mono) plus `.incpng`'s "Could not load PNG" match the
+  reference. Parity: **119/119** goldens byte-for-byte — verified directly
+  against the v1.1.1 oracle for every media example and the six media-dependent
+  nerdy-nights programs. *Known deviation (A3):* the reference `.incwav` has an
+  inverted amplitude test that ignores the user's amplitude (always 24);
+  `nessemble-rs` honours the passed amplitude (default 24) — identical output for
+  the corpus, which uses 24.
 
 ### Phase 6 — CLI completeness, config, reference, init
 - **Scope:** in-scope `clap` CLI surface & exit codes (assemble/check/coverage +

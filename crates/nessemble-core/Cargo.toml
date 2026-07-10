@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 nessemble-isa.workspace = true
+nessemble-media.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
