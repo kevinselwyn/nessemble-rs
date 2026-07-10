@@ -102,6 +102,19 @@ pub enum Pseudo {
     Prg(Expr),
     Chr(Expr),
     Segment(String),
+    /// `.inestrn` — mark the iNES trainer region active (the trainer file's
+    /// bytes are spliced in by the preprocessor immediately after this).
+    InesTrn,
+    /// `.if <expr>` — begin a conditional block.
+    If(Expr),
+    /// `.ifdef <symbol>` — begin a conditional block on symbol existence.
+    Ifdef(String),
+    /// `.ifndef <symbol>` — begin a conditional block on symbol absence.
+    Ifndef(String),
+    /// `.else` — invert the current conditional block.
+    Else,
+    /// `.endif` — end the current conditional block.
+    Endif,
     /// A directive not yet implemented in this phase.
     Unsupported(String),
 }
@@ -117,9 +130,10 @@ pub enum Stmt {
     Pseudo(Pseudo),
 }
 
-/// A statement together with its 1-based source line.
+/// A statement together with its 1-based source line and source-file id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub stmt: Stmt,
     pub line: u32,
+    pub file: u32,
 }

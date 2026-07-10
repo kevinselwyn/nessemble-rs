@@ -62,11 +62,16 @@ pub enum Tok {
     CharReg(char),
 }
 
-/// A token together with its 1-based source line.
+/// A token together with its 1-based source line and source-file id.
+///
+/// The `file` id indexes a table of file display names maintained by the
+/// preprocessor (see `preprocess`); the lexer itself always emits `0` and the
+/// preprocessor rewrites it as it splices includes and expands macros.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub tok: Tok,
     pub line: u32,
+    pub file: u32,
 }
 
 /// Known pseudo-op names (without the leading dot).
@@ -113,6 +118,7 @@ impl<'a> Lexer<'a> {
         Some(Token {
             tok,
             line: self.line,
+            file: 0,
         })
     }
 
@@ -139,6 +145,7 @@ impl<'a> Lexer<'a> {
                     return Some(Token {
                         tok: Tok::Endl,
                         line,
+                        file: 0,
                     });
                 }
                 b'\r' => {
@@ -148,6 +155,7 @@ impl<'a> Lexer<'a> {
                     return Some(Token {
                         tok: Tok::Endl,
                         line,
+                        file: 0,
                     });
                 }
                 b' ' | b'\t' => {
@@ -184,6 +192,7 @@ impl<'a> Lexer<'a> {
         Token {
             tok: Tok::CharReg(c.to_ascii_uppercase() as char),
             line: self.line,
+            file: 0,
         }
     }
 
@@ -233,7 +242,7 @@ impl<'a> Lexer<'a> {
         };
         let line = self.line;
         self.pos += len;
-        Some(Token { tok, line })
+        Some(Token { tok, line, file: 0 })
     }
 
     /// Longest-match over the numeric/identifier/string/register rules, with
@@ -418,7 +427,7 @@ impl<'a> Lexer<'a> {
         let (len, tok) = best?;
         let line = self.line;
         self.pos += len;
-        Some(Token { tok, line })
+        Some(Token { tok, line, file: 0 })
     }
 }
 

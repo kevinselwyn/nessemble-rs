@@ -11,19 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use nessemble_core::{assemble, AssembleError, Options};
-
-/// The source name reported in diagnostics (basename, like the reference tool).
-fn source_name(input: &Option<PathBuf>) -> String {
-    match input {
-        Some(path) => path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("stdin")
-            .to_string(),
-        None => "stdin".to_string(),
-    }
-}
+use nessemble_core::{assemble, assemble_file, render_list_file, AssembleError, Options};
 
 /// Return codes mirroring the reference tool (`RETURN_OK` / `RETURN_EPERM`).
 const RETURN_OK: u8 = 0;
@@ -124,19 +112,23 @@ fn run(cli: Cli) -> ExitCode {
         }
     }
 
-    let source = match read_input(&cli.input) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("nessemble: could not read input: {e}");
-            return ExitCode::from(RETURN_EPERM);
-        }
+    // A named input resolves includes relative to its directory; stdin is
+    // assembled directly (includes relative to the working directory).
+    let result = match &cli.input {
+        Some(path) => assemble_file(path, &options),
+        None => match read_input(&cli.input) {
+            Ok(source) => assemble(&source, &options),
+            Err(e) => {
+                eprintln!("nessemble: could not read input: {e}");
+                return ExitCode::from(RETURN_EPERM);
+            }
+        },
     };
 
-    match assemble(&source, &options) {
+    match result {
         Ok(assembly) => {
-            let name = source_name(&cli.input);
             for w in &assembly.warnings {
-                eprintln!("Warning in `{}` on line {}: {}", name, w.line, w.message);
+                eprintln!("Warning in `{}` on line {}: {}", w.file, w.line, w.message);
             }
             if cli.check {
                 println!("No errors");
@@ -146,17 +138,18 @@ fn run(cli: Cli) -> ExitCode {
                 eprintln!("nessemble: could not write output: {e}");
                 return ExitCode::from(RETURN_EPERM);
             }
+            if let Some(list) = cli.list.as_deref() {
+                if let Err(e) = std::fs::write(list, render_list_file(&assembly.symbols)) {
+                    eprintln!("nessemble: could not write list file: {e}");
+                    return ExitCode::from(RETURN_EPERM);
+                }
+            }
             ExitCode::from(RETURN_OK)
         }
         Err(AssembleError::Diagnostic(d)) => {
             // Matches the reference format:
             // `Error in `<file>` on line <line>: <message>`
-            eprintln!(
-                "Error in `{}` on line {}: {}",
-                source_name(&cli.input),
-                d.line,
-                d.message
-            );
+            eprintln!("Error in `{}` on line {}: {}", d.file, d.line, d.message);
             ExitCode::from(RETURN_EPERM)
         }
     }
