@@ -486,6 +486,16 @@ ordered so that the highest-value core lands first and each builds on the last.
   `.color`/`.enum`/`.rs`/`.rsset`, `.inesprg/chr/map/mir/trn`.
 - **Acceptance:** full `test/examples` (excluding asset/scripting/macro/include
   cases) and `test/nerdy-nights` produce byte-identical `.nes` ROMs.
+- **Status: ✅ complete.** Full iNES output (16-byte header + PRG/CHR bank
+  layout with `empty_byte` fill), PRG/CHR banking and `.segment`/`.prg`/`.chr`,
+  and the directives `.checksum` (CRC-32), `.random` (reference LCG + `str2hash`
+  seed), `.color` (NES-palette matching), `.enum`/`.endenum`, `.rs`/`.rsset`,
+  and `.inesprg/chr/map/mir`. Overflowing-bank **warnings** are emitted to
+  stderr like the reference. Parity: **93/119** goldens byte-for-byte. The
+  remaining failures are Phase 4 (macros/conditionals/includes) and Phase 5
+  (media importers: `.incbin/.incpng/.incpal/.incrle/.incwav/.font/.defchr`, and
+  the nerdy-nights programs that use them); the `.inestrn` trainer is deferred
+  to Phase 4 (it performs an include).
 
 ### Phase 4 — Macros, conditionals, includes
 - **Scope:** `.macro`/`.endm`, `.macrodef` text macros, macro args (`\1`,`\#`,`\@`),

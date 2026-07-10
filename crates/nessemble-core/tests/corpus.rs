@@ -25,7 +25,7 @@ fn check_ok(group: &str, name: &str, undocumented: bool) {
         ..Options::default()
     };
     match assemble(&src, &opts) {
-        Ok(rom) => assert_eq!(rom, golden, "ROM mismatch for {group}/{name}"),
+        Ok(a) => assert_eq!(a.rom, golden, "ROM mismatch for {group}/{name}"),
         Err(e) => panic!("{group}/{name} failed to assemble: {e:?}"),
     }
 }
@@ -89,8 +89,36 @@ fn simple_examples_match() {
 }
 
 #[test]
+fn ines_banking_and_directive_examples_match() {
+    // Full iNES output, PRG/CHR banking, and the Phase 3 directives.
+    for name in [
+        "ines",
+        "bank",
+        "mmc1",
+        "mmc1chrram",
+        "segment",
+        "checksum",
+        "color",
+        "enum",
+        "random",
+        "rs",
+    ] {
+        check_ok("examples", name, false);
+    }
+    for name in ["square1", "triad"] {
+        check_ok("nerdy-nights", name, false);
+    }
+}
+
+#[test]
 fn error_cases_match() {
-    for name in ["undefined-symbol", "opcode", "mode", "branch-minus", "branch-plus"] {
+    for name in [
+        "undefined-symbol",
+        "opcode",
+        "mode",
+        "branch-minus",
+        "branch-plus",
+    ] {
         check_err(name);
     }
 }

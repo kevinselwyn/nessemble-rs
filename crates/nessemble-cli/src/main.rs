@@ -133,12 +133,16 @@ fn run(cli: Cli) -> ExitCode {
     };
 
     match assemble(&source, &options) {
-        Ok(rom) => {
+        Ok(assembly) => {
+            let name = source_name(&cli.input);
+            for w in &assembly.warnings {
+                eprintln!("Warning in `{}` on line {}: {}", name, w.line, w.message);
+            }
             if cli.check {
                 println!("No errors");
                 return ExitCode::from(RETURN_OK);
             }
-            if let Err(e) = write_output(&cli.output, &rom) {
+            if let Err(e) = write_output(&cli.output, &assembly.rom) {
                 eprintln!("nessemble: could not write output: {e}");
                 return ExitCode::from(RETURN_EPERM);
             }

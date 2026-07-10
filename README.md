@@ -33,13 +33,17 @@ package-registry functionality. A WASM build is deferred. (Details in `PLAN.md`.
 - [x] **Phase 1/2 — the core assembler**: hand-written lexer, recursive-descent
       parser, and a two-pass assembler (symbols, expressions, addressing-mode
       selection, `.org`, non-iNES data directives, reference-matching errors).
-- [ ] Phase 3 — iNES header/banking/CHR output.
-- [ ] Phases 4–5 — macros/conditionals/includes; media importers.
+- [x] **Phase 3 — iNES output & banking**: full iNES header + PRG/CHR bank
+      layout, `.segment`/`.prg`/`.chr`, and the `.checksum`/`.random`/`.color`/
+      `.enum`/`.rs`/`.rsset` directives, plus overflowing-bank warnings.
+- [ ] Phase 4 — macros, conditionals, includes.
+- [ ] Phase 5 — media importers (PNG/CHR, palette, RLE, WAV/DPCM).
 
-**Parity: 78/119** committed goldens are reproduced byte-for-byte, covering all
+**Parity: 93/119** committed goldens are reproduced byte-for-byte, covering all
 6502 opcode cases (documented and undocumented), the non-iNES example programs,
-and the Phase-2 error cases. Remaining failures are later-phase features. Run
-`cargo run -p xtask -- parity` for the current report.
+the iNES/banking/directive programs, and the Phase-2/3 error and warning cases.
+Remaining failures are Phase 4/5 features. Run `cargo run -p xtask -- parity`
+for the current report.
 
 ## Workspace layout
 
