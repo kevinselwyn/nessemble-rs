@@ -1,48 +1,53 @@
 # nessemble-rs: A Multi-Phase Plan to Reimplement `nessemble` in Rust
 
-> Status: **Draft for review.** This document is a proposal produced from a
+> Status: **Scope confirmed.** This document is a plan produced from a
 > read-only analysis of the upstream C project
-> [`kevinselwyn/nessemble`](https://github.com/kevinselwyn/nessemble) (v1.1.1).
-> It defines scope, target architecture, and a phased migration path. See
-> [Open Questions](#12-open-questions--decisions-needed) at the end — several
-> answers there will reshape scope and priorities.
+> [`kevinselwyn/nessemble`](https://github.com/kevinselwyn/nessemble) pinned at
+> **v1.1.1**. All initial open questions have been answered by the project owner;
+> see the [Decisions Log](#12-decisions-log) for the resolved directions that
+> shape this plan.
 
 ---
 
 ## 1. Executive Summary
 
 `nessemble` is a 6502 assembler / disassembler / simulator targeting the
-Nintendo Entertainment System (NES), written in C. It is a mature, feature-rich
-CLI tool (v1.1.1) that also ships as a WebAssembly module and integrates with a
-package registry, embedded scripting engines, and image/audio importers.
+Nintendo Entertainment System (NES), written in C. The upstream v1.1.1 CLI tool
+also ships a WebAssembly module and integrates with a package registry, three
+embedded scripting engines, and image/audio importers.
 
-This plan proposes reimplementing the tool in Rust as **`nessemble-rs`**, a
-Cargo workspace of focused crates, delivered in **10 phases**. The strategy
-prioritizes:
+This plan reimplements the tool in Rust as **`nessemble-rs`**, a Cargo workspace
+of focused crates, delivered in **10 phases**. Per the owner's decisions
+([§12](#12-decisions-log)), the effort targets the **assembler only** and is a
+**fresh Rust codebase** — **no C source is vendored into this repository.** The
+strategy prioritizes:
 
-1. **Behavioral parity first** for the core assembler (the most-used path),
-   validated by *differential testing* against the original C binary and the
-   existing golden-ROM test corpus.
-2. **Incremental, independently shippable phases**, each with its own tests and
+1. **Assembler parity first** (the only in-scope runtime path): **byte-for-byte
+   ROM output parity** with the official v1.1.1 release binaries, validated by
+   *differential testing* against those binaries. We do **not** replicate C
+   quirks/bugs — where the C tool is clearly wrong, we do the right thing and
+   document the deviation.
+2. **Incremental, independently shippable phases**, each with tests and
    acceptance criteria.
-3. **Replacing bespoke C machinery** (hand-rolled HTTP, JSON, deflate, hashing,
-   flex/bison) with well-maintained Rust crates where semantics allow.
-4. **Deferring or re-scoping** the heaviest, lowest-core-value subsystems
-   (three embedded scripting languages, the web/registry server stack) pending
-   product decisions.
+3. **Replacing bespoke C machinery** (flex/bison, gettext, image codecs) with
+   well-maintained, ideally **pure-Rust** crates that cross-compile cleanly to
+   all five target platforms.
+4. **A single embedded scripting language** ([Rhai](https://rhai.rs)) for custom
+   pseudo-ops, replacing the JS/Lua/Scheme trio.
 
-**Scope note:** the **disassembler/reassembler**, the **simulator/debugger**,
-and the **package-registry functionality** (install/publish/search + user auth)
-are **explicitly out of scope** for this reimplementation. `nessemble-rs`
-targets the **assembler** (plus its media importers, CLI, config, and WASM
-build). The sections below retain a full inventory of the original C tool for
-context, but out-of-scope subsystems are marked as such and are **not** part of
-any delivery phase.
+**Scope note.** In scope: the **assembler** (assemble / check / coverage), its
+**media importers**, the **CLI/config/init/reference** surface, **i18n**, custom
+pseudo-op **scripting**, **documentation + website generation**, and **release
+packaging** for all five platforms. Out of scope: the **disassembler/
+reassembler**, the **simulator/debugger**, the **package-registry functionality**
+(install/publish/search + user auth), native **`.so` plugins**, and the Python
+**server** components. A **WASM build/playground** is deferred (a possible future
+addition, not required now). The inventory below describes the original C tool
+for context; out-of-scope pieces are marked and belong to no delivery phase.
 
-The core first-party C code is **~12.7k LOC** plus **~770 lines** of flex/bison
-grammar. Third-party vendored code is **~105k LOC** (mostly the Duktape JS
-engine, Lua 5.1.5, and TinyScheme), almost all of which maps to existing Rust
-crates or is out of scope.
+The relevant (in-scope) first-party C code is a subset of the ~12.7k LOC + ~770
+lines of flex/bison grammar; it is used purely as a behavioral reference, not
+copied.
 
 ---
 
@@ -115,17 +120,19 @@ Derived from `src/main.c`, `src/usage.c`, the grammar, and `docs/pages/*.md`.
   against an HTTP registry (`http://www.nessemble.com/registry` by default).
 - User/auth: `adduser`, `login`, `logout`, `forgotpassword`, `resetpassword`.
 
-### 2.5 Build targets
+### 2.5 Build targets (original C tool)
 
 - Native Linux/macOS/Windows (mingw) binaries.
 - **WebAssembly / JS** module via Emscripten (`nessemble.js`, used by the
   docs "playground").
-- Distribution packaging: `.deb`, macOS `.pkg`, Windows `.msi`, npm package.
+- Distribution packaging: `.deb`, macOS `.pkg`, Windows `.msi`.
 
-> Note: the repository also contains **Python/Flask server components** (docs,
-> registry, website, CDN) and a **TypeScript docs frontend**. These are
-> *server-side/website* code, not part of the CLI, and are considered **out of
-> scope** for the Rust reimplementation unless explicitly requested.
+> **Our targets (resolved):** we reproduce the **v1.1.1 native release
+> artifacts** for macOS, Linux amd64/i386, and Windows 32/64-bit ([§5.4](#54-target-platforms--artifacts)).
+> The **WASM/JS** build is **deferred** (D9). The **Python/Flask servers** and
+> the **TS frontend runtime** stay **out of scope**, but we **do** generate the
+> static **documentation site and website** as build artifacts (C7,
+> [§6.6](#66-documentation--website)).
 
 ---
 
@@ -167,33 +174,43 @@ First-party sources under `src/` (~12.7k LOC) plus grammar (~770 LOC):
   configurable or removed, but **must preserve observable limits/errors** where
   tests depend on them.
 - **Platform `#ifdef`s** (`IS_WINDOWS`/`IS_LINUX`/`IS_MAC`/`IS_JAVASCRIPT`).
-  → `cfg!`/target features + `wasm32` target.
+  → `cfg!`/target features. Five required targets (§5.4): macOS, Linux
+  amd64, Linux i386, Windows 32-bit, Windows 64-bit. This is a strong reason to
+  favour **pure-Rust** dependencies that cross-compile without a C toolchain
+  (a key factor in the scripting choice — see [§6.4](#64-scripting-language-choice)).
 
 ---
 
-## 4. Third-Party Dependency Mapping (C → Rust crates)
+## 4. Dependency Mapping (C → Rust crates)
 
-Vendored C (~105k LOC) and system deps mapped to the Rust ecosystem:
+In-scope C machinery and system deps mapped to the Rust ecosystem. Preference is
+for **pure-Rust** crates so the five-platform matrix cross-compiles without a C
+toolchain.
 
-| C dependency | Purpose | Proposed Rust replacement |
-|--------------|---------|---------------------------|
-| flex / bison | lexer / parser generators | `logos` (lexer) + hand-written parser, or `lalrpop` |
+| C dependency | Purpose | Chosen Rust replacement |
+|--------------|---------|-------------------------|
+| flex / bison | lexer / parser generators | `logos` (lexer) + hand-written recursive-descent/Pratt parser |
 | `getopt_long` | CLI parsing | `clap` (derive) |
-| stb_image / stb_image_write | PNG decode/encode | `image` (or `png`) |
-| gettext (`i18n.c`) | translations | `fluent`/`gettext` crate, or defer |
+| stb_image / stb_image_write | PNG decode/encode | `image` (pure Rust) |
+| gettext (`i18n.c`) | translations | **Project Fluent** (`fluent`/`fluent-bundle`, pure Rust) — see [§6.5](#65-i18n-approach) |
 | QR code (`reference.c`) | terminal QR | `qrcode` crate |
-| pager (`pager.c`) | `$PAGER`/less | small shell-out, or `minus` |
-| Emscripten | WASM build | native `wasm32-unknown-unknown` + `wasm-bindgen` |
-| Duktape | embedded JavaScript (custom pseudo-ops) | `boa_engine` / `rquickjs` — *or drop* (see Q) |
-| Lua 5.1.5 | embedded Lua (custom pseudo-ops) | `mlua` (Lua 5.1 mode) — *or drop* |
-| TinyScheme | embedded Scheme (custom pseudo-ops) | `steel` / custom — *or drop* |
-| shared-object (`so.c`) | native plugin pseudo-ops | `libloading` — *or drop* |
+| pager (`pager.c`) | `$PAGER`/less | shell out to `$PAGER`, or `minus` |
+| Duktape / Lua / TinyScheme | embedded scripting (custom pseudo-ops) | **Rhai** — single pure-Rust engine (replaces all three) — see [§6.4](#64-scripting-language-choice) |
+| docs (`mkdocs`, Python) + website (webpack/TS) | documentation & website | **mdBook** (docs) + a static site build — see [§6.6](#66-documentation--website) |
+| distribution (`dpkg`, `pkgbuild`, `wixl`) | release artifacts | `cargo-deb`, `cargo-bundle`/`pkgbuild`, `cargo-wix` — see Phase 9 |
 
-**Out-of-scope dependencies** (only needed by the excluded package-registry
-subsystem — listed for completeness):
+**Dropped (owner decision):**
 
-| C dependency | Purpose | Rust equivalent (if ever re-scoped) |
-|--------------|---------|-------------------------------------|
+| C dependency | Purpose | Disposition |
+|--------------|---------|-------------|
+| shared-object (`so.c`) | native `.so` plugin pseudo-ops | **Dropped** (portability/safety; B6) |
+| Emscripten | WASM build | **Deferred** — not required now; possible future addition (D9) |
+
+**Out-of-scope dependencies** (belong only to the excluded disassembler /
+simulator / package-registry subsystems — listed for completeness, not used):
+
+| C dependency | Purpose | Rust equivalent (only if ever re-scoped) |
+|--------------|---------|------------------------------------------|
 | jsmn | JSON parsing (registry) | `serde` + `serde_json` |
 | udeflate `deflate.c` | gzip/inflate for tar.gz (registry) | `flate2` |
 | tar handling (`zip.c`) | untar registry packages | `tar` crate |
@@ -206,48 +223,76 @@ subsystem — listed for completeness):
 
 ### 5.1 Goals
 
-- **G1 — Assembler parity:** byte-for-byte identical ROM output vs C v1.1.1 for
-  the in-scope test corpus (`test/examples`, `test/opcodes`, `test/nerdy-nights`,
-  `test/errors`) and for the same CLI surface.
-- **G2 — Memory safety & maintainability:** idiomatic Rust, no global mutable
+- **G1 — Assembler ROM parity:** **byte-for-byte identical ROM output** vs the
+  official **v1.1.1 release binaries** for the in-scope corpus (`test/examples`,
+  `test/opcodes`, `test/nerdy-nights`, `test/errors`). We **do not** reproduce
+  odd/buggy C behavior: where the C tool is demonstrably wrong, `nessemble-rs`
+  does the correct thing and the deviation is documented (A3).
+- **G2 — CLI fidelity:** the in-scope CLI (flags, subcommands, exit codes,
+  primary stdout/stderr) is **as close to the C v1.1.1 tool as possible** (E12).
+  Out-of-scope options (`-d`/`--disassemble`, `-R`/`--reassemble`,
+  `-s`/`--simulate`, and the registry/user commands) are **omitted entirely** —
+  not parsed, not listed in help/usage, not documented, no "not supported"
+  message. To the user they do not exist.
+- **G3 — Memory safety & maintainability:** idiomatic Rust, no global mutable
   state, structured error/diagnostics, thorough tests.
-- **G3 — Cross-platform + WASM:** Linux/macOS/Windows binaries and a
-  `wasm32` library retaining the (assembler) playground use case.
-- **G4 — CLI compatibility:** same flags, subcommands, exit codes, and
-  primary stdout/stderr contract for the in-scope surface so existing scripts
-  keep working. Out-of-scope options (notably `-d`/`--disassemble`,
-  `-R`/`--reassemble`, `-s`/`--simulate`) are **omitted entirely** — not parsed,
-  not listed in help/usage, not documented, and not surfaced via any
-  "not supported" message. To the `nessemble-rs` user they simply do not exist.
+- **G4 — Five-platform releases:** produce the same release artifacts as v1.1.1
+  for macOS, Linux amd64, Linux i386, Windows 32-bit, and Windows 64-bit
+  (see [§5.4](#54-target-platforms--artifacts)).
+- **G5 — i18n retained:** translation support remains a first-class feature
+  (E11), implemented the idiomatic-Rust way (Project Fluent — [§6.5](#65-i18n-approach)).
+- **G6 — Docs & website:** generate the documentation site and project website
+  as build artifacts (C7), without running any server.
+- **G7 — Custom pseudo-ops:** retain scriptable custom pseudo-ops via a single
+  embedded language ([Rhai](https://rhai.rs)).
 
-### 5.2 Non-Goals / Out of Scope (unless requested)
+### 5.2 Non-Goals / Out of Scope
 
-- The **disassembler / reassembler** (`-d`, `-R`; `disassemble.c`).
+- The **disassembler / reassembler** (`-d`, `-R`; `disassemble.c`). (A1)
 - The **simulator / debugger** (`-s`; `simulate.c`, `simulate/opcode.c`,
-  `simulate/illegal.c`, and the REPL).
+  `simulate/illegal.c`, and the REPL). (A1)
 - The **package-registry functionality**: the package manager
   (`install`/`uninstall`/`publish`/`info`/`ls`/`search`), the `registry`
   get/set command, user/auth commands (`adduser`/`login`/`logout`/
   `forgotpassword`/`resetpassword`), and the underlying HTTP client, JSON,
-  tar/gzip, and HMAC machinery that exist solely to serve them
-  (`registry.c`, `api.c`, `user.c`, `http.c`, `json.c`, `zip.c`, `hash.c`).
-- Reimplementing the **Python Flask registry/website/docs/CDN servers**.
-- Reimplementing the **TypeScript docs frontend**.
-- Bug-for-bug replication of *internal* quirks that no test observes (we will
-  match observable behavior, and flag intentional deviations).
+  tar/gzip, and HMAC machinery that serve them
+  (`registry.c`, `api.c`, `user.c`, `http.c`, `json.c`, `zip.c`, `hash.c`). (A1)
+- Native **`.so` plugin** pseudo-ops (`scripting/so.c`). (B6)
+- The **Python Flask server** components (registry/website/docs/CDN back ends)
+  and the **TypeScript docs frontend runtime**. *(We still generate the static
+  docs + website content — C7 — just not the servers.)*
+- A **WASM build / interactive playground** — **deferred**, not required now;
+  candidate for a future phase once the native build is solid. (D9)
+- Bug-for-bug replication of C quirks (A3).
 
-> These exclusions are intentional design decisions for this effort, not
-> oversights. If any is later re-scoped, the mapping tables above and the phase
-> list below can be extended without disturbing the assembler core.
+> These exclusions are deliberate. The architecture leaves clean seams so any of
+> them could be re-scoped later without disturbing the assembler core.
 
 ### 5.3 Principles
 
-- **Differential testing is the source of truth.** Keep a pinned build of C
-  `nessemble` and compare outputs continuously.
-- **Vertical slices over horizontal layers** where possible: get a minimal
-  end-to-end assemble path working early, then widen.
+- **Differential testing is the source of truth.** Compare against the pinned
+  **v1.1.1 release binaries** (no C build in this repo — E13/E14).
+- **Vertical slices over horizontal layers**: get a minimal end-to-end assemble
+  path working early, then widen.
+- **Pure-Rust dependencies preferred** so all five targets cross-compile cleanly.
 - **One behavioral change per PR**, each green against the corpus.
-- **Preserve the file/CLI contract** even when the internals change.
+
+### 5.4 Target platforms & artifacts
+
+Match the v1.1.1 release exactly (D8/D10). The official
+[v1.1.1 release](https://github.com/kevinselwyn/nessemble/releases/tag/v1.1.1)
+ships these assets (note: **no** JS/npm artifact, consistent with WASM being
+deferred):
+
+| Platform | Rust target triple | Release artifact(s) |
+|----------|--------------------|---------------------|
+| macOS | `x86_64-apple-darwin` | `nessemble_<v>.pkg` |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | `nessemble_<v>_amd64.deb` |
+| Linux i386 | `i686-unknown-linux-gnu` | `nessemble_<v>_i386.deb` |
+| Windows 32-bit | `i686-pc-windows-*` | `nessemble_<v>_win32.exe`, `nessemble_<v>_win32.msi` |
+| Windows 64-bit | `x86_64-pc-windows-*` | `nessemble_<v>_win64.exe`, `nessemble_<v>_win64.msi` |
+
+The standalone `.exe`s are the raw CLI binaries; the `.msi`s are installers.
 
 ---
 
@@ -259,21 +304,25 @@ subsystem — listed for completeness):
 nessemble-rs/
 ├─ Cargo.toml                 # workspace
 ├─ crates/
+│  ├─ nessemble-isa/          # 6502 opcode tables (from opcodes.csv), modes
 │  ├─ nessemble-core/         # lexer, parser, AST, assembler, symbol table,
 │  │                          #   iNES/banking, pseudo-ops, expressions
-│  ├─ nessemble-isa/          # 6502 opcode tables (from opcodes.csv), modes
 │  ├─ nessemble-media/        # PNG/CHR, palette, RLE, WAV/DPCM importers
-│  ├─ nessemble-script/       # custom pseudo-op scripting host (feature-gated)
-│  ├─ nessemble-cli/          # clap CLI, dispatch, i18n, pager, reference, init
-│  └─ nessemble-wasm/         # wasm-bindgen wrapper for the (assembler) playground
+│  ├─ nessemble-script/       # Rhai-based custom pseudo-op host (feature-gated)
+│  ├─ nessemble-i18n/          # Fluent bundles + string catalog
+│  └─ nessemble-cli/          # clap CLI, dispatch, reference, init, config, pager
+├─ docs/                      # mdBook source (documentation site)
+├─ website/                   # static website source + generator
+├─ locales/                   # *.ftl translation files (Fluent)
+├─ xtask/                     # dev tooling: parity harness, packaging drivers
 └─ tests/                     # differential + golden-ROM harness
 ```
 
-Rationale: the ISA tables and core types anchor the assembler, so they live in a
-leaf crate. Scripting is optional (`--features`) so the default build is small
-and dependency-light. The `disasm`, `sim`, and `registry` crates are
-**intentionally absent** — those subsystems are out of scope (§5.2); the layout
-leaves clean seams to add them later if re-scoped.
+Rationale: `nessemble-isa` is a leaf crate shared by core (and any future
+disasm/sim). Scripting is feature-gated so the default build stays lean. The
+`disasm`, `sim`, and `registry` crates are **intentionally absent** (out of
+scope, §5.2). A `nessemble-wasm` crate is **deferred** (D9) but the workspace is
+shaped so it can wrap `nessemble-core` later with no core changes.
 
 ### 6.2 Lexer / parser strategy
 
@@ -304,6 +353,64 @@ Replace globals with an owned pipeline:
 - Errors via `thiserror` + a `Diagnostics` collector that reproduces the C
   tool's messages and exit codes.
 
+### 6.4 Scripting language choice
+
+The C tool embeds **three** engines (Duktape JS, Lua 5.1.5, TinyScheme) purely
+to let custom pseudo-ops (`.foo`) run user code that consumes assembler
+arguments and emits bytes/values. Per B5 we consolidate to **one** language.
+
+**Recommendation: [Rhai](https://rhai.rs).** Rationale:
+
+- **Pure Rust, zero C deps.** Critical for the five-target matrix (D8) — no C
+  toolchain, no `.a` linking, cross-compiles to Linux i386 / win32 / win64 /
+  macOS (and later wasm32) trivially. `mlua` (Lua) and `rquickjs`/Duktape link C
+  and complicate i386/Windows cross-builds; `boa` (JS) is heavier and less
+  embedding-focused; `steel` (Scheme) is younger and niche.
+- **Purpose-built for embedding**: trivially register host functions/types, pass
+  the pseudo-op's numeric/string args in, collect emitted bytes out.
+- **Sandboxed & bounded**: no ambient filesystem/network; operation and
+  complexity limits guard against runaway scripts — a good fit for an assembler
+  directive.
+- **Small, actively maintained, permissive (MIT/Apache-2.0)** license.
+
+*Trade-off / follow-up:* the bundled scripts today are Lua (`src/static/scripts/
+ease.lua`, `scripts.txt`). Adopting Rhai means **porting the bundled scripts** to
+`.rhai` and defining a stable Rhai host API for custom pseudo-ops. This is minor
+(the scripts are small), but see Q-a in the [Decisions Log](#12-decisions-log)
+regarding any external/user scripts we might need to keep working.
+
+### 6.5 i18n approach
+
+i18n stays first-class (E11). Gettext (`.po`/`.mo`) is workable in Rust but leans
+on C tooling; the idiomatic, pure-Rust choice that achieves the same result is
+**Project Fluent** (`fluent`/`fluent-bundle`, Mozilla):
+
+- Translation files are `locales/<lang>/*.ftl`, embedded at build time.
+- A thin `nessemble-i18n` wrapper exposes a `t!("id", args)` equivalent used
+  throughout the CLI/diagnostics, mirroring the C `_()` macro call sites.
+- Fluent adds proper plural/gender/number formatting that gettext handled awkwardly.
+- The existing catalog is effectively `en-US` only; we seed `en-US.ftl` from the
+  C source strings and add locales as needed. *(A lighter alternative,
+  `rust-i18n` with TOML/YAML, is available if Fluent feels heavyweight; Fluent is
+  the recommendation.)*
+
+### 6.6 Documentation & website
+
+C7 requires generating the documentation and website (but not the servers). The
+upstream uses Python **mkdocs** for docs and a **webpack/TS** app for the site.
+Proposed Rust-friendly replacement:
+
+- **Docs:** author content in Markdown, build a static site with **mdBook**
+  (pure Rust). Port the existing `docs/pages/*.md` (installation, syntax, usage,
+  building, extending, packages, playground, etc.) as the initial content, minus
+  the out-of-scope simulator/disassembler/registry pages.
+- **Website:** a small static landing site generated at build time (mdBook can
+  serve double-duty, or a minimal static template). Output is deployable to any
+  static host (e.g. GitHub Pages) — no running server required.
+- Both are produced as artifacts by an `xtask`/CI step so docs stay in sync with
+  the CLI (e.g. `reference` data and usage text can be generated from the same
+  source of truth). *(See Q-b about desired hosting/branding fidelity.)*
+
 ---
 
 ## 7. Phased Migration Plan
@@ -311,16 +418,18 @@ Replace globals with an owned pipeline:
 Each phase lists scope, key deliverables, and acceptance criteria. Phases are
 ordered so that the highest-value core lands first and each builds on the last.
 
-### Phase 0 — Foundations & test harness
-- **Scope:** Cargo workspace skeleton; crate stubs; CI (fmt, clippy, test);
-  pin & build reference C `nessemble` v1.1.1 in CI for differential testing;
-  port the existing test corpus into a Rust harness that shells out to both
-  binaries and diffs outputs; import `opcodes.csv` as data (build script or
-  committed generated table) into `nessemble-isa`.
-- **Deliverables:** green empty workspace; `xtask`/harness that can run the
-  corpus against the C binary and record golden outputs.
-- **Acceptance:** CI runs; harness produces baseline golden ROMs/listings from
-  the C tool.
+### Phase 0 — Foundations & parity harness
+- **Scope:** Cargo workspace skeleton; crate stubs; local checks (fmt, clippy,
+  test); import the 256-row opcode table (from upstream `opcodes.csv`) into
+  `nessemble-isa` as committed Rust data. **No C build in this repo (E13/E14):**
+  the differential oracle is the **official v1.1.1 release binary** — the harness
+  downloads/extracts it (on Linux, unpack `nessemble_1.1.1_amd64.deb` /
+  `_i386.deb`) and records **golden ROM outputs** from the pinned reference test
+  corpus (see §8). Golden files are committed so day-to-day runs need no network.
+- **Deliverables:** building workspace; `xtask` parity harness that runs an input
+  through both the release binary and `nessemble-rs` and diffs bytes.
+- **Acceptance:** harness produces baseline golden ROMs from the v1.1.1 binary and
+  a diff report scaffold.
 
 ### Phase 1 — Lexer + expression/number evaluation
 - **Scope:** `logos` lexer covering all tokens in `nessemble.l`; number bases,
@@ -358,52 +467,77 @@ ordered so that the highest-value core lands first and each builds on the last.
 - **Acceptance:** `incpng/incpal/incrle/incwav/font/defchr` examples
   byte-identical; PNG/WAV edge cases covered.
 
-### Phase 6 — CLI completeness, config, i18n, reference, init
+### Phase 6 — CLI completeness, config, reference, init
 - **Scope:** in-scope `clap` CLI surface & exit codes (assemble/check/coverage +
-  `init`, `config`, `reference`, `scripts`, `--version`/`--license`/`--help`);
-  `~/.nessemble` layout; `reference` (+QR); pager; i18n framework (strings can be
-  ported incrementally). The disassemble/reassemble/simulate options
-  (`-d`/`-R`/`-s`) are **omitted entirely** — no parser entry, no help/usage
-  line, no docs. The registry/package-manager/user-auth subcommands are
-  likewise not implemented (see §5.2); they are simply absent from the CLI.
+  `init`, `config` get/set/list, `reference` incl. QR, `scripts`,
+  `--version`/`--license`/`--help`); `~/.nessemble` layout; pager. Match the C
+  v1.1.1 CLI as closely as possible (E12). `-d`/`-R`/`-s` and the
+  registry/user commands are **omitted entirely** (no parser entry, no
+  help/usage line, no docs). `reference` is backed by **locally bundled data**
+  (opcodes + bundled reference text), not a network call.
 - **Acceptance:** CLI help/usage/exit-code parity for the in-scope surface;
-  help/usage text contains **no reference** to disassemble/reassemble/simulate;
-  `init` output matches; config round-trips.
+  help/usage text contains **no reference** to disassemble/reassemble/simulate or
+  the registry; `init` output matches; config round-trips.
 
-### Phase 7 — WASM build, scripting host, packaging & cutover
-- **Scope:** `wasm32` library + `wasm-bindgen` bindings for the (assembler)
-  playground; scripting host (`nessemble-script`) — scope per product decision
-  (drop / JS-only / all three); custom pseudo-op resolution & `scripts` install;
-  distribution packaging (`.deb`/`.pkg`/`.msi`/npm); docs update.
-- **Acceptance:** the assembler playground works against the WASM build; chosen
-  scripting path passes `test/examples/custom`/`ease`; release artifacts build.
+### Phase 7 — i18n (Project Fluent)
+- **Scope:** `nessemble-i18n` crate; wire a `t!`-style lookup through all CLI /
+  diagnostic strings (mirroring the C `_()` call sites); seed `en-US.ftl` from the
+  C strings; document how translators add a locale.
+- **Acceptance:** all user-facing strings resolve through Fluent; `en-US` output
+  matches the C tool's English messages; adding a stub locale works end-to-end.
 
-> **Removed from scope:** the earlier drafts included a disassembler/reassemble
-> phase, a simulator/debugger phase, and a registry/package-manager phase. These
-> are now out of scope (§5.2) and have been dropped from the plan.
+### Phase 8 — Custom pseudo-op scripting (Rhai)
+- **Scope:** `nessemble-script` (feature-gated) hosting **Rhai**; define the host
+  API custom pseudo-ops use (receive args, emit bytes/values); `.custom`
+  (`PSEUDO_CUSTOM`) dispatch; the `-p` pseudo file and the `scripts` install
+  command; **port the bundled `ease` script** and any `scripts.txt` entries to
+  `.rhai`.
+- **Acceptance:** `test/examples/custom` and `ease` behavior reproduced with the
+  Rhai host; scripts install to `~/.nessemble/scripts` and resolve at assemble time.
+
+### Phase 9 — Documentation, website & release packaging
+- **Scope:** mdBook documentation + static website generation (§6.6), ported from
+  the in-scope `docs/pages/*.md`; release pipeline producing the **v1.1.1-matching
+  artifacts** for all five platforms — `.pkg` (macOS), `amd64.deb`, `i386.deb`,
+  `win32.exe`+`.msi`, `win64.exe`+`.msi` — via `cargo-deb`, `cargo-wix`,
+  `pkgbuild`/`cargo-bundle`, and raw target-triple builds.
+- **Acceptance:** docs + website build to static output; all seven release
+  artifacts are produced for the five targets and the CLI binaries run on each.
+
+> **A WASM build/playground is deferred (D9)** — a candidate follow-up phase once
+> the native build is complete; not required for this plan.
+>
+> **Removed from scope entirely:** disassembler/reassemble, simulator/debugger,
+> and the package registry (§5.2).
 
 ---
 
 ## 8. Testing & Validation Strategy
 
-- **Differential (oracle) testing:** for every in-scope corpus input, run both
-  the pinned C binary and `nessemble-rs`, and assert byte-identical ROMs /
-  identical exit codes & key stderr.
-- **Golden files:** commit C-generated outputs as goldens so CI does not require
-  rebuilding the C tool every run (but a scheduled job re-verifies against it).
-- **Existing corpus reuse (in scope):** `test/opcodes` (343 files),
-  `test/examples` (157), `test/nerdy-nights` (32), `test/errors` (62) — port the
-  Python drivers into the Rust harness. *(`test/integration` targets the
-  simulator and `test/registry` targets the package registry; both are out of
-  scope and excluded.)*
-- **Unit tests** per crate (lexer, expression eval, addressing modes,
-  media importers).
+- **Oracle = the official v1.1.1 release binary (E14).** We do **not** build the
+  C tool in this repo (E13). The parity harness runs each input through the
+  released binary and through `nessemble-rs` and asserts byte-identical ROMs and
+  matching exit codes / key stderr. On Linux the oracle binary is unpacked from
+  `nessemble_1.1.1_amd64.deb` (or `_i386.deb`); macOS/Windows parity can be
+  spot-checked from `.pkg`/`.exe` when those hosts are available, but the
+  assembler is platform-independent so Linux parity is authoritative.
+- **Golden files:** commit oracle-generated ROMs as goldens so routine runs need
+  no download; regenerate deliberately when the pinned version changes.
+- **Reference corpus (in scope):** the upstream `test/opcodes` (343),
+  `test/examples` (157), `test/nerdy-nights` (32), `test/errors` (62) inputs —
+  copied in as **test fixtures/data only** (not C code). *(`test/integration`
+  (simulator) and `test/registry` (registry) are out of scope and excluded.)*
+- **No-quirk policy (A3):** when `nessemble-rs` intentionally diverges from a
+  buggy C behavior, the case is moved from "must match" to a documented
+  "known deviation" list with a rationale, rather than being silently skipped.
+- **Unit tests** per crate (lexer, expression eval, addressing modes, media
+  importers, Rhai host, Fluent lookups).
 - **Property tests** (`proptest`) for expression evaluation and iNES/banking
   offset math.
 - **Fuzzing** (`cargo-fuzz`) on the parser and PNG/WAV asset loaders.
-- **Fixed-cap behaviors:** explicitly test the observable limits/errors the C
-  tool enforces (include depth, symbol/macro caps) so we match or consciously
-  change them.
+- **Fixed-cap behaviors:** explicitly test observable limits/errors (include
+  depth, symbol/macro caps) so we match them or consciously, documentedly change
+  them.
 
 ---
 
@@ -411,13 +545,14 @@ ordered so that the highest-value core lands first and each builds on the last.
 
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
-| Undocumented assembler quirks not covered by tests | Silent output divergence | Broad differential testing beyond the shipped corpus; fuzz-generated inputs run through both tools |
+| Undocumented assembler quirks not covered by fixtures | Silent output divergence | Broad differential testing vs the v1.1.1 binary beyond the shipped corpus; fuzz-generated inputs run through both |
+| Distinguishing "quirk to drop" from "behavior to match" (A3) | Wrong deviation | Every intentional divergence goes on a reviewed "known deviations" list with rationale |
 | flex/bison edge cases (start-conditions, greedy rules) | Parser mismatch | Hand-written parser mirrored against grammar; targeted lexer tests |
-| Scripting engines (Duktape/Lua/TinyScheme) are huge | Scope blow-up | Feature-gate & likely re-scope (see Q); Lua via `mlua` cheapest to retain |
+| Cross-compiling to Linux i386 / win32 / win64 | Broken/absent artifacts | Choose **pure-Rust** deps (Rhai, `image`, Fluent); exercise all five target triples in the release pipeline early |
+| Rhai host API differs from the JS/Lua/Scheme model | Bundled/custom scripts break | Port bundled `ease` script; define & document a stable Rhai pseudo-op API; confirm no external scripts must be preserved (Q-a) |
 | Floating-point in expressions (`pow`, `/`) | Off-by-one divergence | Match C integer-cast semantics exactly; property tests |
-| WASM parity (Emscripten FS/EM_ASM hooks) | Playground breakage | Redesign JS interop via `wasm-bindgen`; keep the assembler API used by playground |
-| i18n/gettext catalogs | Localization gaps | Framework early, translate strings incrementally |
-| Out-of-scope flags/subcommands still invoked by users/scripts | Confusing failures | **Decided:** disassemble/reassemble/simulate are omitted entirely (treated as unknown args by `clap`, standard usage error); never surfaced in help/docs |
+| Fluent migration from gettext strings | Localization gaps | Seed `en-US.ftl` directly from C strings; verify English output matches the oracle |
+| Packaging tools (`cargo-wix`/`cargo-deb`/`pkgbuild`) per platform | Release friction | Stand up the packaging pipeline in Phase 9 with a smoke-install check per target |
 
 ---
 
@@ -427,83 +562,83 @@ ordered so that the highest-value core lands first and each builds on the last.
   of user value and unblocks everything else.
 - **Parallelizable after Phase 2/3:** `nessemble-media` (Phase 5) shares only the
   core/ISA crates and can proceed independently of the CLI work.
-- **Independent track:** packaging/WASM/scripting (Phase 7) depends mostly on the
-  CLI shell (Phase 6), not on assembler internals.
+- **Independent tracks after the CLI shell (Phase 6):** i18n (Phase 7), scripting
+  (Phase 8), and docs/website + packaging (Phase 9) have few interdependencies
+  and can proceed in parallel. Packaging can be scaffolded early (empty binary)
+  to de-risk the five-target matrix.
+- **Deferred:** the optional WASM build wraps `nessemble-core` and can start any
+  time after Phase 3 if/when it is greenlit.
 
 ---
 
 ## 11. Success Criteria (Definition of Done for the migration)
 
-1. `nessemble-rs` **assembles** the entire in-scope test corpus with byte parity
-   vs C v1.1.1 (assemble/check/coverage, incl. media importers).
-2. In-scope CLI flags, subcommands, and exit codes match documented behavior;
-   disassemble/reassemble/simulate are omitted entirely and appear nowhere in
-   help, usage, or docs.
-3. Cross-platform native builds + a working `wasm32` assembler playground module.
-4. Clean `cargo fmt`/`clippy`; documented crates; CI differential suite green.
-5. Scripting scope delivered per the agreed product decision.
+1. `nessemble-rs` **assembles** the entire in-scope reference corpus with
+   **byte-for-byte ROM parity** vs the v1.1.1 release binary (assemble / check /
+   coverage, incl. media importers), except for a short, documented list of
+   intentional no-quirk deviations (A3).
+2. In-scope CLI (flags, subcommands, exit codes, primary output) is as close to
+   C v1.1.1 as possible; disassemble/reassemble/simulate and the registry/user
+   commands appear nowhere in the parser, help, usage, or docs.
+3. Custom pseudo-ops work via the single embedded **Rhai** engine; bundled
+   scripts are ported.
+4. i18n via **Project Fluent**; English output matches the oracle.
+5. Documentation site + website generate to static output.
+6. **All v1.1.1 release artifacts** build for the five platforms (macOS,
+   Linux amd64, Linux i386, win32, win64).
+7. Clean `cargo fmt`/`clippy`; documented crates; parity harness green against
+   the release binary.
+8. *(Deferred)* WASM build/playground — not required for done.
 
 ---
 
-## 12. Open Questions / Decisions Needed
+## 12. Decisions Log
 
-These materially affect scope, sequencing, and effort. Grouped by priority.
+All initial open questions have been resolved by the project owner. Recorded here
+as the authoritative directions for this plan.
 
-### A. Scope & priorities
-1. **Confirmed scope:** the effort targets the **assembler** (assemble / check /
-   coverage + media importers + CLI/config/init/reference + WASM). The
-   **disassembler/reassembler**, **simulator/debugger**, and **package-registry
-   functionality** are **out of scope** (§5.2). Please confirm, or flag any of
-   these you actually want re-included.
-2. **Out-of-scope CLI flags/commands:** ✅ **Resolved.** Disassemble
-   (`-d`/`--disassemble`), reassemble (`-R`/`--reassemble`), and simulate
-   (`-s`/`--simulate`) are **omitted entirely** — not parsed, not shown in
-   help/usage, not documented, and never surfaced via a "not supported" message.
-   The registry/package-manager/user-auth subcommands are treated the same way
-   (absent from the CLI) for consistency. *(If the registry commands should
-   instead emit a deprecation notice, say so; default is silent omission.)*
-3. **Parity bar:** Is **byte-for-byte ROM parity** with C v1.1.1 a hard
-   requirement, or is "correct + documented behavior" acceptable where the C
-   tool has quirks?
-4. **Version pin:** Should we target the current `master` of upstream, the
-   v1.1.1 release, or the latest published binary? (Analysis here is v1.1.1.)
+| # | Topic | Decision |
+|---|-------|----------|
+| A1 | Scope | **Assembler only.** Disassembler/reassembler, simulator/debugger, and the package registry are out of scope. |
+| A2 | Out-of-scope CLI options | Disassemble/reassemble/simulate options are **omitted entirely** — not parsed, not in help/usage, not documented, no "not supported" message. |
+| A3 | Parity bar | **ROM output parity is required**, but **do not replicate odd C quirks** — where C is wrong, do the right thing and document the deviation. |
+| A4 | Version | Target **`nessemble@1.1.1`**. |
+| B5 | Scripting | **A single embedded language.** Recommendation: **Rhai** (pure-Rust, embeddable, sandboxed) — replaces the JS/Lua/Scheme trio. See [§6.4](#64-scripting-language-choice). |
+| B6 | `.so` plugins | **Dropped.** |
+| C7 | Servers vs docs | **No server components**, but **generating the website/documentation is required** (static output). See [§6.6](#66-documentation--website). |
+| D8 | Platforms | Same as `nessemble`: **macOS, Linux amd64, Linux i386, win32, win64.** See [§5.4](#54-target-platforms--artifacts). |
+| D9 | WASM/playground | **Not required now**; may be added later once a functioning WASM build exists. **Deferred.** |
+| D10 | Artifacts | Produce the **same artifacts as the v1.1.1 release** (`.pkg`, `amd64.deb`, `i386.deb`, `win32.exe`+`.msi`, `win64.exe`+`.msi`). |
+| E11 | i18n | **Still important.** Use the idiomatic-Rust equivalent — **Project Fluent** — to achieve the same result. See [§6.5](#65-i18n-approach). |
+| E12 | CLI contract | Stay **as close to the C v1.1.1 CLI as possible.** |
+| E13 | Repo | **Fresh start** — `nessemble-rs` contains **no C code**. |
+| E14 | Parity source | **No CI build of C.** Parity is checked against the **v1.1.1 release binaries**. |
 
-### B. Scripting subsystem (largest remaining scope lever)
-5. **Custom pseudo-op scripting:** Keep it at all? If so, which engines —
-   **all three** (JS/Lua/Scheme), **JS-only**, **Lua-only**, or replace with a
-   single modern embedded language? (This decides whether we pull in
-   `boa`/`rquickjs`, `mlua`, and/or `steel`.)
-6. **Native `.so` plugins** (`scripting/so.c`): retain via `libloading`, or drop
-   for safety/portability?
+### New follow-up questions
 
-### C. Ecosystem
-7. **Server components** (Python Flask registry/website/docs/CDN + TS frontend):
-   confirmed **out of scope**? *(The client-side package-registry commands are
-   already out of scope per §5.2; this confirms the server side too.)*
+These are minor and do not block starting Phase 0; sensible defaults are noted.
 
-### D. Platforms & distribution
-8. **Target platforms:** Which must ship — Linux, macOS (Intel/ARM), Windows,
-   WASM? Any 32-bit or specific-MSRV requirement?
-9. **WASM/playground:** Must the docs "playground" keep working (assembler-only,
-   now that the simulator/disassembler are out of scope)? If so, is a
-   `wasm-bindgen` API redesign acceptable, or must the existing JS module API
-   be preserved exactly?
-10. **Packaging:** Do we need the same artifacts (`.deb`, `.pkg`, `.msi`, npm),
-    or is `cargo install` / GitHub releases sufficient initially?
-
-### E. Compatibility & process
-11. **i18n:** Retain gettext-style translations (any locales beyond `en-US`
-    actually used?), or defer localization?
-12. **CLI contract:** Must every in-scope flag/exit-code/stdout string match
-    exactly (for downstream scripts), or is a cleaned-up but documented CLI
-    acceptable?
-13. **Repo strategy:** Build `nessemble-rs` in this repo alongside/replacing the
-    C tree, or as a fresh tree? Any commit/PR granularity or licensing
-    (GPL — `COPYING`) constraints to preserve?
-14. **Reference-tool availability:** Can CI build the C `nessemble` (flex, bison,
-    Emscripten toolchains) for differential testing, or should we rely
-    solely on committed golden files?
+- **Q-a (scripting migration):** Beyond the bundled `ease` script, is there any
+  *external / user-authored* script ecosystem that must keep working? If yes, we
+  should design the Rhai host API to ease migration (or provide a shim).
+  *Default assumption: only the bundled scripts need porting (the registry that
+  distributed third-party scripts is out of scope).*
+- **Q-b (docs/website fidelity & hosting):** For the generated website/docs, do
+  you want to **match the current site's look/branding** (nessemble.com theme),
+  or is a clean modern default fine? And what's the intended **host** (e.g.
+  GitHub Pages)? *Default: clean mdBook theme, output deployable to GitHub Pages.*
+- **Q-c (locales):** Ship only **`en-US`** initially (the only catalog present in
+  C), adding others on demand? *Default: yes, `en-US` first with the framework
+  ready for more.*
+- **Q-d (macOS/Windows parity):** Since there is no CI and parity uses the release
+  binaries, is **Linux-based parity (amd64/i386) authoritative**, with
+  macOS/Windows treated as build/packaging targets? *Default: yes — the assembler
+  output is platform-independent.*
+- **Q-e (`.exe` vs `.msi`):** The release ships **both** a standalone `.exe` and
+  an `.msi` per Windows arch — confirm we should reproduce **both** (not just the
+  installer). *Default: reproduce both.*
 
 ---
 
-*Prepared as a planning artifact; no application code changed in this PR.*
+*Prepared as a planning artifact; this repository contains no C source — the
+upstream project is used only as a behavioral reference.*
