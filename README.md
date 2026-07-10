@@ -20,22 +20,26 @@ package-registry functionality. A WASM build is deferred. (Details in `PLAN.md`.
 
 ## Status
 
-**Phase 0 — Foundations & parity harness (in progress).**
+**Phases 0–2 complete.**
 
 - [x] Cargo workspace with crate seams (`isa`, `core`, `media`, `script`,
       `i18n`, `cli`) + `xtask`.
 - [x] `nessemble-isa`: the full 256-entry 6502 opcode table, generated at build
       time from `crates/nessemble-isa/data/opcodes.csv`.
-- [x] Minimal `nessemble` CLI (argument parsing, `--version`, `--license`).
+- [x] `nessemble` CLI (argument parsing, `--version`, `--license`, assemble).
 - [x] Reference corpus imported as test fixtures under `tests/corpus/`
-      (122 assemble cases, out-of-scope disassemble/simulate artifacts removed).
-- [x] `xtask` parity harness that diffs output against the committed golden
-      ROMs and against the official v1.1.1 release binary (the "oracle").
-- [ ] The assembler itself — Phases 1–5.
+      (122 assemble cases).
+- [x] `xtask` parity harness (diffs vs committed goldens and the v1.1.1 oracle).
+- [x] **Phase 1/2 — the core assembler**: hand-written lexer, recursive-descent
+      parser, and a two-pass assembler (symbols, expressions, addressing-mode
+      selection, `.org`, non-iNES data directives, reference-matching errors).
+- [ ] Phase 3 — iNES header/banking/CHR output.
+- [ ] Phases 4–5 — macros/conditionals/includes; media importers.
 
-The oracle reproduces **all 119** non-scripting golden ROMs in the corpus
-(3 scripting cases are deferred to Phase 8), confirming the goldens are
-trustworthy for parity testing.
+**Parity: 78/119** committed goldens are reproduced byte-for-byte, covering all
+6502 opcode cases (documented and undocumented), the non-iNES example programs,
+and the Phase-2 error cases. Remaining failures are later-phase features. Run
+`cargo run -p xtask -- parity` for the current report.
 
 ## Workspace layout
 
