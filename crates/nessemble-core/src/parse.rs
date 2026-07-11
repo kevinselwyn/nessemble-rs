@@ -5,7 +5,9 @@
 //! precedence level, right-associative), and the core/data/iNES pseudo-ops.
 //! Directives outside this phase parse to [`Pseudo::Unsupported`].
 
-use crate::ast::*;
+use crate::ast::{
+    AsciiArg, BinOp, CustomArg, Expr, Instruction, Line, Operand, Pseudo, RandTerm, Stmt,
+};
 use crate::lexer::{Tok, Token};
 
 /// A parse error with the offending 1-based line and source-file id.
@@ -42,16 +44,14 @@ impl Parser {
         self.toks
             .get(self.pos)
             .or_else(|| self.toks.last())
-            .map(|t| t.line)
-            .unwrap_or(1)
+            .map_or(1, |t| t.line)
     }
 
     fn cur_file(&self) -> u32 {
         self.toks
             .get(self.pos)
             .or_else(|| self.toks.last())
-            .map(|t| t.file)
-            .unwrap_or(0)
+            .map_or(0, |t| t.file)
     }
 
     fn bump(&mut self) -> Option<Tok> {
@@ -176,7 +176,7 @@ impl Parser {
                     Some(Tok::Comma) => {
                         self.pos += 1;
                         let r = self.expect_reg()?;
-                        self.expect(Tok::CloseBrack)?;
+                        self.expect(&Tok::CloseBrack)?;
                         Ok(Operand::IndirectIndexed(e, r))
                     }
                     Some(Tok::CloseBrack) => {
@@ -216,8 +216,8 @@ impl Parser {
         }
     }
 
-    fn expect(&mut self, tok: Tok) -> Result<(), ParseError> {
-        if self.peek() == Some(&tok) {
+    fn expect(&mut self, tok: &Tok) -> Result<(), ParseError> {
+        if self.peek() == Some(tok) {
             self.pos += 1;
             Ok(())
         } else {
@@ -391,7 +391,7 @@ impl Parser {
         while matches!(self.peek(), Some(Tok::Comma)) {
             self.pos += 1;
             // A comma may be followed by a line break + indentation.
-            while matches!(self.peek(), Some(Tok::Endl) | Some(Tok::Indent)) {
+            while matches!(self.peek(), Some(Tok::Endl | Tok::Indent)) {
                 self.pos += 1;
             }
             if matches!(self.peek(), Some(Tok::Endl) | None) {
@@ -453,32 +453,31 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let mut e = match self.bump() {
             Some(Tok::Number(n)) => Expr::Num(n),
-            Some(Tok::NumberArg(_)) | Some(Tok::NumberArgc) | Some(Tok::NumberArgu) => Expr::Num(0),
+            Some(Tok::NumberArg(_) | Tok::NumberArgc | Tok::NumberArgu) => Expr::Num(0),
             Some(Tok::Text(name)) => Expr::Symbol(name),
             Some(Tok::High) => {
-                self.expect(Tok::OpenParen)?;
+                self.expect(&Tok::OpenParen)?;
                 let inner = self.parse_expr()?;
-                self.expect(Tok::CloseParen)?;
+                self.expect(&Tok::CloseParen)?;
                 Expr::High(Box::new(inner))
             }
             Some(Tok::Low) => {
-                self.expect(Tok::OpenParen)?;
+                self.expect(&Tok::OpenParen)?;
                 let inner = self.parse_expr()?;
-                self.expect(Tok::CloseParen)?;
+                self.expect(&Tok::CloseParen)?;
                 Expr::Low(Box::new(inner))
             }
             Some(Tok::Bank) => {
-                self.expect(Tok::OpenParen)?;
-                let name = match self.bump() {
-                    Some(Tok::Text(n)) => n,
-                    _ => return self.err("expected symbol in BANK()"),
+                self.expect(&Tok::OpenParen)?;
+                let Some(Tok::Text(name)) = self.bump() else {
+                    return self.err("expected symbol in BANK()");
                 };
-                self.expect(Tok::CloseParen)?;
+                self.expect(&Tok::CloseParen)?;
                 Expr::Bank(name)
             }
             Some(Tok::OpenParen) => {
                 let inner = self.parse_expr()?;
-                self.expect(Tok::CloseParen)?;
+                self.expect(&Tok::CloseParen)?;
                 inner
             }
             Some(Tok::Colon) => {

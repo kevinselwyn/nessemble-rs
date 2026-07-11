@@ -27,6 +27,7 @@ static FONT_CHR: &[u8] = include_bytes!("font.chr");
 /// The 16 CHR bytes for ASCII glyph `ch` (`0x00..=0x7F`).
 ///
 /// Returns an empty slice for code points outside the table.
+#[must_use]
 pub fn font_glyph(ch: usize) -> &'static [u8] {
     let start = ch * 0x10;
     FONT_CHR.get(start..start + 0x10).unwrap_or(&[])
@@ -36,6 +37,7 @@ pub fn font_glyph(ch: usize) -> &'static [u8] {
 ///
 /// `limit` is an absolute end index (matching the reference); `None` means the
 /// end of the data. Out-of-range bounds are clamped.
+#[must_use]
 pub fn incbin_slice(data: &[u8], offset: usize, limit: Option<usize>) -> Vec<u8> {
     let end = limit.unwrap_or(data.len()).min(data.len());
     let start = offset.min(end);

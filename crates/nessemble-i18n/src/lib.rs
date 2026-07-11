@@ -113,6 +113,7 @@ fn detect_locale() -> Option<String> {
 
 /// Look up `id`, interpolating `args`. Missing ids fall back to en-US, then to
 /// the id itself. Prefer the [`t!`] macro over calling this directly.
+#[must_use]
 pub fn translate(id: &str, args: &[(&str, String)]) -> String {
     let fluent_args = if args.is_empty() {
         None
@@ -133,6 +134,7 @@ pub fn set_locale(lang: &str) {
 }
 
 /// The active locale for the current thread.
+#[must_use]
 pub fn active_locale() -> String {
     CATALOG.with(|c| c.borrow().active.clone())
 }
@@ -147,9 +149,8 @@ pub fn register_locale(lang: &str, source: &str) {
 /// locale id). Missing directories are ignored. This lets a translator drop a
 /// `~/.nessemble/locales/<lang>.ftl` file and select it via `NESSEMBLE_LANG`.
 pub fn load_locale_dir(dir: &std::path::Path) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();

@@ -67,7 +67,7 @@ fn main() -> ExitCode {
         Parsed::Exit(code) => return ExitCode::from(code),
     };
 
-    ExitCode::from(dispatch(args))
+    ExitCode::from(dispatch(&args))
 }
 
 /// Parse `argv` in the getopt permuting style: options may appear before or
@@ -111,9 +111,9 @@ fn parse_long(
     };
     *i += 1;
     match name {
-        "help" => return Some(action(usage::usage(exec))),
-        "version" => return Some(action(usage::version())),
-        "license" => return Some(action(usage::license())),
+        "help" => return Some(action(&usage::usage(exec))),
+        "version" => return Some(action(&usage::version())),
+        "license" => return Some(action(&usage::license())),
         "undocumented" => args.undocumented = true,
         "check" => args.check = true,
         "coverage" => args.coverage = true,
@@ -141,9 +141,9 @@ fn parse_short(
     while j < bytes.len() {
         let c = bytes[j] as char;
         match c {
-            'h' => return Some(action(usage::usage(exec))),
-            'v' => return Some(action(usage::version())),
-            'L' => return Some(action(usage::license())),
+            'h' => return Some(action(&usage::usage(exec))),
+            'v' => return Some(action(&usage::version())),
+            'L' => return Some(action(&usage::license())),
             'u' => args.undocumented = true,
             'c' => args.check = true,
             'C' => args.coverage = true,
@@ -159,9 +159,8 @@ fn parse_short(
                 } else {
                     None
                 };
-                let value = match value {
-                    Some(v) => v,
-                    None => return Some(usage_error(exec)),
+                let Some(value) = value else {
+                    return Some(usage_error(exec));
                 };
                 match c {
                     'o' => args.output = Some(value),
@@ -208,7 +207,7 @@ fn take_value(
 
 /// Print `text` to stdout and exit with the usage return code (129), matching
 /// the reference's `-h`/`-v`/`-L`.
-fn action(text: String) -> Parsed {
+fn action(text: &str) -> Parsed {
     print!("{text}");
     Parsed::Exit(RETURN_USAGE)
 }
@@ -219,7 +218,7 @@ fn usage_error(exec: &str) -> Parsed {
 }
 
 /// Dispatch a parsed command line: a leading subcommand, or assemble mode.
-fn dispatch(args: Args) -> u8 {
+fn dispatch(args: &Args) -> u8 {
     if let Some(first) = args.positionals.first() {
         match first.as_str() {
             "init" => return init::run(&args.positionals[1..]),
@@ -260,7 +259,7 @@ fn run_config(rest: &[String]) -> u8 {
 }
 
 /// Assemble the input (a positional file, or stdin) into the output.
-fn assemble_mode(args: Args) -> u8 {
+fn assemble_mode(args: &Args) -> u8 {
     let mut options = Options {
         nes: matches!(args.format.as_deref(), Some(f) if f.eq_ignore_ascii_case("nes")),
         undocumented: args.undocumented,

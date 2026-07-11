@@ -11,5 +11,5 @@ authors.workspace = true
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true
