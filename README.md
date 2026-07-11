@@ -1,67 +1,62 @@
-# nessemble-rs
+# nessemble
 
-A fresh, from-scratch **Rust** reimplementation of
-[`kevinselwyn/nessemble`](https://github.com/kevinselwyn/nessemble) — a 6502
-assembler for the Nintendo Entertainment System — targeting **byte-for-byte ROM
-output parity** with the upstream **v1.1.1** release.
+`nessemble` is a **6502 assembler for the Nintendo Entertainment System**,
+written in Rust. It assembles NES programs — instructions, macros, conditionals,
+includes, media importers, iNES banking — into ROMs, and can be extended with
+custom pseudo-instructions written in [Rhai](https://rhai.rs).
 
-This repository contains **no C source**; the upstream project is used only as a
-behavioral reference. See [`PLAN.md`](PLAN.md) for the full multi-phase plan,
-scope decisions, and architecture.
+> **Upgrading from 1.x?** 2.0 is a ground-up Rust rewrite. Your assembly source
+> and ROM output are unchanged, but the tooling around them moved. See
+> [`docs/src/upgrading.md`](docs/src/upgrading.md) for what changed.
 
-## Scope
+## Features
 
-In scope: the **assembler** (assemble / check / coverage), media importers, the
-CLI (config / init / reference), i18n, custom pseudo-op scripting, and
-documentation/website generation + release packaging.
+- **The assembler** — assemble, check, and coverage, with a hand-written lexer,
+  recursive-descent parser, and two-pass code generator (symbols, expressions,
+  addressing-mode selection, macros, conditionals, includes).
+- **iNES output & banking** — full iNES header and PRG/CHR bank layout,
+  `.segment`/`.prg`/`.chr`, and directives like `.checksum`, `.enum`, `.rs`.
+- **Media importers** — PNG/CHR graphics, palettes, RLE, and WAV/DPCM audio.
+- **Custom pseudo-instructions** — a sandboxed [Rhai](https://rhai.rs) scripting
+  host for user-defined directives.
+- **Internationalization** — messages via [Project Fluent](https://projectfluent.org).
+- **Release packaging** — `.deb`, `.msi`, and `.pkg` artifacts for all supported
+  platforms, plus a generated documentation site.
 
-Out of scope: the disassembler/reassembler, the simulator/debugger, and the
-package-registry functionality. A WASM build is deferred. (Details in `PLAN.md`.)
+## Installation
 
-## Status
+Download the latest release for your platform:
 
-**Phases 0–2 complete.**
+<https://github.com/kevinselwyn/nessemble-rs/releases>
 
-- [x] Cargo workspace with crate seams (`isa`, `core`, `media`, `script`,
-      `i18n`, `cli`) + `xtask`.
-- [x] `nessemble-isa`: the full 256-entry 6502 opcode table, generated at build
-      time from `crates/nessemble-isa/data/opcodes.csv`.
-- [x] `nessemble` CLI (argument parsing, `--version`, `--license`, assemble).
-- [x] Reference corpus imported as test fixtures under `tests/corpus/`
-      (122 assemble cases).
-- [x] `xtask` parity harness (diffs vs committed goldens and the v1.1.1 oracle).
-- [x] **Phase 1/2 — the core assembler**: hand-written lexer, recursive-descent
-      parser, and a two-pass assembler (symbols, expressions, addressing-mode
-      selection, `.org`, non-iNES data directives, reference-matching errors).
-- [x] **Phase 3 — iNES output & banking**: full iNES header + PRG/CHR bank
-      layout, `.segment`/`.prg`/`.chr`, and the `.checksum`/`.random`/`.color`/
-      `.enum`/`.rs`/`.rsset` directives, plus overflowing-bank warnings.
-- [ ] Phase 4 — macros, conditionals, includes.
-- [ ] Phase 5 — media importers (PNG/CHR, palette, RLE, WAV/DPCM).
+Or build from source (see below).
 
-**Parity: 93/119** committed goldens are reproduced byte-for-byte, covering all
-6502 opcode cases (documented and undocumented), the non-iNES example programs,
-the iNES/banking/directive programs, and the Phase-2/3 error and warning cases.
-Remaining failures are Phase 4/5 features. Run `cargo run -p xtask -- parity`
-for the current report.
+## Getting started
+
+```bash
+nessemble init                                              # scaffold a project
+nessemble project.asm --output project.nes --format nes    # assemble
+```
+
+Run `project.nes` in any NES emulator to see the result.
 
 ## Workspace layout
 
 ```text
 crates/
   nessemble-isa/     # 6502 opcode tables + addressing modes (build-time generated)
-  nessemble-core/    # lexer, parser, assembler (Phases 1–5)
-  nessemble-media/   # asset importers: PNG/CHR, palette, RLE, WAV/DPCM (Phase 5)
-  nessemble-script/  # Rhai custom pseudo-op host (Phase 8, feature-gated)
-  nessemble-i18n/    # Project Fluent i18n (Phase 7)
+  nessemble-core/    # lexer, parser, assembler
+  nessemble-media/   # asset importers: PNG/CHR, palette, RLE, WAV/DPCM
+  nessemble-script/  # Rhai custom pseudo-op host (feature-gated)
+  nessemble-i18n/    # Project Fluent i18n
   nessemble-cli/     # the `nessemble` binary
 xtask/               # developer tasks (parity harness, oracle fetch)
-tests/corpus/        # reference assemble fixtures (.asm + golden .rom)
+tests/corpus/        # assemble fixtures (.asm + golden .rom)
 ```
 
 ## Building & testing
 
-Requires a Rust toolchain (`rustc`/`cargo` ≥ 1.83).
+Requires a Rust toolchain (`rustc`/`cargo` ≥ 1.83); no C toolchain is needed.
 
 ```bash
 cargo build              # build all crates
@@ -72,20 +67,28 @@ cargo clippy --all-targets --all-features
 
 ## Parity harness
 
-The harness compares assembler output against the committed golden `.rom` files
-and, optionally, the official v1.1.1 release binary.
+`nessemble` is validated against a corpus of committed golden `.rom` files —
+**all 122 reproduce byte-for-byte**. The harness can optionally cross-check the
+goldens against a reference binary.
 
 ```bash
-# Download & extract the v1.1.1 reference binary into ./.oracle (git-ignored)
-cargo run -p xtask -- fetch-oracle
-
-# Confirm the oracle reproduces every committed golden (sanity check)
-cargo run -p xtask -- verify-goldens
-
-# Run nessemble-rs over the corpus and report parity (writes tests/parity-report.txt)
+# Run nessemble over the corpus and report parity (writes tests/parity-report.txt)
 cargo run -p xtask -- parity
+
+# Optional: download a reference binary and confirm it reproduces every golden
+cargo run -p xtask -- fetch-oracle
+cargo run -p xtask -- verify-goldens
+```
+
+## Documentation
+
+The manual lives under [`docs/`](docs/) and builds with
+[mdBook](https://rust-lang.github.io/mdBook/):
+
+```bash
+mdbook build docs
 ```
 
 ## License
 
-GPL-3.0-or-later, matching the upstream project. See [`COPYING`](COPYING).
+GPL-3.0-or-later. See [`COPYING`](COPYING).

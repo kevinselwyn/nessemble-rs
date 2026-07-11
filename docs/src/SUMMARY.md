@@ -3,6 +3,7 @@
 [Introduction](index.md)
 
 - [Installation](installation.md)
+- [Upgrading](upgrading.md)
 - [Usage](usage.md)
 - [Syntax](syntax.md)
 - [Extending](extending.md)

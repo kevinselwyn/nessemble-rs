@@ -1,8 +1,7 @@
 # Building
 
-`nessemble-rs` is a Cargo workspace of pure-Rust crates. Building requires only a
-stock Rust toolchain (1.83+) — there is no C toolchain, flex/bison, or gettext
-dependency.
+`nessemble` is a Cargo workspace of pure-Rust crates. Building requires only a
+stock Rust toolchain (1.83+).
 
 ## Build
 
@@ -18,8 +17,8 @@ The CLI binary is written to `target/release/nessemble`.
 cargo test
 ```
 
-The parity harness compares `nessemble-rs` output against the committed golden
-ROMs (produced by the upstream v1.1.1 release binary):
+The parity harness compares `nessemble` output against the committed golden
+ROMs:
 
 ```text
 cargo run -p xtask -- parity

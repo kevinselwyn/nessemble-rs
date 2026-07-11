@@ -1,11 +1,12 @@
 # nessemble-rs: A Multi-Phase Plan to Reimplement `nessemble` in Rust
 
-> Status: **Scope confirmed.** This document is a plan produced from a
-> read-only analysis of the upstream C project
+> Status: **Complete — all phases (0–9) shipped.** This document began as a
+> plan produced from a read-only analysis of the upstream C project
 > [`kevinselwyn/nessemble`](https://github.com/kevinselwyn/nessemble) pinned at
-> **v1.1.1**. All initial open questions have been answered by the project owner;
-> see the [Decisions Log](#12-decisions-log) for the resolved directions that
-> shape this plan.
+> **v1.1.1**; every phase below is now implemented and merged, released as
+> **`nessemble` 2.0.0**. The assembler reproduces **all 122** committed goldens
+> byte-for-byte. Phase statuses are retained below as the build record; see the
+> [Decisions Log](#12-decisions-log) for the directions that shaped the work.
 
 ---
 
@@ -726,6 +727,10 @@ ordered so that the highest-value core lands first and each builds on the last.
 ---
 
 ## 11. Success Criteria (Definition of Done for the migration)
+
+> **All criteria met** as of the 2.0.0 release. Parity is green (**122/122**),
+> the in-scope CLI is complete, Rhai scripting and Fluent i18n are shipped, the
+> docs/website generate, and release artifacts build for all five platforms.
 
 1. `nessemble-rs` **assembles** the entire in-scope reference corpus with
    **byte-for-byte ROM parity** vs the v1.1.1 release binary (assemble / check /
