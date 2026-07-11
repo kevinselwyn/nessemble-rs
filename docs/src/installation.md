@@ -16,8 +16,7 @@ Release artifacts are provided for all five supported platforms:
 
 ## From source
 
-`nessemble-rs` is a Cargo workspace and builds with a stock Rust toolchain — no
-C toolchain is required.
+`nessemble` is a Cargo workspace and builds with a stock Rust toolchain.
 
 ```text
 git clone https://github.com/kevinselwyn/nessemble-rs

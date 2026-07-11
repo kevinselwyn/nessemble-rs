@@ -1,9 +1,7 @@
 # Extending
 
 `nessemble` can be extended with custom pseudo-instructions written in
-[Rhai](https://rhai.rs), a small, sandboxed, pure-Rust scripting language. (The
-original tool embedded three engines — JavaScript, Lua, and Scheme — which are
-consolidated here into this single language.)
+[Rhai](https://rhai.rs), a small, sandboxed, pure-Rust scripting language.
 
 ## Usage
 

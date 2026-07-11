@@ -1,9 +1,10 @@
 # nessemble
 
 `nessemble` is a 6502 assembler targeting the Nintendo Entertainment System
-(NES). This is **nessemble-rs**, a from-scratch Rust reimplementation of the
-original tool, targeting byte-for-byte ROM-output parity with the upstream
-v1.1.1 release.
+(NES), written in Rust.
+
+> Upgrading from a 1.x release? See [Upgrading](upgrading.md) for what changed
+> in 2.0.
 
 ## Getting Started
 
