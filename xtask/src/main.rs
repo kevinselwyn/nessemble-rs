@@ -170,6 +170,24 @@ fn run_tool(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), Stri
     }
 }
 
+/// Like [`run_tool`], but with `$HOME` overridden (used to install the bundled
+/// scripts into a hermetic scripts-home).
+fn run_tool_env(program: &str, args: &[&str], home: Option<&Path>) -> Result<(), String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some(home) = home {
+        cmd.env("HOME", home);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to run `{program}`: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`{program}` exited with {status}"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Corpus discovery
 // ---------------------------------------------------------------------------
@@ -180,7 +198,13 @@ struct TestCase {
     asm: PathBuf,
     rom: PathBuf,
     flags: Vec<String>,
-    pending: Option<&'static str>,
+    /// Requires the bundled scripts installed into a `~/.nessemble/scripts`
+    /// (a scripts-home is set for these when running `nessemble-rs`).
+    needs_scripts: bool,
+    /// Set when the v1.1.1 oracle cannot reproduce this golden in-sandbox (its
+    /// polyglot/Lua scripting isn't available); such cases are skipped by
+    /// `verify-goldens` but still checked by `parity`.
+    oracle_skip: Option<&'static str>,
 }
 
 fn discover_corpus() -> Result<Vec<TestCase>, String> {
@@ -212,14 +236,20 @@ fn discover_corpus() -> Result<Vec<TestCase>, String> {
                 continue;
             }
 
-            let (flags, pending) = classify(group, &name);
+            let (mut flags, needs_scripts, oracle_skip) = classify(group, &name);
+            // The custom-pseudo example maps its directives via a `-p` file.
+            if group == "examples" && name == "custom" {
+                flags.push("--pseudo".to_string());
+                flags.push(dir.join("custom.txt").to_string_lossy().into_owned());
+            }
             cases.push(TestCase {
                 group: group.to_string(),
                 name,
                 asm,
                 rom,
                 flags,
-                pending,
+                needs_scripts,
+                oracle_skip,
             });
         }
     }
@@ -230,38 +260,46 @@ fn discover_corpus() -> Result<Vec<TestCase>, String> {
     Ok(cases)
 }
 
-/// Per-test flags and known-pending classification.
+/// Per-test flags, whether it needs the bundled scripts installed, and whether
+/// the oracle can reproduce it in-sandbox.
 ///
 /// The reference per-test drivers pass no extra flags except for undocumented
-/// opcodes (`-u`). Scripting-dependent tests need the Phase 8 Rhai host and are
-/// reported as pending until then.
-fn classify(group: &str, name: &str) -> (Vec<String>, Option<&'static str>) {
-    let undocumented = name == "undocumented";
-    let flags = if undocumented {
+/// opcodes (`-u`). The scripting cases (`custom`/`ease`/`ease-type`) run through
+/// the Rhai host; the oracle's Lua/polyglot scripting isn't available here, so
+/// they are `parity`-checked but `verify-goldens`-skipped.
+fn classify(group: &str, name: &str) -> (Vec<String>, bool, Option<&'static str>) {
+    let flags = if name == "undocumented" {
         vec!["-u".to_string()]
     } else {
         Vec::new()
     };
 
-    let pending = match (group, name) {
-        ("examples", "custom") | ("examples", "ease") => Some("custom scripting (Phase 8)"),
-        ("errors", "ease-type") => Some("custom scripting (Phase 8)"),
-        _ => None,
+    let (needs_scripts, oracle_skip) = match (group, name) {
+        ("examples", "custom") => (false, Some("polyglot scripts not runnable in-sandbox")),
+        ("examples", "ease") | ("errors", "ease-type") => (true, Some("bundled Lua ease script")),
+        _ => (false, None),
     };
 
-    (flags, pending)
+    (flags, needs_scripts, oracle_skip)
 }
 
 /// Run a binary on a test case and return the combined output bytes.
 ///
 /// Mirrors the reference test harness: `<bin> <asm> --output -` (+ flags),
-/// combined = stderr followed by stdout.
-fn run_case(bin: &Path, case: &TestCase) -> Result<Vec<u8>, String> {
-    let output = Command::new(bin)
-        .arg(&case.asm)
+/// combined = stderr followed by stdout. `scripts_home` (when set) is used as
+/// `$HOME` so directives resolve against installed bundled scripts.
+fn run_case(bin: &Path, case: &TestCase, scripts_home: Option<&Path>) -> Result<Vec<u8>, String> {
+    let mut cmd = Command::new(bin);
+    cmd.arg(&case.asm)
         .arg("--output")
         .arg("-")
-        .args(&case.flags)
+        .args(&case.flags);
+    if case.needs_scripts {
+        if let Some(home) = scripts_home {
+            cmd.env("HOME", home);
+        }
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("failed to run {}: {e}", bin.display()))?;
 
@@ -289,15 +327,13 @@ fn verify_goldens() -> Result<(), String> {
     let mut skipped = 0usize;
 
     for case in &cases {
-        if let Some(reason) = case.pending {
-            // These need scripts installed into ~/.nessemble; skip in the pure
-            // golden check so it stays hermetic.
-            let _ = reason;
+        if case.oracle_skip.is_some() {
+            // The oracle's Lua/polyglot scripting isn't available in-sandbox.
             skipped += 1;
             continue;
         }
         let golden = std::fs::read(&case.rom).map_err(|e| e.to_string())?;
-        let got = run_case(&oracle, case)?;
+        let got = run_case(&oracle, case, None)?;
         if got == golden {
             ok += 1;
         } else {
@@ -350,18 +386,20 @@ fn parity(args: &[String]) -> Result<(), String> {
         return Err(format!("built binary not found at {}", bin.display()));
     }
 
+    // Install the bundled scripts into a hermetic scripts-home so directives
+    // like `.ease` resolve without touching the real `$HOME`.
+    let scripts_home = repo_root().join("target/parity-home");
+    let _ = std::fs::remove_dir_all(&scripts_home);
+    std::fs::create_dir_all(&scripts_home).map_err(|e| e.to_string())?;
+    run_tool_env(&bin.to_string_lossy(), &["scripts"], Some(&scripts_home))?;
+
     let cases = discover_corpus()?;
     let mut pass = 0usize;
     let mut fail = Vec::new();
-    let mut pending = 0usize;
 
     for case in &cases {
-        if case.pending.is_some() {
-            pending += 1;
-            continue;
-        }
         let golden = std::fs::read(&case.rom).map_err(|e| e.to_string())?;
-        let got = run_case(&bin, case)?;
+        let got = run_case(&bin, case, Some(&scripts_home))?;
         if got == golden {
             pass += 1;
         } else {
@@ -382,8 +420,7 @@ fn parity(args: &[String]) -> Result<(), String> {
         "nessemble-rs parity vs v{REFERENCE_VERSION} goldens\n\
          =================================================\n\
          pass:    {pass}/{total}\n\
-         fail:    {}/{total}\n\
-         pending: {pending} (scripting, Phase 8)\n\n",
+         fail:    {}/{total}\n\n",
         fail.len()
     ));
     for f in &fail {

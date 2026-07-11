@@ -44,6 +44,11 @@ macro-name-after-macrodef = Expected macro name after .macrodef
 macro-unterminated = Unterminated macro definition
 unsupported-directive = Unsupported directive `.{ $name }` (not yet implemented)
 
+## Custom pseudo-ops (scripting)
+
+unknown-custom = Unknown custom pseudo-instruction `{ $pseudo }`
+custom-not-exist = Command for custom pseudo-instruction `{ $pseudo }` does not exist
+
 ## Diagnostic framing (CLI)
 
 error-line = Error in `{ $file }` on line { $line }: { $message }

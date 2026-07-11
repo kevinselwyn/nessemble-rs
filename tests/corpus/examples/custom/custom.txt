@@ -1,5 +1,5 @@
-.sum = scripts/sum.py
-.product = scripts/product.lua
-.difference = scripts/difference.js
-.quotient = scripts/quotient.so
-.factorial = scripts/factorial.scm
+.sum = scripts/sum.rhai
+.product = scripts/product.rhai
+.difference = scripts/difference.rhai
+.quotient = scripts/quotient.rhai
+.factorial = scripts/factorial.rhai

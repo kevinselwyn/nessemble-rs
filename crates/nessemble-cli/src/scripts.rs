@@ -1,11 +1,17 @@
 //! `scripts` subcommand: install the bundled custom-pseudo-op scripts into
 //! `~/.nessemble/scripts`.
 //!
-//! The scripting engine (Rhai) and the bundled `ease` script land in Phase 8;
-//! for now this creates the scripts directory so the install location exists and
-//! reports it, matching the reference's "Installed scripts to <path>" output.
+//! The bundled scripts (currently the `ease` easing-curve script and its
+//! `scripts.txt` mapping) are embedded at build time and written out so that
+//! `.ease` resolves at assemble time without a `-p` file.
 
 use crate::home;
+
+/// The bundled scripts installed by `scripts` (relative name, contents).
+const BUNDLED: &[(&str, &str)] = &[
+    ("scripts.txt", include_str!("data/scripts/scripts.txt")),
+    ("ease.rhai", include_str!("data/scripts/ease.rhai")),
+];
 
 /// Run `scripts`, returning the process exit code.
 pub fn run() -> u8 {
@@ -19,6 +25,12 @@ pub fn run() -> u8 {
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("nessemble: could not install scripts: {e}");
         return 1;
+    }
+    for (name, contents) in BUNDLED {
+        if let Err(e) = std::fs::write(dir.join(name), contents) {
+            eprintln!("nessemble: could not install scripts: {e}");
+            return 1;
+        }
     }
     println!(
         "{}",

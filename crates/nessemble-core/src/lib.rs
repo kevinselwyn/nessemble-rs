@@ -16,7 +16,7 @@ mod lexer;
 mod parse;
 mod preprocess;
 
-pub use assemble::{CoverageReport, Diag, ListSymbol};
+pub use assemble::{CoverageReport, CustomResolver, Diag, ListSymbol};
 
 /// The reference implementation version this crate targets for output parity.
 pub const REFERENCE_VERSION: &str = "1.1.1";
@@ -134,16 +134,33 @@ pub fn render_list_file(symbols: &[ListSymbol]) -> String {
 /// Assemble source text into output bytes.
 ///
 /// Includes are resolved relative to the current working directory and the
-/// source is reported as `stdin` in diagnostics. Use [`assemble_file`] to
-/// assemble a named file (which resolves includes relative to that file's
-/// directory, like the reference tool).
+/// source is reported as `stdin` in diagnostics. Custom pseudo-ops (`.foo`) are
+/// unresolved; use [`assemble_with`] to supply a resolver.
 pub fn assemble(source: &str, options: &Options) -> Result<Assembly, AssembleError> {
+    assemble_with(source, options, default_custom_resolver())
+}
+
+/// Assemble source text with a custom pseudo-op resolver.
+pub fn assemble_with(
+    source: &str,
+    options: &Options,
+    custom: CustomResolver,
+) -> Result<Assembly, AssembleError> {
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    assemble_impl(source, options, base, "stdin")
+    assemble_impl(source, options, base, "stdin", custom)
 }
 
 /// Assemble the file at `path`, resolving includes relative to its directory.
 pub fn assemble_file(path: &Path, options: &Options) -> Result<Assembly, AssembleError> {
+    assemble_file_with(path, options, default_custom_resolver())
+}
+
+/// Assemble the file at `path` with a custom pseudo-op resolver.
+pub fn assemble_file_with(
+    path: &Path,
+    options: &Options,
+    custom: CustomResolver,
+) -> Result<Assembly, AssembleError> {
     let source = std::fs::read_to_string(path).map_err(|e| {
         AssembleError::Diagnostic(Diag {
             file: display_name(path),
@@ -156,7 +173,7 @@ pub fn assemble_file(path: &Path, options: &Options) -> Result<Assembly, Assembl
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    assemble_impl(&source, options, base, &display_name(path))
+    assemble_impl(&source, options, base, &display_name(path), custom)
 }
 
 /// The basename used to refer to `path` in diagnostics.
@@ -167,11 +184,22 @@ fn display_name(path: &Path) -> String {
         .to_string()
 }
 
+/// The default resolver: every custom pseudo-op is unknown.
+fn default_custom_resolver() -> CustomResolver {
+    Box::new(|name, _ints, _texts, _base| {
+        Err(nessemble_i18n::t!(
+            "unknown-custom",
+            pseudo = format!(".{name}")
+        ))
+    })
+}
+
 fn assemble_impl(
     source: &str,
     options: &Options,
     base_dir: PathBuf,
     top_name: &str,
+    custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
     let (tokens, files) = preprocess::preprocess(source, base_dir.clone(), top_name)
         .map_err(AssembleError::Diagnostic)?;
@@ -188,6 +216,7 @@ fn assemble_impl(
         options.empty_byte,
         files,
         base_dir,
+        custom,
     );
     let rom = asm.run(&lines).map_err(AssembleError::Diagnostic)?;
     let symbols = asm.list_symbols();

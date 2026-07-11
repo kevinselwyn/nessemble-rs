@@ -129,8 +129,16 @@ pub enum Pseudo {
     Font(Vec<Expr>),
     /// `.defchr <8 rows>` — an 8×8 tile defined inline (8 tile-digit rows).
     Defchr(Vec<Expr>),
-    /// A directive not yet implemented in this phase.
-    Unsupported(String),
+    /// A custom pseudo-op (`.foo`) resolved to a script at assemble time. The
+    /// name has no leading dot; arguments preserve source order.
+    Custom(String, Vec<CustomArg>),
+}
+
+/// A single argument to a custom pseudo-op: a numeric expression or a string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomArg {
+    Int(Expr),
+    Str(String),
 }
 
 /// A top-level statement.

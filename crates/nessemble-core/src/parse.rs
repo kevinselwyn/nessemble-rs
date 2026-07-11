@@ -317,9 +317,35 @@ impl Parser {
                     negate,
                 })
             }
-            other => Pseudo::Unsupported(other.to_string()),
+            // Any other directive is a custom pseudo-op resolved to a script.
+            other => Pseudo::Custom(other.to_string(), self.parse_custom_args()?),
         };
         Ok(p)
+    }
+
+    /// Parse a custom pseudo-op's comma-separated arguments (numbers or quoted
+    /// strings), preserving source order.
+    fn parse_custom_args(&mut self) -> Result<Vec<CustomArg>, ParseError> {
+        let mut out = Vec::new();
+        if matches!(self.peek(), Some(Tok::Endl) | None) {
+            return Ok(out);
+        }
+        loop {
+            match self.peek() {
+                Some(Tok::QuotString(s)) => {
+                    let s = strip_quotes(s);
+                    self.pos += 1;
+                    out.push(CustomArg::Str(s));
+                }
+                _ => out.push(CustomArg::Int(self.parse_expr()?)),
+            }
+            if matches!(self.peek(), Some(Tok::Comma)) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Parse the single symbol name argument to `.ifdef` / `.ifndef`.

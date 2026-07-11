@@ -12,10 +12,17 @@ authors.workspace = true
 name = "nessemble"
 path = "src/main.rs"
 
+[features]
+# Custom pseudo-op scripting (Rhai) is on by default; disabling it drops the
+# scripting dependency and makes custom directives report "scripting disabled".
+default = ["scripting"]
+scripting = ["dep:nessemble-script"]
+
 [dependencies]
 nessemble-core.workspace = true
 nessemble-isa.workspace = true
 nessemble-i18n.workspace = true
+nessemble-script = { workspace = true, optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"

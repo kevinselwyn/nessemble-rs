@@ -141,7 +141,15 @@ pub struct Assembler {
     /// Directory that media includes (`.incbin`/`.incpng`/…) resolve against —
     /// the top-level file's directory, matching the reference `cwd_path`.
     base_dir: PathBuf,
+    /// Resolver for custom pseudo-ops (`.foo`): given the directive name, its
+    /// numeric and string arguments, and the base directory, it returns the
+    /// bytes to emit (or an error message).
+    custom: CustomResolver,
 }
+
+/// Resolves a custom pseudo-op to the bytes it emits. See [`Assembler::custom`].
+pub type CustomResolver =
+    Box<dyn Fn(&str, &[i64], &[String], &std::path::Path) -> Result<Vec<u8>, String>>;
 
 impl Assembler {
     pub fn new(
@@ -150,6 +158,7 @@ impl Assembler {
         empty_byte: u8,
         files: Vec<String>,
         base_dir: PathBuf,
+        custom: CustomResolver,
     ) -> Self {
         Assembler {
             nes,
@@ -182,6 +191,7 @@ impl Assembler {
             cur_file: 0,
             files,
             base_dir,
+            custom,
         }
     }
 
@@ -786,9 +796,24 @@ impl Assembler {
                 let ints: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
                 self.exec_defchr(&ints);
             }
-            Pseudo::Unsupported(name) => {
-                self.hard_error(t!("unsupported-directive", name = name));
+            Pseudo::Custom(name, args) => self.exec_custom(name, args),
+        }
+    }
+
+    /// Resolve and run a custom pseudo-op via the injected resolver, writing the
+    /// bytes it returns (or reporting the resolver's error).
+    fn exec_custom(&mut self, name: &str, args: &[CustomArg]) {
+        let mut ints = Vec::new();
+        let mut texts = Vec::new();
+        for arg in args {
+            match arg {
+                CustomArg::Int(e) => ints.push(self.eval(e)),
+                CustomArg::Str(s) => texts.push(s.clone()),
             }
+        }
+        match (self.custom)(name, &ints, &texts, &self.base_dir) {
+            Ok(bytes) => self.write_all(&bytes),
+            Err(msg) => self.hard_error(msg),
         }
     }
 

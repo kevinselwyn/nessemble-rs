@@ -172,3 +172,68 @@ fn a_dropped_in_locale_localizes_output_end_to_end() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Path to a corpus directory for a scripting example/error case.
+fn corpus(group: &str, name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus")
+        .join(group)
+        .join(name)
+}
+
+#[test]
+fn custom_pseudo_ops_resolve_via_pseudo_file() {
+    let dir = corpus("examples", "custom");
+    let out = bin()
+        .arg(dir.join("custom.asm"))
+        .args(["--pseudo"])
+        .arg(dir.join("custom.txt"))
+        .args(["--output", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // .sum/.product/.difference/.quotient/.factorial each yield 6.
+    assert_eq!(out.stdout, vec![6, 6, 6, 6, 6]);
+}
+
+#[test]
+fn bundled_ease_script_resolves_after_install() {
+    let home = std::env::temp_dir().join(format!("nessemble-ease-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+
+    // Install the bundled scripts, then assemble a file that uses `.ease`.
+    assert!(bin()
+        .env("HOME", &home)
+        .arg("scripts")
+        .status()
+        .unwrap()
+        .success());
+
+    let dir = corpus("examples", "ease");
+    let out = bin()
+        .env("HOME", &home)
+        .arg(dir.join("ease.asm"))
+        .args(["--output", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let golden = std::fs::read(dir.join("ease.rom")).unwrap();
+    assert_eq!(out.stdout, golden);
+
+    // A bad easing type surfaces the script's thrown message.
+    let dir = corpus("errors", "ease-type");
+    let out = bin()
+        .env("HOME", &home)
+        .arg(dir.join("ease-type.asm"))
+        .args(["--output", "-"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "Error in `ease-type.asm` on line 1: Invalid easing type `niceAndSlow`\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
