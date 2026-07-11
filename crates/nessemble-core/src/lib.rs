@@ -6,6 +6,7 @@
 //! semantics, and error messages. Full iNES ROM output (header/banking/CHR)
 //! arrives in Phase 3.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 pub use nessemble_isa as isa;
@@ -75,19 +76,22 @@ pub struct Assembly {
 
 /// Render the coverage summary (`-C`) exactly as the reference `get_coverage`:
 /// one `PRG XX:` / `CHR XX:` line per bank with `covered/total` counts.
+#[must_use]
 pub fn render_coverage(report: &CoverageReport) -> String {
     let mut out = String::new();
     for (i, covered) in report.prg.iter().enumerate() {
-        out.push_str(&format!(
-            "PRG {:02X}: {:>5}/{:<5}\n",
+        let _ = writeln!(
+            out,
+            "PRG {:02X}: {:>5}/{:<5}",
             i, covered, report.prg_bank_size
-        ));
+        );
     }
     for (i, covered) in report.chr.iter().enumerate() {
-        out.push_str(&format!(
-            "CHR {:02X}: {:>5}/{:<5}\n",
+        let _ = writeln!(
+            out,
+            "CHR {:02X}: {:>5}/{:<5}",
             i, covered, report.chr_bank_size
-        ));
+        );
     }
     out
 }
@@ -96,6 +100,7 @@ pub fn render_coverage(report: &CoverageReport) -> String {
 /// reference `output_list` format: a `[constants]` section (`VALUE = NAME`) and
 /// a `[labels]` section (`BANK/VALUE = NAME`), each sorted lexicographically by
 /// its formatted line, separated by a blank line when both are present.
+#[must_use]
 pub fn render_list_file(symbols: &[ListSymbol]) -> String {
     let mut constants: Vec<String> = symbols
         .iter()
@@ -171,8 +176,7 @@ pub fn assemble_file_with(
     let base = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     assemble_impl(&source, options, base, &display_name(path), custom)
 }
 

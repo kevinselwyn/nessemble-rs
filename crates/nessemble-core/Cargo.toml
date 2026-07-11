@@ -13,5 +13,5 @@ nessemble-isa.workspace = true
 nessemble-media.workspace = true
 nessemble-i18n.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

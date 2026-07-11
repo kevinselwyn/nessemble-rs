@@ -2,6 +2,8 @@
 //! in-scope CLI surface. Out-of-scope flags (`-d`/`-R`/`-s`/`-r`) and commands
 //! (registry/package/user) are omitted entirely — they appear nowhere here.
 
+use std::fmt::Write as _;
+
 use nessemble_i18n::t;
 
 const PROGRAM_NAME: &str = "nessemble";
@@ -68,23 +70,20 @@ fn print_block(rows: &[(&str, &str)], out: &mut String) {
 pub fn usage(exec: &str) -> String {
     let usage_label = t!("label-usage");
     let mut out = String::new();
-    out.push_str(&format!(
-        "{usage_label}: {exec} [{}] <infile.asm>\n",
+    let _ = writeln!(
+        out,
+        "{usage_label}: {exec} [{}] <infile.asm>",
         t!("label-options-arg")
-    ));
+    );
     // Align the second line under `<infile.asm>`: label + ": " + exec + " ".
     let indent = usage_label.len() + 2 + exec.len() + 1;
     for _ in 0..indent {
         out.push(' ');
     }
-    out.push_str(&format!(
-        "<{}> [{}]\n\n",
-        t!("label-command"),
-        t!("label-args")
-    ));
-    out.push_str(&format!("{}:\n", t!("label-options")));
+    let _ = writeln!(out, "<{}> [{}]\n", t!("label-command"), t!("label-args"));
+    let _ = writeln!(out, "{}:", t!("label-options"));
     print_block(OPTIONS, &mut out);
-    out.push_str(&format!("\n{}:\n", t!("label-commands")));
+    let _ = writeln!(out, "\n{}:", t!("label-commands"));
     print_block(COMMANDS, &mut out);
     out
 }

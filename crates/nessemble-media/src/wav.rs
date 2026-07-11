@@ -62,9 +62,8 @@ pub fn wav_to_dpcm(bytes: &[u8], amplitude: i32) -> Result<Vec<u8>, WavError> {
         }
     }
 
-    let (fmt, (data_start, data_len)) = match (fmt, data) {
-        (Some(f), Some(d)) => (f, d),
-        _ => return Ok(Vec::new()),
+    let (Some(fmt), Some((data_start, data_len))) = (fmt, data) else {
+        return Ok(Vec::new());
     };
 
     if fmt.channels != 1 {
@@ -83,12 +82,13 @@ pub fn wav_to_dpcm(bytes: &[u8], amplitude: i32) -> Result<Vec<u8>, WavError> {
 /// reconstructed level; each bit records whether the target sample is at or
 /// above it.
 fn encode_dpcm(data: &[u8], bits_sample: u16, amplitude: i32) -> Vec<u8> {
+    const OVERSAMPLE: i32 = 100;
+
     let mut out = Vec::new();
     let mut reader = SampleReader::new(data, bits_sample);
     let mut y: i32 = 0;
     let mut x: i32 = 0;
     let mut subsample: i32 = 99;
-    const OVERSAMPLE: i32 = 100;
 
     while reader.chunk_left > 0 {
         let mut code: u32 = 0;

@@ -8,5 +8,5 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

@@ -9,5 +9,5 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

@@ -13,53 +13,48 @@ const INIT_TEMPLATE: &str = include_str!("data/init.txt");
 /// Run `init` with the given positional arguments, returning the process exit
 /// code (0 on success, 1 on failure).
 pub fn run(args: &[String]) -> u8 {
-    let filename = match arg_or_prompt(args, 0, &t!("init-prompt-filename")) {
-        Some(f) => f,
-        None => return 1,
+    let Some(filename) = arg_or_prompt(args, 0, &t!("init-prompt-filename")) else {
+        return 1;
     };
-    let prg = match int_arg_or_prompt(
+    let Some(prg) = int_arg_or_prompt(
         args,
         1,
         &t!("init-prompt-prg"),
         0,
         i32::MAX,
         &t!("init-choose-banks"),
-    ) {
-        Some(v) => v,
-        None => return 1,
+    ) else {
+        return 1;
     };
-    let chr = match int_arg_or_prompt(
+    let Some(chr) = int_arg_or_prompt(
         args,
         2,
         &t!("init-prompt-chr"),
         0,
         i32::MAX,
         &t!("init-choose-banks"),
-    ) {
-        Some(v) => v,
-        None => return 1,
+    ) else {
+        return 1;
     };
-    let mapper = match int_arg_or_prompt(
+    let Some(mapper) = int_arg_or_prompt(
         args,
         3,
         &t!("init-prompt-mapper"),
         0,
         0xFF,
         &t!("init-choose-mapper"),
-    ) {
-        Some(v) => v,
-        None => return 1,
+    ) else {
+        return 1;
     };
-    let mirroring = match int_arg_or_prompt(
+    let Some(mirroring) = int_arg_or_prompt(
         args,
         4,
         &t!("init-prompt-mirroring"),
         0,
         0x0F,
         &t!("init-choose-mirroring"),
-    ) {
-        Some(v) => v,
-        None => return 1,
+    ) else {
+        return 1;
     };
 
     if std::path::Path::new(&filename).exists() && !confirm_overwrite(&filename) {
@@ -145,7 +140,7 @@ fn int_arg_or_prompt(
         match trimmed.parse::<i32>() {
             Ok(v) if v >= lo && v <= hi => return Some(v),
             Ok(_) => println!("{choose_msg}"),
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 }
@@ -166,9 +161,9 @@ fn confirm_overwrite(filename: &str) -> bool {
         let _ = std::io::stdout().flush();
         match read_line("") {
             Some(line) => match line.trim().chars().next() {
-                Some('y') | Some('Y') => return true,
-                Some('n') | Some('N') => return false,
-                _ => continue,
+                Some('y' | 'Y') => return true,
+                Some('n' | 'N') => return false,
+                _ => {}
             },
             None => return false,
         }

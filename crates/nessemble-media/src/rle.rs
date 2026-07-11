@@ -6,6 +6,7 @@
 //! bytes). A terminating `0xFF` marks the end of the stream.
 
 /// Run-length encode `data` into the reference's `.incrle` format.
+#[must_use]
 pub fn rle_encode(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut run: Vec<u8> = Vec::new();

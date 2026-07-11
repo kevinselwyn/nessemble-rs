@@ -3,6 +3,7 @@
 //! list), rather than the reference tool's network call to the registry.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, OPCODES};
@@ -109,14 +110,15 @@ fn instruction_detail(mnemonic: &str) -> (String, u8) {
         } else {
             ""
         };
-        out.push_str(&format!(
-            "  {:<12} ${:02X}  {} byte(s), {} cycles{}\n",
+        let _ = writeln!(
+            out,
+            "  {:<12} ${:02X}  {} byte(s), {} cycles{}",
             mode_name(o.mode),
             o.opcode,
             o.length,
             o.timing,
             flag
-        ));
+        );
     }
     (out, 0)
 }
@@ -125,7 +127,7 @@ fn list_directives() -> String {
     let max = DIRECTIVES.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     let mut out = String::from("Directives:\n");
     for (name, desc) in DIRECTIVES {
-        out.push_str(&format!("  {name:<max$}  {desc}\n"));
+        let _ = writeln!(out, "  {name:<max$}  {desc}");
     }
     out
 }

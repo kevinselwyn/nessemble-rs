@@ -40,6 +40,7 @@ pub fn decode_png(bytes: &[u8]) -> Result<Png, PngError> {
 /// Convert a PNG to CHR tiles (`.incpng`): each 8×8 tile becomes two bitplanes
 /// (low then high) of 8 bytes. `offset` skips leading tiles; `limit` (`None` =
 /// all) caps how many tiles after `offset` are emitted.
+#[must_use]
 pub fn png_to_tiles(png: &Png, offset: i32, limit: Option<i32>) -> Vec<u8> {
     let mut out = Vec::new();
     let mut tile_index: i32 = -1;
@@ -75,6 +76,7 @@ fn emit_plane(png: &Png, out: &mut Vec<u8>, h: u32, w: u32, bit: u32) {
 
 /// Convert a PNG to a palette (`.incpal`): scan pixels row-major, emitting each
 /// nearest-NES-color when it differs from the previous one, up to four entries.
+#[must_use]
 pub fn png_to_palette(png: &Png) -> Vec<u8> {
     let mut out = Vec::new();
     let mut last_color: i32 = -1;

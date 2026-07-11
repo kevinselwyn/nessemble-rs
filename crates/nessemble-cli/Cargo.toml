@@ -24,8 +24,8 @@ nessemble-isa.workspace = true
 nessemble-i18n.workspace = true
 nessemble-script = { workspace = true, optional = true }
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true
 
 # Debian packaging (`cargo deb`). Installs the CLI to /usr/local/bin to match the
 # upstream v1.1.1 `.deb` layout.

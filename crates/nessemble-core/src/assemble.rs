@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
 
-use crate::ast::*;
+use crate::ast::{BinOp, CustomArg, Expr, Instruction, Line, Operand, Pseudo, Stmt};
 
 const BANK_PRG: i64 = 0x4000;
 const BANK_CHR: i64 = 0x2000;
@@ -205,8 +205,7 @@ impl Assembler {
         let count = |start: usize, len: usize| -> u32 {
             self.coverage
                 .get(start..start + len)
-                .map(|s| s.iter().filter(|&&c| c).count() as u32)
-                .unwrap_or(0)
+                .map_or(0, |s| s.iter().filter(|&&c| c).count() as u32)
         };
         let mut prg = Vec::new();
         for i in 0..self.ines.prg.max(0) as usize {
@@ -282,10 +281,10 @@ impl Assembler {
     }
 
     fn reset_state(&mut self) {
-        for v in self.prg_offsets.iter_mut() {
+        for v in &mut self.prg_offsets {
             *v = 0;
         }
-        for v in self.chr_offsets.iter_mut() {
+        for v in &mut self.chr_offsets {
             *v = 0;
         }
         self.prg_index = 0;
@@ -396,10 +395,10 @@ impl Assembler {
             return;
         }
         let bank = self.prg_index;
-        let existing = if name != ":" {
-            self.find_symbol(name)
-        } else {
+        let existing = if name == ":" {
             None
+        } else {
+            self.find_symbol(name)
         };
         match existing {
             Some(id) => {
@@ -749,7 +748,7 @@ impl Assembler {
                 }
             }
             Pseudo::Incbin(file, offset, limit) => {
-                let off = offset.as_ref().map(|e| self.eval(e)).unwrap_or(0).max(0) as usize;
+                let off = offset.as_ref().map_or(0, |e| self.eval(e)).max(0) as usize;
                 let lim = limit.as_ref().map(|e| self.eval(e).max(0) as usize);
                 match self.read_media_file(file) {
                     Some(bytes) => {
@@ -760,7 +759,7 @@ impl Assembler {
                 }
             }
             Pseudo::Incpng(file, offset, limit) => {
-                let off = offset.as_ref().map(|e| self.eval(e)).unwrap_or(0) as i32;
+                let off = offset.as_ref().map_or(0, |e| self.eval(e)) as i32;
                 let lim = limit.as_ref().map(|e| self.eval(e) as i32);
                 match self.decode_media_png(file) {
                     Some(png) => {
@@ -785,7 +784,7 @@ impl Assembler {
                 None => self.hard_error(t!("could-not-read", file = file)),
             },
             Pseudo::Incwav(file, amp) => {
-                let amplitude = amp.as_ref().map(|e| self.eval(e)).unwrap_or(24) as i32;
+                let amplitude = amp.as_ref().map_or(24, |e| self.eval(e)) as i32;
                 self.exec_incwav(file, amplitude);
             }
             Pseudo::Font(list) => {
@@ -839,17 +838,14 @@ impl Assembler {
     }
 
     fn exec_incwav(&mut self, file: &str, amplitude: i32) {
-        let bytes = match self.read_media_file(file) {
-            Some(b) => b,
-            None => {
-                self.hard_error(t!("could-not-open", file = file));
-                return;
-            }
+        let Some(bytes) = self.read_media_file(file) else {
+            self.hard_error(t!("could-not-open", file = file));
+            return;
         };
         match nessemble_media::wav_to_dpcm(&bytes, amplitude) {
             Ok(out) => self.write_all(&out),
             Err(nessemble_media::WavError::ShortRead) => {
-                self.hard_error(t!("could-not-read", file = file))
+                self.hard_error(t!("could-not-read", file = file));
             }
             Err(nessemble_media::WavError::NotWav) => self.hard_error(t!("not-a-wav", file = file)),
             Err(nessemble_media::WavError::NotMono) => self.hard_error(t!("wav-not-mono")),
@@ -1163,20 +1159,17 @@ impl Assembler {
     }
 
     fn eval_symbol(&mut self, name: &str) -> i64 {
-        match self.find_symbol(name) {
-            Some(id) => {
-                if self.pass == 2 && self.symbols[id].kind == SymType::Undefined {
-                    let msg = t!("symbol-not-defined", name = self.symbols[id].name);
-                    self.error(msg);
-                }
-                self.symbols[id].value
+        if let Some(id) = self.find_symbol(name) {
+            if self.pass == 2 && self.symbols[id].kind == SymType::Undefined {
+                let msg = t!("symbol-not-defined", name = self.symbols[id].name);
+                self.error(msg);
             }
-            None => {
-                // Reference behavior: unknown symbols are registered as
-                // undefined (value 1) during pass 1.
-                self.add_symbol(name, 1, SymType::Undefined);
-                1
-            }
+            self.symbols[id].value
+        } else {
+            // Reference behavior: unknown symbols are registered as
+            // undefined (value 1) during pass 1.
+            self.add_symbol(name, 1, SymType::Undefined);
+            1
         }
     }
 

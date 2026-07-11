@@ -28,6 +28,7 @@ impl AddressingMode {
     ///
     /// This is `instruction length - 1` for every opcode; provided here for
     /// convenience when decoding/encoding.
+    #[must_use]
     pub const fn operand_bytes(self) -> u8 {
         match self {
             AddressingMode::Implied | AddressingMode::Accumulator => 0,
@@ -72,11 +73,13 @@ pub struct Opcode {
 
 impl Opcode {
     /// Whether this is an undocumented ("illegal") opcode.
+    #[must_use]
     pub const fn is_undocumented(&self) -> bool {
         self.meta & META_UNDOCUMENTED != 0
     }
 
     /// Whether this opcode carries the page-boundary timing flag.
+    #[must_use]
     pub const fn is_boundary(&self) -> bool {
         self.meta & META_BOUNDARY != 0
     }
@@ -85,6 +88,7 @@ impl Opcode {
 include!(concat!(env!("OUT_DIR"), "/opcodes_gen.rs"));
 
 /// Look up the opcode definition for a given opcode byte.
+#[must_use]
 pub fn by_byte(byte: u8) -> &'static Opcode {
     &OPCODES[byte as usize]
 }
@@ -92,6 +96,7 @@ pub fn by_byte(byte: u8) -> &'static Opcode {
 /// Find the opcode matching a mnemonic (case-insensitive) and addressing mode.
 ///
 /// Returns the first match, mirroring the reference assembler's lookup order.
+#[must_use]
 pub fn find(mnemonic: &str, mode: AddressingMode) -> Option<&'static Opcode> {
     OPCODES
         .iter()
@@ -116,7 +121,7 @@ mod tests {
 
     #[test]
     fn length_matches_mode_operand_bytes() {
-        for op in OPCODES.iter() {
+        for op in &OPCODES {
             assert_eq!(
                 op.length,
                 op.mode.operand_bytes() + 1,

@@ -157,8 +157,7 @@ impl Pre {
         let after = text
             .split_once(".include")
             .or_else(|| text.split_once(".inestrn"))
-            .map(|(_, b)| b)
-            .unwrap_or("");
+            .map_or("", |(_, b)| b);
         match after.split_whitespace().next() {
             Some(t) => Ok(t.to_string()),
             None => Err(self.diag(file_id, line, t!("full-path"))),
@@ -186,11 +185,8 @@ impl Pre {
 
         let name = target.trim_matches('"').to_string();
         let path = self.base_dir.join(&name);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(_) => {
-                return Err(self.diag(file_id, line, t!("could-not-include", file = name)));
-            }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Err(self.diag(file_id, line, t!("could-not-include", file = name)));
         };
 
         let child_id = self.files.len();

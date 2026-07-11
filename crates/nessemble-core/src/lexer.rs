@@ -83,6 +83,17 @@ fn is_hex(c: u8) -> bool {
     c.is_ascii_hexdigit()
 }
 
+/// Parse an ASCII digit slice in `radix`, defaulting to 0 on any non-UTF-8 or
+/// overflow input. Callers always pass slices already restricted to valid
+/// digits (via `take_while`), so the fallback is unreachable in practice — it
+/// exists purely to keep the lexer panic-free by construction.
+fn radix_val(bytes: &[u8], radix: u32) -> i64 {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|s| i64::from_str_radix(s, radix).ok())
+        .unwrap_or(0)
+}
+
 /// The lexer over a byte slice.
 pub struct Lexer<'a> {
     src: &'a [u8],
@@ -114,12 +125,12 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + off).copied()
     }
 
-    fn emit(&self, tok: Tok) -> Option<Token> {
-        Some(Token {
+    fn emit(&self, tok: Tok) -> Token {
+        Token {
             tok,
             line: self.line,
             file: 0,
-        })
+        }
     }
 
     fn next_token(&mut self) -> Option<Token> {
@@ -128,11 +139,11 @@ impl<'a> Lexer<'a> {
 
             // Leading indentation at the start of a line.
             if self.at_line_start && (c == b' ' || c == b'\t') {
-                while matches!(self.peek(0), Some(b' ') | Some(b'\t')) {
+                while matches!(self.peek(0), Some(b' ' | b'\t')) {
                     self.pos += 1;
                 }
                 self.at_line_start = false;
-                return self.emit(Tok::Indent);
+                return Some(self.emit(Tok::Indent));
             }
             self.at_line_start = false;
 
@@ -220,7 +231,7 @@ impl<'a> Lexer<'a> {
                     // `%` is a binary-literal prefix when followed by 0/1,
                     // otherwise the modulo operator.
                     b'%' => {
-                        if matches!(self.peek(1), Some(b'0') | Some(b'1')) {
+                        if matches!(self.peek(1), Some(b'0' | b'1')) {
                             return None;
                         }
                         Tok::Mod
@@ -271,8 +282,7 @@ impl<'a> Lexer<'a> {
         if rest.first() == Some(&b'$') {
             let n = rest[1..].iter().take_while(|c| is_hex(**c)).count();
             if n > 0 {
-                let v = i64::from_str_radix(std::str::from_utf8(&rest[1..1 + n]).unwrap(), 16)
-                    .unwrap_or(0);
+                let v = radix_val(&rest[1..=n], 16);
                 consider(1 + n, Tok::Number(v), &mut best);
             }
         }
@@ -280,8 +290,7 @@ impl<'a> Lexer<'a> {
         {
             let n = rest.iter().take_while(|c| is_hex(**c)).count();
             if n > 0 && rest.get(n) == Some(&b'h') {
-                let v =
-                    i64::from_str_radix(std::str::from_utf8(&rest[..n]).unwrap(), 16).unwrap_or(0);
+                let v = radix_val(&rest[..n], 16);
                 consider(n + 1, Tok::Number(v), &mut best);
             }
         }
@@ -292,8 +301,7 @@ impl<'a> Lexer<'a> {
                 .take_while(|c| **c == b'0' || **c == b'1')
                 .count();
             if n > 0 {
-                let v = i64::from_str_radix(std::str::from_utf8(&rest[1..1 + n]).unwrap(), 2)
-                    .unwrap_or(0);
+                let v = radix_val(&rest[1..=n], 2);
                 consider(1 + n, Tok::Number(v), &mut best);
             }
         }
@@ -304,8 +312,7 @@ impl<'a> Lexer<'a> {
                 .take_while(|c| **c == b'0' || **c == b'1')
                 .count();
             if n > 0 && rest.get(n) == Some(&b'b') {
-                let v =
-                    i64::from_str_radix(std::str::from_utf8(&rest[..n]).unwrap(), 2).unwrap_or(0);
+                let v = radix_val(&rest[..n], 2);
                 consider(n + 1, Tok::Number(v), &mut best);
             }
         }
@@ -316,8 +323,7 @@ impl<'a> Lexer<'a> {
                 .take_while(|c| (b'0'..=b'7').contains(*c))
                 .count();
             if n > 0 {
-                let v = i64::from_str_radix(std::str::from_utf8(&rest[1..1 + n]).unwrap(), 8)
-                    .unwrap_or(0);
+                let v = radix_val(&rest[1..=n], 8);
                 consider(1 + n, Tok::Number(v), &mut best);
             }
         }
@@ -328,8 +334,7 @@ impl<'a> Lexer<'a> {
                 .take_while(|c| (b'0'..=b'7').contains(c))
                 .count();
             if n > 0 && rest.get(n) == Some(&b'o') {
-                let v =
-                    i64::from_str_radix(std::str::from_utf8(&rest[..n]).unwrap(), 8).unwrap_or(0);
+                let v = radix_val(&rest[..n], 8);
                 consider(n + 1, Tok::Number(v), &mut best);
             }
         }
@@ -337,10 +342,7 @@ impl<'a> Lexer<'a> {
         {
             let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
             if n > 0 {
-                let v: i64 = std::str::from_utf8(&rest[..n])
-                    .unwrap()
-                    .parse()
-                    .unwrap_or(0);
+                let v = radix_val(&rest[..n], 10);
                 consider(n, Tok::Number(v), &mut best);
             }
         }
@@ -348,10 +350,7 @@ impl<'a> Lexer<'a> {
         {
             let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
             if n > 0 && rest.get(n) == Some(&b'd') {
-                let v: i64 = std::str::from_utf8(&rest[..n])
-                    .unwrap()
-                    .parse()
-                    .unwrap_or(0);
+                let v = radix_val(&rest[..n], 10);
                 consider(n + 1, Tok::Number(v), &mut best);
             }
         }
@@ -363,10 +362,7 @@ impl<'a> Lexer<'a> {
         if rest.first() == Some(&b'\\') {
             let n = rest[1..].iter().take_while(|c| c.is_ascii_digit()).count();
             if n > 0 {
-                let v: i64 = std::str::from_utf8(&rest[1..1 + n])
-                    .unwrap()
-                    .parse()
-                    .unwrap_or(0);
+                let v = radix_val(&rest[1..=n], 10);
                 consider(1 + n, Tok::NumberArg(v), &mut best);
             } else if rest.get(1) == Some(&b'#') {
                 consider(2, Tok::NumberArgc, &mut best);
@@ -390,33 +386,32 @@ impl<'a> Lexer<'a> {
         // 14. identifier / pseudo / keyword: [.@a-zA-Z_][a-zA-Z0-9_]+
         {
             let first = rest.first().copied();
-            let starts = matches!(first, Some(b'.') | Some(b'@') | Some(b'_'))
-                || first.map(|c| c.is_ascii_alphabetic()).unwrap_or(false);
+            let starts = matches!(first, Some(b'.' | b'@' | b'_'))
+                || first.is_some_and(|c| c.is_ascii_alphabetic());
             if starts {
                 let n = 1 + rest[1..].iter().take_while(|c| is_ident_char(**c)).count();
                 if n >= 2 {
-                    let word = std::str::from_utf8(&rest[..n]).unwrap();
-                    let tok = classify_word(word);
-                    consider(n, tok, &mut best);
+                    if let Ok(word) = std::str::from_utf8(&rest[..n]) {
+                        let tok = classify_word(word);
+                        consider(n, tok, &mut best);
+                    }
                 }
             }
         }
         // 15. quoted string
         if rest.first() == Some(&b'"') {
             if let Some(close) = rest[1..].iter().position(|c| *c == b'"') {
-                let s = std::str::from_utf8(&rest[..close + 2]).unwrap().to_string();
-                consider(close + 2, Tok::QuotString(s), &mut best);
+                if let Ok(s) = std::str::from_utf8(&rest[..close + 2]) {
+                    consider(close + 2, Tok::QuotString(s.to_string()), &mut best);
+                }
             }
         }
         // 16. single char register
         {
-            let first = rest.first().copied();
-            if first.map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
-                consider(
-                    1,
-                    Tok::CharReg((first.unwrap() as char).to_ascii_uppercase()),
-                    &mut best,
-                );
+            if let Some(c) = rest.first().copied() {
+                if c.is_ascii_alphabetic() {
+                    consider(1, Tok::CharReg((c as char).to_ascii_uppercase()), &mut best);
+                }
             }
         }
         // A lone '.' that starts a custom pseudo like `.x` (single letter) — flex

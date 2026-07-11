@@ -14,6 +14,7 @@
 //! It is intentionally dependency-free (std only), shelling out to `curl`,
 //! `dpkg-deb`/`ar`/`tar`, and `cargo`.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,7 +23,7 @@ const CORPUS_GROUPS: [&str; 4] = ["opcodes", "examples", "nerdy-nights", "errors
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = args.first().map(String::as_str).unwrap_or("help");
+    let cmd = args.first().map_or("help", String::as_str);
     let rest = &args[args.len().min(1)..];
 
     let result = match cmd {
@@ -159,8 +160,7 @@ fn fetch_oracle(args: &[String]) -> Result<(), String> {
             .find(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("data.tar"))
-                    .unwrap_or(false)
+                    .is_some_and(|n| n.starts_with("data.tar"))
             })
             .ok_or("could not find data.tar in extracted .deb")?;
         run_tool(
@@ -461,13 +461,14 @@ fn parity(args: &[String]) -> Result<(), String> {
 
     let total = pass + fail.len();
     let mut report = String::new();
-    report.push_str(&format!(
+    let _ = writeln!(
+        report,
         "nessemble-rs parity vs v{REFERENCE_VERSION} goldens\n\
          =================================================\n\
          pass:    {pass}/{total}\n\
-         fail:    {}/{total}\n\n",
+         fail:    {}/{total}\n",
         fail.len()
-    ));
+    );
     for f in &fail {
         report.push_str("FAIL ");
         report.push_str(f);
@@ -492,9 +493,9 @@ fn first_diff(got: &[u8], expected: &[u8]) -> String {
             );
         }
     }
-    if got.len() != expected.len() {
-        "differing length".to_string()
-    } else {
+    if got.len() == expected.len() {
         "identical".to_string()
+    } else {
+        "differing length".to_string()
     }
 }

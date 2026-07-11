@@ -11,5 +11,5 @@ authors.workspace = true
 [dependencies]
 rhai = { version = "1", default-features = false, features = ["std"] }
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

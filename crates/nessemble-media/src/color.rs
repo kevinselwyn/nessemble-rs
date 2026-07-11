@@ -18,6 +18,7 @@ const COLORS_FULL: [u32; 64] = [
 
 /// Nearest 2-bit grayscale index (`0..=3`) for an RGB triple, using the average
 /// of the three channels — matching the reference `get_color`.
+#[must_use]
 pub fn two_bit_color(r: u8, g: u8, b: u8) -> u8 {
     let avg = (r as i32 + g as i32 + b as i32) / 3;
     let mut diff = 256;
@@ -34,6 +35,7 @@ pub fn two_bit_color(r: u8, g: u8, b: u8) -> u8 {
 /// Nearest NES palette index for an RGB triple (Euclidean distance, truncated to
 /// an integer, first match), with index `0x0D` remapped to `0x0F` — matching the
 /// reference `match_color`.
+#[must_use]
 pub fn match_nes_color(r: u8, g: u8, b: u8) -> u8 {
     let mut diff: i32 = 0xFFFFFF;
     let mut color: usize = 0;

@@ -57,7 +57,7 @@ pub fn list() -> Result<Option<String>, String> {
             out.push('\n');
         }
         out.push_str(k);
-        for _ in 0..(max - k.len() + 1) {
+        for _ in 0..=(max - k.len()) {
             out.push(' ');
         }
         out.push_str(v);
