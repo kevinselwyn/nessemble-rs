@@ -1,0 +1,121 @@
+.nessemble-icon {
+    width: 18px;
+    height: 18px;
+    margin: 0px 4px 0 0;
+    background: transparent url(../img/nessemble-icon.svg) no-repeat center;
+    background-size: cover;
+    display: block;
+    float: left;
+}
+.intro {
+    display: table;
+    width: 100%;
+    height: auto;
+    padding: 100px 0;
+    text-align: center;
+    color: white;
+    background: url(../img/background.jpg) no-repeat bottom center scroll;
+    background-color: black;
+    -webkit-background-size: cover;
+    -moz-background-size: cover;
+    background-size: cover;
+    -o-background-size: cover;
+}
+.intro .intro-body {
+    display: table-cell;
+    vertical-align: middle;
+}
+.intro .intro-body .brand-heading {
+    font-size: 40px;
+    text-shadow: 2px 2px 2px rgba(0, 0, 0, 0.75);
+}
+.intro .intro-body .brand-heading:before {
+    width: 38px;
+    height: 38px;
+    right: 4px;
+    top: 4px;
+    content: "";
+    background: transparent url(../img/nessemble-icon.svg) no-repeat center;
+    background-size: cover;
+    display: inline-block;
+    position: relative;
+}
+.intro .intro-body .intro-text {
+    font-size: 18px;
+    text-shadow: 2px 2px 2px rgba(0, 0, 0, 0.75);
+}
+
+.content-section {
+    padding-top: 50px;
+}
+
+.download-section {
+    width: 100%;
+    padding: 50px 0;
+    color: white;
+    background: url(../img/intro-bg.jpg) no-repeat center bottom scroll;
+    background-color: black;
+    -webkit-background-size: cover;
+    -moz-background-size: cover;
+    background-size: cover;
+    -o-background-size: cover;
+}
+
+#emulator-frame {
+    width: 366px;
+    height: 245px;
+    margin: 0 auto;
+    position: relative;
+}
+#emulator-tv {
+    width: 366px;
+    height: 245px;
+    background: url(../img/tv.png) no-repeat center center scroll;
+    -webkit-background-size: cover;
+    -moz-background-size: cover;
+    background-size: cover;
+    -o-background-size: cover;
+    position: absolute;
+    z-index: 2;
+}
+#emulator {
+    width: 256px;
+    height: 240px;
+    left: 26px;
+    top: -2px;
+    position: absolute;
+    z-index: 1;
+}
+
+@media (min-width: 767px) {
+    .intro {
+        height: 100%;
+        padding: 0;
+    }
+    .intro .intro-body .brand-heading {
+        font-size: 100px;
+    }
+    .intro .intro-body .brand-heading:before {
+        width: 80px;
+        height: 80px;
+        right: 4px;
+        top: 4px;
+    }
+    .intro .intro-body .intro-text {
+        font-size: 26px;
+    }
+
+    .content-section {
+        padding-top: 100px;
+    }
+
+    .download-section {
+        padding: 100px 0;
+    }
+}
+
+@media (min-width: 767px) and (max-width: 992px) {
+    .intro .intro-body .brand-heading:before {
+        display: none;
+    }
+}
