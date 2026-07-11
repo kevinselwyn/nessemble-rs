@@ -16,7 +16,7 @@ mod lexer;
 mod parse;
 mod preprocess;
 
-pub use assemble::{Diag, ListSymbol};
+pub use assemble::{CoverageReport, Diag, ListSymbol};
 
 /// The reference implementation version this crate targets for output parity.
 pub const REFERENCE_VERSION: &str = "1.1.1";
@@ -69,6 +69,27 @@ pub struct Assembly {
     pub warnings: Vec<Diag>,
     /// Defined symbols, for rendering the list file (`-l`).
     pub symbols: Vec<ListSymbol>,
+    /// Per-bank write coverage (`-C`), or `None` when not in iNES mode.
+    pub coverage: Option<CoverageReport>,
+}
+
+/// Render the coverage summary (`-C`) exactly as the reference `get_coverage`:
+/// one `PRG XX:` / `CHR XX:` line per bank with `covered/total` counts.
+pub fn render_coverage(report: &CoverageReport) -> String {
+    let mut out = String::new();
+    for (i, covered) in report.prg.iter().enumerate() {
+        out.push_str(&format!(
+            "PRG {:02X}: {:>5}/{:<5}\n",
+            i, covered, report.prg_bank_size
+        ));
+    }
+    for (i, covered) in report.chr.iter().enumerate() {
+        out.push_str(&format!(
+            "CHR {:02X}: {:>5}/{:<5}\n",
+            i, covered, report.chr_bank_size
+        ));
+    }
+    out
 }
 
 /// Render the list-file (`-l`) contents from the defined symbols, mirroring the
@@ -170,10 +191,12 @@ fn assemble_impl(
     );
     let rom = asm.run(&lines).map_err(AssembleError::Diagnostic)?;
     let symbols = asm.list_symbols();
+    let coverage = asm.coverage_report();
     Ok(Assembly {
         rom,
         warnings: asm.take_warnings(),
         symbols,
+        coverage,
     })
 }
 
