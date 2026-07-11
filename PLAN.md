@@ -606,6 +606,24 @@ ordered so that the highest-value core lands first and each builds on the last.
   `.rhai`.
 - **Acceptance:** `test/examples/custom` and `ease` behavior reproduced with the
   Rhai host; scripts install to `~/.nessemble/scripts` and resolve at assemble time.
+- **Status: ✅ complete.** `nessemble-script` hosts a sandboxed **Rhai** engine
+  with a simple host API: a script defines `fn custom(ints, texts)` (numeric and
+  string args) and returns the emitted bytes (array/blob/string); `throw`n
+  messages become the assembler diagnostic. Unknown `.foo` directives now parse
+  to `Pseudo::Custom`; the core dispatches them through an injected resolver
+  (keeping the Rhai dependency out of `nessemble-core`), and the CLI wires the
+  resolver behind a default-on **`scripting` feature** — resolving directives
+  from the `-p`/`--pseudo` mapping file first (relative to the source) then the
+  installed `~/.nessemble/scripts/scripts.txt`, matching the reference
+  `pseudo_parse` precedence. `scripts` installs the bundled `ease.rhai` +
+  `scripts.txt`. The **`ease` script is ported to `.rhai`** and reproduces the
+  golden **byte-for-byte** (f64 math mirrors the reference doubles); the corpus
+  `custom` example is reproduced with Rhai equivalents of its directives. All
+  three previously-deferred goldens now pass — `examples/custom` (`06 06 06 06
+  06`), `examples/ease` (192 bytes), and `errors/ease-type`
+  (`Invalid easing type \`niceAndSlow\``). Parity: **122/122** (the full
+  in-scope corpus); the oracle can't run Rhai/polyglot scripting in-sandbox, so
+  `verify-goldens` still skips these three while `parity` checks them.
 
 ### Phase 9 — Documentation, website & release packaging
 - **Scope:** mdBook documentation (clean theme, in-scope `docs/pages/*.md`) + the

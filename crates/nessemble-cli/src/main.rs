@@ -7,6 +7,7 @@
 //! omitted entirely — they are not parsed and appear nowhere in help.
 
 mod config;
+mod custom;
 mod home;
 mod init;
 mod reference;
@@ -18,7 +19,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nessemble_core::{
-    assemble, assemble_file, render_coverage, render_list_file, AssembleError, Options,
+    assemble_file_with, assemble_with, render_coverage, render_list_file, AssembleError, Options,
 };
 use nessemble_i18n::t;
 
@@ -272,9 +273,17 @@ fn assemble_mode(args: Args) -> u8 {
 
     let input: Option<PathBuf> = args.positionals.first().map(PathBuf::from);
     let result = match &input {
-        Some(path) => assemble_file(path, &options),
+        Some(path) => assemble_file_with(
+            path,
+            &options,
+            custom::build_resolver(args.pseudo.as_deref()),
+        ),
         None => match read_stdin() {
-            Ok(source) => assemble(&source, &options),
+            Ok(source) => assemble_with(
+                &source,
+                &options,
+                custom::build_resolver(args.pseudo.as_deref()),
+            ),
             Err(e) => {
                 eprintln!("nessemble: could not read input: {e}");
                 return RETURN_EPERM;

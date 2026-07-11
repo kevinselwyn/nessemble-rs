@@ -8,11 +8,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[features]
-# Scripting is opt-in; the default build stays lean. The Rhai engine is wired
-# up in Phase 8.
-default = []
-rhai = []
+[dependencies]
+rhai = { version = "1", default-features = false, features = ["std"] }
 
 [lints.rust]
 unsafe_code = "forbid"
