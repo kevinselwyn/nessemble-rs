@@ -6,6 +6,8 @@
 //! here we set the iNES-related state (so address math and `.org` validation
 //! match) but emit the raw written region.
 
+use std::path::PathBuf;
+
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
 
 use crate::ast::*;
@@ -120,10 +122,19 @@ pub struct Assembler {
     cur_line: u32,
     cur_file: u32,
     files: Vec<String>,
+    /// Directory that media includes (`.incbin`/`.incpng`/…) resolve against —
+    /// the top-level file's directory, matching the reference `cwd_path`.
+    base_dir: PathBuf,
 }
 
 impl Assembler {
-    pub fn new(nes: bool, undocumented: bool, empty_byte: u8, files: Vec<String>) -> Self {
+    pub fn new(
+        nes: bool,
+        undocumented: bool,
+        empty_byte: u8,
+        files: Vec<String>,
+        base_dir: PathBuf,
+    ) -> Self {
         Assembler {
             nes,
             undocumented,
@@ -153,6 +164,7 @@ impl Assembler {
             cur_line: 1,
             cur_file: 0,
             files,
+            base_dir,
         }
     }
 
@@ -677,10 +689,141 @@ impl Assembler {
                     self.chr_index = rest.parse::<usize>().unwrap_or(0) % MAX_BANKS;
                 }
             }
+            Pseudo::Incbin(file, offset, limit) => {
+                let off = offset.as_ref().map(|e| self.eval(e)).unwrap_or(0).max(0) as usize;
+                let lim = limit.as_ref().map(|e| self.eval(e).max(0) as usize);
+                match self.read_media_file(file) {
+                    Some(bytes) => {
+                        let out = nessemble_media::incbin_slice(&bytes, off, lim);
+                        self.write_all(&out);
+                    }
+                    None => self.hard_error(format!("Could not read `{file}`")),
+                }
+            }
+            Pseudo::Incpng(file, offset, limit) => {
+                let off = offset.as_ref().map(|e| self.eval(e)).unwrap_or(0) as i32;
+                let lim = limit.as_ref().map(|e| self.eval(e) as i32);
+                match self.decode_media_png(file) {
+                    Some(png) => {
+                        let out = nessemble_media::png_to_tiles(&png, off, lim);
+                        self.write_all(&out);
+                    }
+                    None => self.hard_error("Could not load PNG"),
+                }
+            }
+            Pseudo::Incpal(file) => match self.decode_media_png(file) {
+                Some(png) => {
+                    let out = nessemble_media::png_to_palette(&png);
+                    self.write_all(&out);
+                }
+                None => self.hard_error("Could not load PNG"),
+            },
+            Pseudo::Incrle(file) => match self.read_media_file(file) {
+                Some(bytes) => {
+                    let out = nessemble_media::rle_encode(&bytes);
+                    self.write_all(&out);
+                }
+                None => self.hard_error(format!("Could not read `{file}`")),
+            },
+            Pseudo::Incwav(file, amp) => {
+                let amplitude = amp.as_ref().map(|e| self.eval(e)).unwrap_or(24) as i32;
+                self.exec_incwav(file, amplitude);
+            }
+            Pseudo::Font(list) => {
+                let ints: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
+                self.exec_font(&ints);
+            }
+            Pseudo::Defchr(list) => {
+                let ints: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
+                self.exec_defchr(&ints);
+            }
             Pseudo::Unsupported(name) => {
                 self.hard_error(format!(
                     "Unsupported directive `.{name}` (not yet implemented)"
                 ));
+            }
+        }
+    }
+
+    // -- media importers ----------------------------------------------------
+
+    /// Write every byte in `bytes` through the normal emission path.
+    fn write_all(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_byte(b);
+        }
+    }
+
+    /// Read a media file resolved against the base directory.
+    fn read_media_file(&self, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.base_dir.join(name)).ok()
+    }
+
+    /// Read and decode a media PNG (open failure and decode failure are
+    /// indistinguishable, matching the reference's `stbi_load`).
+    fn decode_media_png(&self, name: &str) -> Option<nessemble_media::Png> {
+        let bytes = self.read_media_file(name)?;
+        nessemble_media::decode_png(&bytes).ok()
+    }
+
+    fn exec_incwav(&mut self, file: &str, amplitude: i32) {
+        let bytes = match self.read_media_file(file) {
+            Some(b) => b,
+            None => {
+                self.hard_error(format!("Could not open `{file}`"));
+                return;
+            }
+        };
+        match nessemble_media::wav_to_dpcm(&bytes, amplitude) {
+            Ok(out) => self.write_all(&out),
+            Err(nessemble_media::WavError::ShortRead) => {
+                self.hard_error(format!("Could not read `{file}`"))
+            }
+            Err(nessemble_media::WavError::NotWav) => {
+                self.hard_error(format!("`{file}` is not a WAV"))
+            }
+            Err(nessemble_media::WavError::NotMono) => self.hard_error("WAV is not mono"),
+        }
+    }
+
+    fn exec_font(&mut self, ints: &[i64]) {
+        if ints.is_empty() {
+            self.hard_error("Not enough .font arguments");
+            return;
+        }
+        let start = ints[0];
+        if start >= 0x80 {
+            self.hard_error("Value too high");
+            return;
+        }
+        let end = if ints.len() < 2 { start } else { ints[1] };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        for ch in lo..=hi {
+            let glyph = nessemble_media::font_glyph(ch.max(0) as usize).to_vec();
+            self.write_all(&glyph);
+        }
+    }
+
+    fn exec_defchr(&mut self, ints: &[i64]) {
+        if ints.len() != 8 {
+            self.error(format!(
+                "Too few arguments. {} provided, need 8",
+                ints.len()
+            ));
+        }
+        // Two bitplanes (low bit then high bit), one byte per tile row.
+        for bit in 0..2 {
+            for &row in ints {
+                let mut byte = 0u8;
+                for k in (0..8).rev() {
+                    let digit = (row as f64 / 10f64.powi(k)) as i64 % 10;
+                    byte |= (((digit >> bit) & 1) << k) as u8;
+                }
+                self.write_byte(byte);
             }
         }
     }

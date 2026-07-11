@@ -152,8 +152,8 @@ fn assemble_impl(
     base_dir: PathBuf,
     top_name: &str,
 ) -> Result<Assembly, AssembleError> {
-    let (tokens, files) =
-        preprocess::preprocess(source, base_dir, top_name).map_err(AssembleError::Diagnostic)?;
+    let (tokens, files) = preprocess::preprocess(source, base_dir.clone(), top_name)
+        .map_err(AssembleError::Diagnostic)?;
     let lines = parse::parse(tokens).map_err(|e| {
         AssembleError::Diagnostic(Diag {
             file: files.get(e.file as usize).cloned().unwrap_or_default(),
@@ -161,8 +161,13 @@ fn assemble_impl(
             message: e.message,
         })
     })?;
-    let mut asm =
-        assemble::Assembler::new(options.nes, options.undocumented, options.empty_byte, files);
+    let mut asm = assemble::Assembler::new(
+        options.nes,
+        options.undocumented,
+        options.empty_byte,
+        files,
+        base_dir,
+    );
     let rom = asm.run(&lines).map_err(AssembleError::Diagnostic)?;
     let symbols = asm.list_symbols();
     Ok(Assembly {

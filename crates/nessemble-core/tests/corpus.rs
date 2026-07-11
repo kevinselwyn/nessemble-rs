@@ -153,6 +153,17 @@ fn list_file_matches_reference() {
 }
 
 #[test]
+fn media_importer_examples_match() {
+    // Phase 5: PNG→CHR, palette, RLE, WAV→DPCM, bundled font, and inline tiles.
+    // These read asset files relative to the source, so use the file entry point.
+    for name in [
+        "incbin", "incpng", "incpal", "incrle", "incwav", "font", "defchr",
+    ] {
+        check_ok_file("examples", name);
+    }
+}
+
+#[test]
 fn error_cases_match() {
     for name in [
         "undefined-symbol",
@@ -165,6 +176,12 @@ fn error_cases_match() {
         "no-include",
         "undefined-macro",
         "package",
+        // Phase 5 media error paths.
+        "png-invalid",
+        "wav-invalid",
+        "wav-mono",
+        "wav-open",
+        "wav-read",
     ] {
         check_err(name);
     }

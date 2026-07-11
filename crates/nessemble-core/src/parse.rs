@@ -263,6 +263,28 @@ impl Parser {
             "ifndef" => Pseudo::Ifndef(self.parse_text_name("ifndef")?),
             "else" => Pseudo::Else,
             "endif" => Pseudo::Endif,
+            "incbin" => {
+                let (file, a, b) = self.parse_inc_args("incbin")?;
+                Pseudo::Incbin(file, a, b)
+            }
+            "incpng" => {
+                let (file, a, b) = self.parse_inc_args("incpng")?;
+                Pseudo::Incpng(file, a, b)
+            }
+            "incpal" => Pseudo::Incpal(self.parse_quoted("incpal")?),
+            "incrle" => Pseudo::Incrle(self.parse_quoted("incrle")?),
+            "incwav" => {
+                let file = self.parse_quoted("incwav")?;
+                let amp = if matches!(self.peek(), Some(Tok::Comma)) {
+                    self.pos += 1;
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                Pseudo::Incwav(file, amp)
+            }
+            "font" => Pseudo::Font(self.parse_expr_list()?),
+            "defchr" => Pseudo::Defchr(self.parse_defchr_list()?),
             "inesprg" => Pseudo::InesPrg(self.parse_expr()?),
             "ineschr" => Pseudo::InesChr(self.parse_expr()?),
             "inesmap" => Pseudo::InesMap(self.parse_expr()?),
@@ -306,6 +328,52 @@ impl Parser {
             Some(Tok::Text(name)) => Ok(name),
             _ => self.err(format!("expected symbol after .{which}")),
         }
+    }
+
+    /// Parse a quoted-string filename argument to an importer directive.
+    fn parse_quoted(&mut self, which: &str) -> Result<String, ParseError> {
+        match self.bump() {
+            Some(Tok::QuotString(s)) => Ok(strip_quotes(&s)),
+            _ => self.err(format!("expected string after .{which}")),
+        }
+    }
+
+    /// Parse `"file"[, offset[, limit]]` for `.incbin` / `.incpng`.
+    #[allow(clippy::type_complexity)]
+    fn parse_inc_args(
+        &mut self,
+        which: &str,
+    ) -> Result<(String, Option<Expr>, Option<Expr>), ParseError> {
+        let file = self.parse_quoted(which)?;
+        let mut offset = None;
+        let mut limit = None;
+        if matches!(self.peek(), Some(Tok::Comma)) {
+            self.pos += 1;
+            offset = Some(self.parse_expr()?);
+            if matches!(self.peek(), Some(Tok::Comma)) {
+                self.pos += 1;
+                limit = Some(self.parse_expr()?);
+            }
+        }
+        Ok((file, offset, limit))
+    }
+
+    /// Parse `.defchr`'s eight tile rows, which are comma-separated and may span
+    /// lines (a trailing comma continues onto the next indented line).
+    fn parse_defchr_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut out = vec![self.parse_expr()?];
+        while matches!(self.peek(), Some(Tok::Comma)) {
+            self.pos += 1;
+            // A comma may be followed by a line break + indentation.
+            while matches!(self.peek(), Some(Tok::Endl) | Some(Tok::Indent)) {
+                self.pos += 1;
+            }
+            if matches!(self.peek(), Some(Tok::Endl) | None) {
+                break;
+            }
+            out.push(self.parse_expr()?);
+        }
+        Ok(out)
     }
 
     fn parse_rand_terms(&mut self) -> Result<Vec<RandTerm>, ParseError> {
