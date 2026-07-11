@@ -8,5 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+fluent-bundle = "0.15"
+unic-langid = "0.9"
+
 [lints.rust]
 unsafe_code = "forbid"

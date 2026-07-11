@@ -1,7 +1,8 @@
 //! Integration tests for the `nessemble` CLI surface: exit codes, help/version
-//! text, `init` scaffolding, and `config` round-tripping.
+//! text, `init` scaffolding, `config` round-tripping, and i18n locale loading.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nessemble"))
@@ -120,6 +121,54 @@ fn config_round_trips_in_isolated_home() {
         .output()
         .unwrap();
     assert_eq!(missing.status.code(), Some(1));
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_dropped_in_locale_localizes_output_end_to_end() {
+    // A translator drops `~/.nessemble/locales/<lang>.ftl`; selecting it with
+    // NESSEMBLE_LANG localizes output, and messages the locale omits fall back
+    // to en-US.
+    let home = std::env::temp_dir().join(format!("nessemble-i18n-{}", std::process::id()));
+    let locales = home.join(".nessemble").join("locales");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&locales).unwrap();
+    std::fs::write(
+        locales.join("de.ftl"),
+        "no-errors = Alles gut\ninvalid-mode = Ungueltiger Modus\n",
+    )
+    .unwrap();
+
+    // A CLI message: `-c` on empty input prints the (overridden) "No errors".
+    let child = bin()
+        .env("HOME", &home)
+        .env("NESSEMBLE_LANG", "de")
+        .arg("-c")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "Alles gut\n");
+
+    // A core diagnostic: the localized message is embedded in the (en-US) frame.
+    let mut child = bin()
+        .env("HOME", &home)
+        .env("NESSEMBLE_LANG", "de")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"    LDA [$0000]\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Ungueltiger Modus"), "stderr = {stderr:?}");
 
     let _ = std::fs::remove_dir_all(&home);
 }

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, OPCODES};
 
 /// In-scope assembler directives with a one-line description.
@@ -65,12 +66,12 @@ pub fn run(term1: Option<&str>, term2: Option<&str>) -> (String, u8) {
         (Some(cat), None) => match cat.to_ascii_lowercase().as_str() {
             "instructions" | "instruction" | "opcodes" => (list_instructions(), 0),
             "directives" | "pseudos" | "pseudo" => (list_directives(), 0),
-            other => (format!("Could not find info for `{other}`\n"), 1),
+            other => (t!("reference-not-found", term = other) + "\n", 1),
         },
         (Some(cat), Some(term)) => match cat.to_ascii_lowercase().as_str() {
             "instructions" | "instruction" | "opcodes" => instruction_detail(term),
             "directives" | "pseudos" | "pseudo" => directive_detail(term),
-            other => (format!("Could not find info for `{other}`\n"), 1),
+            other => (t!("reference-not-found", term = other) + "\n", 1),
         },
     }
 }
@@ -98,7 +99,7 @@ fn instruction_detail(mnemonic: &str) -> (String, u8) {
         .filter(|o| o.mnemonic.eq_ignore_ascii_case(mnemonic))
         .collect();
     if rows.is_empty() {
-        return (format!("Could not find info for `{mnemonic}`\n"), 1);
+        return (t!("reference-not-found", term = mnemonic) + "\n", 1);
     }
     rows.sort_by_key(|o| o.opcode);
     let mut out = format!("{}:\n", rows[0].mnemonic);
@@ -140,5 +141,5 @@ fn directive_detail(term: &str) -> (String, u8) {
             return (format!("{name}\n  {desc}\n"), 0);
         }
     }
-    (format!("Could not find info for `{term}`\n"), 1)
+    (t!("reference-not-found", term = term) + "\n", 1)
 }

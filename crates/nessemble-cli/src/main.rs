@@ -20,6 +20,7 @@ use std::process::ExitCode;
 use nessemble_core::{
     assemble, assemble_file, render_coverage, render_list_file, AssembleError, Options,
 };
+use nessemble_i18n::t;
 
 /// Return codes mirroring the reference tool.
 const RETURN_OK: u8 = 0;
@@ -48,6 +49,12 @@ enum Parsed {
 }
 
 fn main() -> ExitCode {
+    // Load any translator-provided locales (`~/.nessemble/locales/<lang>.ftl`)
+    // so `NESSEMBLE_LANG` can select them, falling back to the embedded en-US.
+    if let Some(dir) = home::config_dir() {
+        nessemble_i18n::load_locale_dir(&dir.join("locales"));
+    }
+
     let argv: Vec<String> = std::env::args().collect();
     let exec = argv
         .first()
@@ -278,10 +285,18 @@ fn assemble_mode(args: Args) -> u8 {
     match result {
         Ok(assembly) => {
             for w in &assembly.warnings {
-                eprintln!("Warning in `{}` on line {}: {}", w.file, w.line, w.message);
+                eprintln!(
+                    "{}",
+                    t!(
+                        "warning-line",
+                        file = w.file,
+                        line = w.line,
+                        message = w.message
+                    )
+                );
             }
             if args.check {
-                println!("No errors");
+                println!("{}", t!("no-errors"));
                 return RETURN_OK;
             }
             let output = args.output.as_deref().unwrap_or("-");
@@ -305,7 +320,15 @@ fn assemble_mode(args: Args) -> u8 {
             RETURN_OK
         }
         Err(AssembleError::Diagnostic(d)) => {
-            eprintln!("Error in `{}` on line {}: {}", d.file, d.line, d.message);
+            eprintln!(
+                "{}",
+                t!(
+                    "error-line",
+                    file = d.file,
+                    line = d.line,
+                    message = d.message
+                )
+            );
             RETURN_EPERM
         }
     }

@@ -5,29 +5,59 @@
 
 use std::io::{BufRead, Write};
 
+use nessemble_i18n::t;
+
 /// The PRG-bank-0 body template (reference `static/init.txt`).
 const INIT_TEMPLATE: &str = include_str!("data/init.txt");
 
 /// Run `init` with the given positional arguments, returning the process exit
 /// code (0 on success, 1 on failure).
 pub fn run(args: &[String]) -> u8 {
-    let filename = match arg_or_prompt(args, 0, "Filename: ") {
+    let filename = match arg_or_prompt(args, 0, &t!("init-prompt-filename")) {
         Some(f) => f,
         None => return 1,
     };
-    let prg = match int_arg_or_prompt(args, 1, "PRG Banks: ", 0, i32::MAX) {
+    let prg = match int_arg_or_prompt(
+        args,
+        1,
+        &t!("init-prompt-prg"),
+        0,
+        i32::MAX,
+        &t!("init-choose-banks"),
+    ) {
         Some(v) => v,
         None => return 1,
     };
-    let chr = match int_arg_or_prompt(args, 2, "CHR Banks: ", 0, i32::MAX) {
+    let chr = match int_arg_or_prompt(
+        args,
+        2,
+        &t!("init-prompt-chr"),
+        0,
+        i32::MAX,
+        &t!("init-choose-banks"),
+    ) {
         Some(v) => v,
         None => return 1,
     };
-    let mapper = match int_arg_or_prompt(args, 3, "Mapper (0-255): ", 0, 0xFF) {
+    let mapper = match int_arg_or_prompt(
+        args,
+        3,
+        &t!("init-prompt-mapper"),
+        0,
+        0xFF,
+        &t!("init-choose-mapper"),
+    ) {
         Some(v) => v,
         None => return 1,
     };
-    let mirroring = match int_arg_or_prompt(args, 4, "Mirroring (0-15): ", 0, 0x0F) {
+    let mirroring = match int_arg_or_prompt(
+        args,
+        4,
+        &t!("init-prompt-mirroring"),
+        0,
+        0x0F,
+        &t!("init-choose-mirroring"),
+    ) {
         Some(v) => v,
         None => return 1,
     };
@@ -38,7 +68,7 @@ pub fn run(args: &[String]) -> u8 {
 
     match write_project(&filename, prg, chr, mapper, mirroring) {
         Ok(()) => {
-            println!("Created `{filename}`");
+            println!("{}", t!("init-created", file = filename));
             0
         }
         Err(e) => {
@@ -93,8 +123,15 @@ fn arg_or_prompt(args: &[String], idx: usize, prompt: &str) -> Option<String> {
 }
 
 /// Take positional arg `idx` as an integer, or prompt (re-prompting until the
-/// value parses and falls within `[lo, hi]`).
-fn int_arg_or_prompt(args: &[String], idx: usize, prompt: &str, lo: i32, hi: i32) -> Option<i32> {
+/// value parses and falls within `[lo, hi]`, printing `choose_msg` otherwise).
+fn int_arg_or_prompt(
+    args: &[String],
+    idx: usize,
+    prompt: &str,
+    lo: i32,
+    hi: i32,
+    choose_msg: &str,
+) -> Option<i32> {
     if let Some(v) = args.get(idx) {
         // The reference uses atoi(): non-numeric input yields 0.
         return Some(v.parse().unwrap_or(0));
@@ -107,7 +144,7 @@ fn int_arg_or_prompt(args: &[String], idx: usize, prompt: &str, lo: i32, hi: i32
         }
         match trimmed.parse::<i32>() {
             Ok(v) if v >= lo && v <= hi => return Some(v),
-            Ok(_) => println!("Choose a value between {lo}-{hi}"),
+            Ok(_) => println!("{choose_msg}"),
             Err(_) => continue,
         }
     }
@@ -125,7 +162,7 @@ fn read_line(prompt: &str) -> Option<String> {
 
 fn confirm_overwrite(filename: &str) -> bool {
     loop {
-        print!("`{filename}` already exists. Overwrite? [Yn] ");
+        print!("{}", t!("init-overwrite", file = filename));
         let _ = std::io::stdout().flush();
         match read_line("") {
             Some(line) => match line.trim().chars().next() {
