@@ -134,6 +134,12 @@ jobs:
           path: "*.pkg"
 
   # ----------------------------------------------------------------- Release
+  #
+  # Creates the GitHub Release for the tag, uploads all seven artifacts, and
+  # auto-generates release notes listing every pull request merged since the
+  # previous release (GitHub's "What's Changed" changelog; grouping is
+  # configured in .github/release.yml). Only runs for tag pushes — a manual
+  # workflow_dispatch just builds the artifacts.
   release:
     needs: [linux, windows, macos]
     runs-on: ubuntu-latest
@@ -147,4 +153,27 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          tag_name: ${{ github.ref_name }}
+          name: nessemble ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            `nessemble` — a 6502 assembler for the Nintendo Entertainment System.
+
+            ### Downloads
+
+            | Platform       | Artifact(s)                                |
+            |----------------|--------------------------------------------|
+            | macOS          | `nessemble_*.pkg`                          |
+            | Linux amd64    | `nessemble_*_amd64.deb`                    |
+            | Linux i386     | `nessemble_*_i386.deb`                     |
+            | Windows 32-bit | `nessemble_*_win32.exe`, `…_win32.msi`     |
+            | Windows 64-bit | `nessemble_*_win64.exe`, `…_win64.msi`     |
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+            artifacts/**/*.pkg
