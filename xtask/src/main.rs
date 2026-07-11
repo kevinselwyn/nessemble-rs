@@ -29,6 +29,7 @@ fn main() -> std::process::ExitCode {
         "fetch-oracle" => fetch_oracle(rest),
         "verify-goldens" => verify_goldens(),
         "parity" => parity(rest),
+        "dist" => dist(),
         "help" | "-h" | "--help" => {
             print_help();
             Ok(())
@@ -54,8 +55,52 @@ fn print_help() {
          \x20 fetch-oracle [--i386]   Download & extract the v{REFERENCE_VERSION} release binary\n\
          \x20 verify-goldens          Confirm the oracle reproduces every committed golden\n\
          \x20 parity [--release]      Run nessemble-rs over the corpus and report parity\n\
+         \x20 dist                    Build the GitHub Pages site (website + mdBook docs)\n\
          \x20 help                    Show this help"
     );
+}
+
+// ---------------------------------------------------------------------------
+// dist — assemble the GitHub Pages site
+// ---------------------------------------------------------------------------
+
+/// Build the static site into `site/`: the marketing website at the root, with
+/// the mdBook documentation under `site/docs/`. Requires `mdbook` on `PATH`.
+fn dist() -> Result<(), String> {
+    let root = repo_root();
+    let site = root.join("site");
+    let _ = std::fs::remove_dir_all(&site);
+    std::fs::create_dir_all(&site).map_err(|e| e.to_string())?;
+
+    // Marketing website (index.html + static/) at the site root.
+    copy_dir(&root.join("website"), &site)?;
+
+    // Documentation under /docs.
+    run_tool(
+        "mdbook",
+        &["build", &root.join("docs").to_string_lossy()],
+        None,
+    )?;
+    copy_dir(&root.join("docs/book"), &site.join("docs"))?;
+
+    println!("Built site at {}", site.display());
+    Ok(())
+}
+
+/// Recursively copy `from` into `to` (creating `to`).
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(from).map_err(|e| format!("read {}: {e}", from.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| format!("copy {}: {e}", src.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn repo_root() -> PathBuf {

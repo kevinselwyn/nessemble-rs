@@ -635,6 +635,28 @@ ordered so that the highest-value core lands first and each builds on the last.
 - **Acceptance:** docs + website build to static output deployable to GitHub
   Pages; all **seven** release artifacts are produced for the five targets and
   the CLI binaries run on each.
+- **Status: ✅ complete.** The **documentation** is an **mdBook** (`docs/`,
+  `book.toml` + `SUMMARY.md`) covering the in-scope surface — introduction,
+  installation, usage (in-scope CLI only), the full syntax reference (ported from
+  upstream, with the out-of-scope `.out`/disasm/sim/registry pages and
+  interactive widgets removed), extending (Rhai), building, translating (Fluent),
+  contributing, licensing. The **website** (`website/`) reproduces the upstream
+  Bootstrap/"grayscale" landing page as static output — all CSS/JS/img/font/data
+  assets carried over, the webpack bundles rebuilt by concatenation, Flask
+  templating resolved to static paths, and the copy updated to **"assembler"**
+  only (Q-f) with download links pointed at the nessemble-rs releases.
+  `cargo run -p xtask -- dist` assembles both into a deployable `site/` (website
+  at the root, docs under `/docs`), and `.github/workflows/pages.yml` builds and
+  deploys it to GitHub Pages. **Release packaging**: `.github/workflows/
+  release.yml` produces the **seven** artifacts across the five targets on a
+  `v*` tag — `amd64.deb`/`i386.deb` via `cargo-deb`, `win32`/`win64`
+  `.exe`+`.msi` via `cargo-wix`, and the macOS `.pkg` via `pkgbuild`. The
+  `cargo-deb` config is committed (`[package.metadata.deb]`) and **verified
+  locally**: the produced `.deb` installs `nessemble` to `/usr/local/bin` (the
+  upstream layout) and the packaged binary runs. A `ci.yml` workflow runs
+  fmt/clippy/test/parity. *(The Windows/macOS artifacts build on their
+  respective CI runners; only the Linux `.deb` and the static site are
+  buildable/verifiable in a Linux sandbox.)*
 
 > **A WASM build/playground is deferred (D9)** — a candidate follow-up phase once
 > the native build is complete; not required for this plan.

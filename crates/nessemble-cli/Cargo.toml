@@ -26,3 +26,21 @@ nessemble-script = { workspace = true, optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# Debian packaging (`cargo deb`). Installs the CLI to /usr/local/bin to match the
+# upstream v1.1.1 `.deb` layout.
+[package.metadata.deb]
+name = "nessemble"
+maintainer = "Kevin Selwyn <kevinselwyn@gmail.com>"
+copyright = "2017 Kevin Selwyn"
+license-file = ["../../COPYING", "0"]
+extended-description = "A 6502 assembler for the Nintendo Entertainment System."
+section = "devel"
+priority = "optional"
+assets = [["target/release/nessemble", "usr/local/bin/", "755"]]
+
+# Windows MSI packaging (`cargo wix`). The .wxs template is generated in CI with
+# `cargo wix init`; this records the product identity.
+[package.metadata.wix]
+name = "nessemble"
+

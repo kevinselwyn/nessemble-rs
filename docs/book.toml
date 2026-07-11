@@ -1,0 +1,16 @@
+[book]
+title = "nessemble"
+description = "A 6502 assembler for the Nintendo Entertainment System"
+authors = ["nessemble-rs contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/kevinselwyn/nessemble-rs"
+edit-url-template = "https://github.com/kevinselwyn/nessemble-rs/edit/main/docs/{path}"
+
+[output.html.fold]
+enable = true
+level = 1
