@@ -20,6 +20,9 @@ pub fn run() -> u8 {
         eprintln!("nessemble: could not install scripts: {e}");
         return 1;
     }
-    println!("Installed scripts to {}", dir.display());
+    println!(
+        "{}",
+        nessemble_i18n::t!("scripts-installed", path = dir.display())
+    );
     0
 }

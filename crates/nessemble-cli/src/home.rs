@@ -18,10 +18,7 @@ pub fn config_dir() -> Option<PathBuf> {
 /// A path under `~/.nessemble`, creating the directory if needed.
 pub fn ensure_config_dir() -> std::io::Result<PathBuf> {
     let dir = config_dir().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Could not find home directory",
-        )
+        std::io::Error::new(std::io::ErrorKind::NotFound, nessemble_i18n::t!("no-home"))
     })?;
     std::fs::create_dir_all(&dir)?;
     Ok(dir)

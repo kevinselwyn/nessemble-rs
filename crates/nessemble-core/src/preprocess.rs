@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use nessemble_i18n::t;
+
 use crate::lexer::{Lexer, Tok, Token};
 use crate::Diag;
 
@@ -159,7 +161,7 @@ impl Pre {
             .unwrap_or("");
         match after.split_whitespace().next() {
             Some(t) => Ok(t.to_string()),
-            None => Err(self.diag(file_id, line, "Could not get full path")),
+            None => Err(self.diag(file_id, line, t!("full-path"))),
         }
     }
 
@@ -174,16 +176,12 @@ impl Pre {
         // `<pkg>` references the (out-of-scope) package library; there is no
         // package to resolve, so this always fails as the reference does.
         if target.starts_with('<') {
-            return Err(self.diag(
-                file_id,
-                line,
-                format!("Could not get full path of {target}"),
-            ));
+            return Err(self.diag(file_id, line, t!("full-path-of", target = target)));
         }
 
         // The reference enforces the depth limit as it pushes the include.
         if depth + 1 >= MAX_INCLUDE_DEPTH {
-            return Err(self.diag(file_id, line, "Too many nested includes"));
+            return Err(self.diag(file_id, line, t!("too-many-includes")));
         }
 
         let name = target.trim_matches('"').to_string();
@@ -191,7 +189,7 @@ impl Pre {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(_) => {
-                return Err(self.diag(file_id, line, format!("Could not include `{name}`")));
+                return Err(self.diag(file_id, line, t!("could-not-include", file = name)));
             }
         };
 
@@ -211,14 +209,14 @@ impl Pre {
         // toks[i] = `.macrodef`; the name is the following TEXT token.
         let name = match toks.get(i + 1).map(|t| &t.tok) {
             Some(Tok::Text(n)) => n.clone(),
-            _ => return Err(self.diag(file_id, line, "Expected macro name after .macrodef")),
+            _ => return Err(self.diag(file_id, line, t!("macro-name-after-macrodef"))),
         };
         // Skip to the start of the body (past the `.macrodef` line's ENDL).
         let mut j = skip_line(toks, i);
         let mut body: Vec<Token> = Vec::new();
         loop {
             match toks.get(j) {
-                None => return Err(self.diag(file_id, line, "Unterminated macro definition")),
+                None => return Err(self.diag(file_id, line, t!("macro-unterminated"))),
                 Some(t) if matches!(&t.tok, Tok::Pseudo(p) if p == "endm") => break,
                 Some(t) => {
                     body.push(t.clone());
@@ -247,7 +245,7 @@ impl Pre {
         let line = toks[i].line;
         let name = match toks.get(i + 1).map(|t| &t.tok) {
             Some(Tok::Text(n)) => n.clone(),
-            _ => return Err(self.diag(file_id, line, "Expected macro name after .macro")),
+            _ => return Err(self.diag(file_id, line, t!("macro-name-after-macro"))),
         };
         let end = skip_line(toks, i);
         // Arguments: the `(COMMA number)*` tokens after the name (up to but not
@@ -258,7 +256,7 @@ impl Pre {
         let body = match self.macros.get(&name) {
             Some(b) => b.clone(),
             None => {
-                return Err(self.diag(file_id, line, format!("Macro `{name}` was not defined")));
+                return Err(self.diag(file_id, line, t!("macro-not-defined", name = name)));
             }
         };
 

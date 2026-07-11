@@ -2,6 +2,8 @@
 //! in-scope CLI surface. Out-of-scope flags (`-d`/`-R`/`-s`/`-r`) and commands
 //! (registry/package/user) are omitted entirely — they appear nowhere here.
 
+use nessemble_i18n::t;
+
 const PROGRAM_NAME: &str = "nessemble";
 const PROGRAM_VERSION: &str = "1.1.1";
 const PROGRAM_COPYRIGHT: &str = "2017";
@@ -58,26 +60,39 @@ fn print_block(rows: &[(&str, &str)], out: &mut String) {
     }
 }
 
-/// The full usage text (as printed by `-h` and on argument errors).
+/// The full usage text (as printed by `-h` and on argument errors). The framing
+/// labels are translated (mirroring the reference `_()` call sites); the flag /
+/// command descriptions are literal, as in the reference.
 pub fn usage(exec: &str) -> String {
+    let usage_label = t!("label-usage");
     let mut out = String::new();
-    out.push_str(&format!("Usage: {exec} [options] <infile.asm>\n"));
-    // Align the second line under `<infile.asm>`: "Usage" + ": " + exec + " ".
-    let indent = "Usage".len() + 2 + exec.len() + 1;
+    out.push_str(&format!(
+        "{usage_label}: {exec} [{}] <infile.asm>\n",
+        t!("label-options-arg")
+    ));
+    // Align the second line under `<infile.asm>`: label + ": " + exec + " ".
+    let indent = usage_label.len() + 2 + exec.len() + 1;
     for _ in 0..indent {
         out.push(' ');
     }
-    out.push_str("<command> [args]\n\n");
-    out.push_str("Options:\n");
+    out.push_str(&format!(
+        "<{}> [{}]\n\n",
+        t!("label-command"),
+        t!("label-args")
+    ));
+    out.push_str(&format!("{}:\n", t!("label-options")));
     print_block(OPTIONS, &mut out);
-    out.push_str("\nCommands:\n");
+    out.push_str(&format!("\n{}:\n", t!("label-commands")));
     print_block(COMMANDS, &mut out);
     out
 }
 
 /// The version banner (`nessemble v1.1.1` + copyright line).
 pub fn version() -> String {
-    format!("{PROGRAM_NAME} v{PROGRAM_VERSION}\n\nCopyright {PROGRAM_COPYRIGHT} {PROGRAM_AUTHOR}\n")
+    format!(
+        "{PROGRAM_NAME} v{PROGRAM_VERSION}\n\n{} {PROGRAM_COPYRIGHT} {PROGRAM_AUTHOR}\n",
+        t!("label-copyright")
+    )
 }
 
 /// The full license output (version banner + GPL notice).

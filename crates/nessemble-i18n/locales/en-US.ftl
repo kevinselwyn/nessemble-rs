@@ -1,0 +1,84 @@
+# English (en-US) message catalog for nessemble-rs.
+#
+# Every user-facing string flows through these messages (the equivalent of the
+# reference tool's gettext `_()` call sites). Message ids are stable API; the
+# values here reproduce the reference's English wording byte-for-byte. Variables
+# use `{ $name }`; a trailing space is written as `{ " " }` so Fluent does not
+# trim it.
+
+## Assembler diagnostics
+
+symbol-not-defined = Symbol `{ $name }` was not defined
+unknown-opcode = Unknown opcode `{ $mnemonic }`
+invalid-mode = Invalid addressing mode
+unknown-register = Unknown register `{ $reg }`
+branch-out-of-range = Branch address out of range
+address-too-high = Address too high
+prg-start-8000 = Start address for PRG bank { $bank } is 0x8000
+prg-start-c000 = Start address for PRG bank { $bank } is 0xC000
+overflow-prg = Overflowing PRG Bank { $bank }
+overflow-chr = Overflowing CHR Bank { $bank }
+checksum-preceding = Checksums may only be performed on preceding data
+fill-args = Not enough .fill arguments
+font-args = Not enough .font arguments
+defchr-args = Too few arguments. { $count } provided, need 8
+value-too-high = Value too high
+
+## Media importers
+
+could-not-load-png = Could not load PNG
+could-not-read = Could not read `{ $file }`
+could-not-open = Could not open `{ $file }`
+not-a-wav = `{ $file }` is not a WAV
+wav-not-mono = WAV is not mono
+
+## Macros and includes
+
+macro-not-defined = Macro `{ $name }` was not defined
+too-many-includes = Too many nested includes
+could-not-include = Could not include `{ $file }`
+full-path-of = Could not get full path of { $target }
+full-path = Could not get full path
+macro-name-after-macro = Expected macro name after .macro
+macro-name-after-macrodef = Expected macro name after .macrodef
+macro-unterminated = Unterminated macro definition
+unsupported-directive = Unsupported directive `.{ $name }` (not yet implemented)
+
+## Diagnostic framing (CLI)
+
+error-line = Error in `{ $file }` on line { $line }: { $message }
+warning-line = Warning in `{ $file }` on line { $line }: { $message }
+no-errors = No errors
+
+## Usage / version
+
+label-usage = Usage
+label-options-arg = options
+label-command = command
+label-args = args
+label-options = Options
+label-commands = Commands
+label-copyright = Copyright
+
+## init
+
+init-created = Created `{ $file }`
+init-overwrite = `{ $file }` already exists. Overwrite? [Yn]{ " " }
+init-prompt-filename = Filename:{ " " }
+init-prompt-prg = PRG Banks:{ " " }
+init-prompt-chr = CHR Banks:{ " " }
+init-prompt-mapper = Mapper (0-255):{ " " }
+init-prompt-mirroring = Mirroring (0-15):{ " " }
+init-choose-banks = Choose a positive number of CHR banks
+init-choose-mapper = Choose a mapper between 0-255
+init-choose-mirroring = Choose a mirroring between 0-15
+
+## config / scripts
+
+config-no-set = No `{ $key }` set
+scripts-installed = Installed scripts to { $path }
+
+## Miscellaneous
+
+no-home = Could not find home directory
+reference-not-found = Could not find info for `{ $term }`

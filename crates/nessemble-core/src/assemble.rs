@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
 
 use crate::ast::*;
@@ -507,13 +508,13 @@ impl Assembler {
         }
         if self.segment_prg {
             if self.pass == 1 && self.prg_offsets[self.prg_index] >= BANK_PRG {
-                self.warning(format!("Overflowing PRG Bank {}", self.prg_index));
+                self.warning(t!("overflow-prg", bank = self.prg_index));
             }
             self.prg_offsets[self.prg_index] += 1;
         } else {
             if self.pass == 1 && self.chr_offsets[self.chr_index] >= BANK_CHR {
                 // The reference message uses prg_index here (matched for parity).
-                self.warning(format!("Overflowing CHR Bank {}", self.prg_index));
+                self.warning(t!("overflow-chr", bank = self.prg_index));
             }
             self.chr_offsets[self.chr_index] += 1;
         }
@@ -580,7 +581,7 @@ impl Assembler {
             Pseudo::Fill(list) => {
                 let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
                 if vals.is_empty() {
-                    self.hard_error("Not enough .fill arguments");
+                    self.hard_error(t!("fill-args"));
                     return;
                 }
                 let count = vals[0];
@@ -594,7 +595,7 @@ impl Assembler {
                 let index = self.rom_index();
                 let crc = if self.pass == 2 {
                     if index < address {
-                        self.hard_error("Checksums may only be performed on preceding data");
+                        self.hard_error(t!("checksum-preceding"));
                         return;
                     }
                     crc_32(&self.rom[address..index])
@@ -745,7 +746,7 @@ impl Assembler {
                         let out = nessemble_media::incbin_slice(&bytes, off, lim);
                         self.write_all(&out);
                     }
-                    None => self.hard_error(format!("Could not read `{file}`")),
+                    None => self.hard_error(t!("could-not-read", file = file)),
                 }
             }
             Pseudo::Incpng(file, offset, limit) => {
@@ -756,7 +757,7 @@ impl Assembler {
                         let out = nessemble_media::png_to_tiles(&png, off, lim);
                         self.write_all(&out);
                     }
-                    None => self.hard_error("Could not load PNG"),
+                    None => self.hard_error(t!("could-not-load-png")),
                 }
             }
             Pseudo::Incpal(file) => match self.decode_media_png(file) {
@@ -764,14 +765,14 @@ impl Assembler {
                     let out = nessemble_media::png_to_palette(&png);
                     self.write_all(&out);
                 }
-                None => self.hard_error("Could not load PNG"),
+                None => self.hard_error(t!("could-not-load-png")),
             },
             Pseudo::Incrle(file) => match self.read_media_file(file) {
                 Some(bytes) => {
                     let out = nessemble_media::rle_encode(&bytes);
                     self.write_all(&out);
                 }
-                None => self.hard_error(format!("Could not read `{file}`")),
+                None => self.hard_error(t!("could-not-read", file = file)),
             },
             Pseudo::Incwav(file, amp) => {
                 let amplitude = amp.as_ref().map(|e| self.eval(e)).unwrap_or(24) as i32;
@@ -786,9 +787,7 @@ impl Assembler {
                 self.exec_defchr(&ints);
             }
             Pseudo::Unsupported(name) => {
-                self.hard_error(format!(
-                    "Unsupported directive `.{name}` (not yet implemented)"
-                ));
+                self.hard_error(t!("unsupported-directive", name = name));
             }
         }
     }
@@ -818,30 +817,28 @@ impl Assembler {
         let bytes = match self.read_media_file(file) {
             Some(b) => b,
             None => {
-                self.hard_error(format!("Could not open `{file}`"));
+                self.hard_error(t!("could-not-open", file = file));
                 return;
             }
         };
         match nessemble_media::wav_to_dpcm(&bytes, amplitude) {
             Ok(out) => self.write_all(&out),
             Err(nessemble_media::WavError::ShortRead) => {
-                self.hard_error(format!("Could not read `{file}`"))
+                self.hard_error(t!("could-not-read", file = file))
             }
-            Err(nessemble_media::WavError::NotWav) => {
-                self.hard_error(format!("`{file}` is not a WAV"))
-            }
-            Err(nessemble_media::WavError::NotMono) => self.hard_error("WAV is not mono"),
+            Err(nessemble_media::WavError::NotWav) => self.hard_error(t!("not-a-wav", file = file)),
+            Err(nessemble_media::WavError::NotMono) => self.hard_error(t!("wav-not-mono")),
         }
     }
 
     fn exec_font(&mut self, ints: &[i64]) {
         if ints.is_empty() {
-            self.hard_error("Not enough .font arguments");
+            self.hard_error(t!("font-args"));
             return;
         }
         let start = ints[0];
         if start >= 0x80 {
-            self.hard_error("Value too high");
+            self.hard_error(t!("value-too-high"));
             return;
         }
         let end = if ints.len() < 2 { start } else { ints[1] };
@@ -858,10 +855,7 @@ impl Assembler {
 
     fn exec_defchr(&mut self, ints: &[i64]) {
         if ints.len() != 8 {
-            self.error(format!(
-                "Too few arguments. {} provided, need 8",
-                ints.len()
-            ));
+            self.error(t!("defchr-args", count = ints.len()));
         }
         // Two bitplanes (low bit then high bit), one byte per tile row.
         for bit in 0..2 {
@@ -880,40 +874,31 @@ impl Assembler {
         if self.segment_prg {
             if self.ines.prg < 2 {
                 if address < 0xC000 {
-                    self.hard_error(format!(
-                        "Start address for PRG bank {} is 0xC000",
-                        self.prg_index
-                    ));
+                    self.hard_error(t!("prg-start-c000", bank = self.prg_index));
                     return;
                 }
                 if address >= 0xC000 + BANK_PRG {
-                    self.hard_error("Address too high");
+                    self.hard_error(t!("address-too-high"));
                     return;
                 }
                 self.prg_offsets[self.prg_index] = address - 0xC000;
             } else {
                 if self.prg_index % 2 == 0 {
                     if address < 0x8000 {
-                        self.hard_error(format!(
-                            "Start address for PRG bank {} is 0x8000",
-                            self.prg_index
-                        ));
+                        self.hard_error(t!("prg-start-8000", bank = self.prg_index));
                         return;
                     }
                     if address >= 0x8000 + BANK_PRG {
-                        self.hard_error("Address too high");
+                        self.hard_error(t!("address-too-high"));
                         return;
                     }
                 } else {
                     if address < 0xC000 {
-                        self.hard_error(format!(
-                            "Start address for PRG bank {} is 0xC000",
-                            self.prg_index
-                        ));
+                        self.hard_error(t!("prg-start-c000", bank = self.prg_index));
                         return;
                     }
                     if address >= 0xC000 + BANK_PRG {
-                        self.hard_error("Address too high");
+                        self.hard_error(t!("address-too-high"));
                         return;
                     }
                 }
@@ -922,7 +907,7 @@ impl Assembler {
             }
         } else {
             if address >= BANK_CHR {
-                self.hard_error("Address too high");
+                self.hard_error(t!("address-too-high"));
                 return;
             }
             self.chr_offsets[self.chr_index] = address;
@@ -950,9 +935,9 @@ impl Assembler {
             .iter()
             .any(|o| o.mnemonic.eq_ignore_ascii_case(mnemonic));
         if exists {
-            self.error("Invalid addressing mode");
+            self.error(t!("invalid-mode"));
         } else {
-            self.error(format!("Unknown opcode `{mnemonic}`"));
+            self.error(t!("unknown-opcode", mnemonic = mnemonic));
         }
         exists
     }
@@ -961,7 +946,7 @@ impl Assembler {
         if allowed.contains(reg) {
             true
         } else {
-            self.error(format!("Unknown register `{reg}`"));
+            self.error(t!("unknown-register", reg = reg));
             false
         }
     }
@@ -1120,12 +1105,12 @@ impl Assembler {
         if offset > target {
             address = 0xFF - (offset - target);
             if self.pass == 2 && address <= 0x7F {
-                self.error("Branch address out of range");
+                self.error(t!("branch-out-of-range"));
             }
         } else {
             address = target - offset - 1;
             if self.pass == 2 && address >= 0x80 {
-                self.error("Branch address out of range");
+                self.error(t!("branch-out-of-range"));
             }
         }
         address &= 0xFF;
@@ -1156,7 +1141,7 @@ impl Assembler {
         match self.find_symbol(name) {
             Some(id) => {
                 if self.pass == 2 && self.symbols[id].kind == SymType::Undefined {
-                    let msg = format!("Symbol `{}` was not defined", self.symbols[id].name);
+                    let msg = t!("symbol-not-defined", name = self.symbols[id].name);
                     self.error(msg);
                 }
                 self.symbols[id].value

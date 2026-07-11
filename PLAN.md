@@ -582,6 +582,21 @@ ordered so that the highest-value core lands first and each builds on the last.
   C strings; document how translators add a locale.
 - **Acceptance:** all user-facing strings resolve through Fluent; `en-US` output
   matches the C tool's English messages; adding a stub locale works end-to-end.
+- **Status: ✅ complete.** `nessemble-i18n` wraps **`fluent-bundle`** with a
+  `t!("id", name = value)` macro; every user-facing string — assembler/preprocess
+  diagnostics, CLI usage/version/copyright labels, `init` prompts, `config`/
+  `scripts`/`reference` output, and the error/warning framing — resolves through
+  the catalog (the analogue of the C `_()` call sites). `en-US` is embedded and
+  is the always-present fallback; `set_use_isolating(false)` plus string-valued
+  args keep output **byte-identical** to the reference (no Unicode isolation
+  marks, no numeric grouping — `line 1234`, never `1,234`), and trailing spaces
+  survive via the `{ " " }` literal. Output parity is preserved: **119/119**
+  goldens, the error-case messages, and the `--license`/`--version`/`init`
+  surfaces are unchanged. Locales load two ways — embedded `locales/<lang>.ftl`
+  or a translator's `~/.nessemble/locales/<lang>.ftl` selected via
+  `NESSEMBLE_LANG` (with `en-US` fallback for untranslated ids); an end-to-end
+  CLI test drops a `de.ftl` and confirms both a CLI message and a core diagnostic
+  localize. Translator docs live in `crates/nessemble-i18n/README.md`.
 
 ### Phase 8 — Custom pseudo-op scripting (Rhai)
 - **Scope:** `nessemble-script` (feature-gated) hosting **Rhai**; define the host

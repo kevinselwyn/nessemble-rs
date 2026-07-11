@@ -70,7 +70,7 @@ pub fn get(key: &str) -> Result<Option<String>, String> {
     let pairs = read_pairs().map_err(|e| e.to_string())?;
     match pairs.iter().rev().find(|(k, _)| k == key) {
         Some((_, v)) => Ok(Some(v.clone())),
-        None => Err(format!("No `{key}` set")),
+        None => Err(nessemble_i18n::t!("config-no-set", key = key)),
     }
 }
 
