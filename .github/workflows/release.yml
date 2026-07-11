@@ -1,8 +1,13 @@
 name: Release
 
-# Produces the same artifacts as the upstream v1.1.1 release, for all five
-# targets, and attaches them to the GitHub Release for the pushed tag:
+# The release version is the workspace version in the root Cargo.toml
+# (`[workspace.package] version`) — the same version the CLI reports. There is
+# no manual version input. On every push to main (or a manual run), the pipeline
+# reads that version and, if a `v<version>` tag does not already exist, builds
+# every platform artifact and publishes a tagged GitHub Release for it. Bumping
+# the workspace version is therefore all it takes to cut a release.
 #
+# Artifacts (matching the upstream v1.1.1 release):
 #   macOS          nessemble_<v>.pkg
 #   Linux amd64    nessemble_<v>_amd64.deb
 #   Linux i386     nessemble_<v>_i386.deb
@@ -11,19 +16,39 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version (without leading v), e.g. 1.1.1"
-        required: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ------------------------------------------------- Resolve version / tag state
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      exists: ${{ steps.resolve.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: resolve
+        run: |
+          version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Workspace version **$version** — tag \`v$version\` already exists; nothing to release." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Workspace version **$version** — no \`v$version\` tag yet; cutting a release." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   # ---------------------------------------------------------------- Linux .deb
   linux:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -42,19 +67,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib
       - name: Install cargo-deb
         run: cargo install cargo-deb
-      - name: Determine version
-        id: v
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
       - name: Build .deb
         run: |
           cargo deb -p nessemble-cli --target ${{ matrix.target }} --output \
-            "nessemble_${{ steps.v.outputs.version }}_${{ matrix.deb_arch }}.deb"
+            "nessemble_${{ needs.version.outputs.version }}_${{ matrix.deb_arch }}.deb"
       - uses: actions/upload-artifact@v4
         with:
           name: deb-${{ matrix.deb_arch }}
@@ -62,6 +78,8 @@ jobs:
 
   # ------------------------------------------------------------- Windows .exe/.msi
   windows:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
     runs-on: windows-latest
     strategy:
       matrix:
@@ -77,24 +95,15 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install cargo-wix
         run: cargo install cargo-wix
-      - name: Determine version
-        id: v
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
       - name: Build binary
         run: cargo build --release -p nessemble-cli --target ${{ matrix.target }}
       - name: Stage .exe
         shell: bash
-        run: cp "target/${{ matrix.target }}/release/nessemble.exe" "nessemble_${{ steps.v.outputs.version }}_${{ matrix.win }}.exe"
+        run: cp "target/${{ matrix.target }}/release/nessemble.exe" "nessemble_${{ needs.version.outputs.version }}_${{ matrix.win }}.exe"
       - name: Build .msi
         run: |
           cargo wix init --force -p nessemble-cli
-          cargo wix -p nessemble-cli --target ${{ matrix.target }} --nocapture --output "nessemble_${{ steps.v.outputs.version }}_${{ matrix.win }}.msi"
+          cargo wix -p nessemble-cli --target ${{ matrix.target }} --nocapture --output "nessemble_${{ needs.version.outputs.version }}_${{ matrix.win }}.msi"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ matrix.win }}
@@ -104,21 +113,14 @@ jobs:
 
   # --------------------------------------------------------------- macOS .pkg
   macos:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
-      - name: Determine version
-        id: v
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
       - name: Build binary
         run: cargo build --release -p nessemble-cli --target x86_64-apple-darwin
       - name: Build .pkg
@@ -126,8 +128,8 @@ jobs:
           mkdir -p payload/usr/local/bin
           cp target/x86_64-apple-darwin/release/nessemble payload/usr/local/bin/nessemble
           pkgbuild --root payload --identifier com.nessemble.cli \
-            --version "${{ steps.v.outputs.version }}" --install-location / \
-            "nessemble_${{ steps.v.outputs.version }}.pkg"
+            --version "${{ needs.version.outputs.version }}" --install-location / \
+            "nessemble_${{ needs.version.outputs.version }}.pkg"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-pkg
@@ -135,26 +137,26 @@ jobs:
 
   # ----------------------------------------------------------------- Release
   #
-  # Creates the GitHub Release for the tag, uploads all seven artifacts, and
-  # auto-generates release notes listing every pull request merged since the
-  # previous release (GitHub's "What's Changed" changelog; grouping is
-  # configured in .github/release.yml). Only runs for tag pushes — a manual
-  # workflow_dispatch just builds the artifacts.
+  # Creates the `v<version>` tag (at this commit) and its GitHub Release,
+  # uploads all seven artifacts, and auto-generates release notes listing every
+  # pull request merged since the previous release (GitHub's "What's Changed"
+  # changelog; grouping is configured in .github/release.yml).
   release:
-    needs: [linux, windows, macos]
+    needs: [version, linux, windows, macos]
+    if: needs.version.outputs.exists == 'false'
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Create release
+      - name: Create tagged release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: nessemble ${{ github.ref_name }}
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: nessemble v${{ needs.version.outputs.version }}
           draft: false
           prerelease: false
           make_latest: true

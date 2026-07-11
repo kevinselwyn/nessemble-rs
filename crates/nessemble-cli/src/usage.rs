@@ -5,7 +5,9 @@
 use nessemble_i18n::t;
 
 const PROGRAM_NAME: &str = "nessemble";
-const PROGRAM_VERSION: &str = "1.1.1";
+/// The displayed version is the workspace (crate) version — the single source
+/// of truth that also drives the release pipeline.
+const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROGRAM_COPYRIGHT: &str = "2017";
 const PROGRAM_AUTHOR: &str = "Kevin Selwyn";
 
@@ -87,7 +89,7 @@ pub fn usage(exec: &str) -> String {
     out
 }
 
-/// The version banner (`nessemble v1.1.1` + copyright line).
+/// The version banner (`nessemble v<version>` + copyright line).
 pub fn version() -> String {
     format!(
         "{PROGRAM_NAME} v{PROGRAM_VERSION}\n\n{} {PROGRAM_COPYRIGHT} {PROGRAM_AUTHOR}\n",
@@ -105,10 +107,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_matches_reference() {
+    fn version_uses_workspace_version() {
         assert_eq!(
             version(),
-            "nessemble v1.1.1\n\nCopyright 2017 Kevin Selwyn\n"
+            format!(
+                "nessemble v{}\n\nCopyright 2017 Kevin Selwyn\n",
+                env!("CARGO_PKG_VERSION")
+            )
         );
     }
 

@@ -1,31 +1,25 @@
 # Releasing
 
-Releases are cut with a tag-driven pipeline. Cutting a release is a two-step,
-button-click process — no local tooling required.
+The release version is the **workspace version** in the root `Cargo.toml`
+(`[workspace.package] version`). It is the single source of truth: it is the
+version the CLI reports (`nessemble --version`) and the version the release
+pipeline publishes. There is no manual version input.
 
-## 1. Bump the version
+## Cutting a release
 
-On `main`, set the workspace version in the root `Cargo.toml`
-(`[workspace.package] version = "…"`), commit it, and merge. The tag process
-verifies the tag matches this version.
+Bump the workspace version on `main` and merge:
 
-## 2. Tag the release
+```toml
+# Cargo.toml
+[workspace.package]
+version = "0.2.0"
+```
 
-Run the **Tag Release** workflow (Actions → *Tag Release* → *Run workflow*) and
-enter the version (without the leading `v`, e.g. `0.1.0`). It:
+That's it. On the push to `main`, the **Release** workflow
+(`.github/workflows/release.yml`) reads the workspace version and, because no
+`v0.2.0` tag exists yet:
 
-- validates the version format,
-- checks the workspace `Cargo.toml` version matches,
-- ensures the tag does not already exist, and
-- creates and pushes the annotated tag `v<version>`.
-
-Pushing the tag triggers the **Release** workflow.
-
-## What the Release workflow does
-
-`.github/workflows/release.yml` runs on the `v*` tag and:
-
-1. Builds every platform artifact — the seven files matching the upstream
+1. builds every platform artifact — the seven files matching the upstream
    v1.1.1 release:
 
    | Platform       | Artifact(s)                              | Tool        |
@@ -36,14 +30,17 @@ Pushing the tag triggers the **Release** workflow.
    | Windows 32-bit | `nessemble_<v>_win32.exe`, `…_win32.msi`| `cargo-wix` |
    | Windows 64-bit | `nessemble_<v>_win64.exe`, `…_win64.msi`| `cargo-wix` |
 
-2. Creates the GitHub Release for the tag, uploads all seven artifacts, and
-   **auto-generates release notes** listing every pull request merged since the
-   previous release (GitHub's "What's Changed" changelog; grouping is configured
-   in `.github/release.yml`).
+2. creates the `v<version>` tag at that commit and its GitHub Release, uploads
+   all seven artifacts, and **auto-generates release notes** listing every pull
+   request merged since the previous release (GitHub's "What's Changed"
+   changelog; grouping is configured in `.github/release.yml`).
 
-## Testing the build without releasing
+If the version is unchanged (the tag already exists), the pipeline resolves the
+version, sees the tag, and does nothing — so ordinary pushes to `main` never
+re-release.
 
-Run the **Release** workflow via *Run workflow* (workflow_dispatch) with a
-version input. This builds and uploads the artifacts as workflow artifacts but
-does **not** create a GitHub Release (the release step only runs for tag
-pushes).
+## Re-running on demand
+
+The Release workflow can also be started manually (Actions → *Release* → *Run
+workflow*). It applies the same logic: it releases only if the workspace
+version has no matching tag yet.

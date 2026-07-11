@@ -30,9 +30,13 @@ fn help_exits_129_and_omits_out_of_scope() {
 fn version_exits_129() {
     let out = bin().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(129));
+    // The displayed version tracks the workspace (crate) version.
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "nessemble v1.1.1\n\nCopyright 2017 Kevin Selwyn\n"
+        format!(
+            "nessemble v{}\n\nCopyright 2017 Kevin Selwyn\n",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 }
 
