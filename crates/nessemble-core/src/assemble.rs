@@ -42,6 +42,19 @@ enum SymType {
     Enum,
 }
 
+/// Per-bank write coverage for `-C`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageReport {
+    /// Covered byte count for each PRG bank.
+    pub prg: Vec<u32>,
+    /// Covered byte count for each CHR bank.
+    pub chr: Vec<u32>,
+    /// Total bytes in a PRG bank (denominator).
+    pub prg_bank_size: u32,
+    /// Total bytes in a CHR bank (denominator).
+    pub chr_bank_size: u32,
+}
+
 /// A defined symbol exposed for the list file (`-l`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListSymbol {
@@ -97,6 +110,8 @@ pub struct Assembler {
     segment_prg: bool,
 
     rom: Vec<u8>,
+    /// Per-ROM-byte coverage bitmap (which bytes were written), for `-C`.
+    coverage: Vec<bool>,
     offset_max: usize,
 
     symbols: Vec<Symbol>,
@@ -146,6 +161,7 @@ impl Assembler {
             chr_index: 0,
             segment_prg: true,
             rom: Vec::new(),
+            coverage: Vec::new(),
             offset_max: 0,
             symbols: Vec::new(),
             enum_active: false,
@@ -166,6 +182,36 @@ impl Assembler {
             files,
             base_dir,
         }
+    }
+
+    /// The per-bank coverage summary (`-C`), or `None` when not in iNES mode
+    /// (coverage is reported over PRG/CHR banks). Mirrors the reference
+    /// `get_coverage` output.
+    pub fn coverage_report(&self) -> Option<CoverageReport> {
+        if !self.nes {
+            return None;
+        }
+        let count = |start: usize, len: usize| -> u32 {
+            self.coverage
+                .get(start..start + len)
+                .map(|s| s.iter().filter(|&&c| c).count() as u32)
+                .unwrap_or(0)
+        };
+        let mut prg = Vec::new();
+        for i in 0..self.ines.prg.max(0) as usize {
+            prg.push(count(i * BANK_PRG as usize, BANK_PRG as usize));
+        }
+        let mut chr = Vec::new();
+        let prg_bytes = self.ines.prg.max(0) as usize * BANK_PRG as usize;
+        for i in 0..self.ines.chr.max(0) as usize {
+            chr.push(count(prg_bytes + i * BANK_CHR as usize, BANK_CHR as usize));
+        }
+        Some(CoverageReport {
+            prg,
+            chr,
+            prg_bank_size: BANK_PRG as u32,
+            chr_bank_size: BANK_CHR as u32,
+        })
     }
 
     /// Symbols eligible for the list file (`-l`), excluding those only
@@ -211,6 +257,7 @@ impl Assembler {
         // Allocate ROM (and trainer, filled with the empty byte) and run pass 2
         // to emit.
         self.rom = vec![self.empty_byte; self.offset_max];
+        self.coverage = vec![false; self.offset_max];
         self.trainer = vec![self.empty_byte; TRAINER_MAX];
         self.pass = 2;
         self.aborted = false;
@@ -456,6 +503,7 @@ impl Assembler {
         }
         if self.pass == 2 && offset < self.rom.len() {
             self.rom[offset] = byte;
+            self.coverage[offset] = true;
         }
         if self.segment_prg {
             if self.pass == 1 && self.prg_offsets[self.prg_index] >= BANK_PRG {

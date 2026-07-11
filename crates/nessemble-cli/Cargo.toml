@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 nessemble-core.workspace = true
-clap.workspace = true
+nessemble-isa.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

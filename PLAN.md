@@ -557,6 +557,24 @@ ordered so that the highest-value core lands first and each builds on the last.
 - **Acceptance:** CLI help/usage/exit-code parity for the in-scope surface;
   help/usage text contains **no reference** to disassemble/reassemble/simulate or
   the registry; `init` output matches; config round-trips.
+- **Status: ✅ complete.** The CLI is a hand-written getopt-style parser (clap
+  can't reproduce the reference's exit codes/text), giving exact parity: `-h`,
+  `-v`, `-L` and argument errors print the reference text and exit **129**
+  (`RETURN_USAGE`); the `--license` body is **byte-identical** to the oracle and
+  `--version` reads `nessemble v1.1.1 … Copyright 2017 Kevin Selwyn`. Help/usage
+  lists **only** the in-scope options and the `init`/`scripts`/`reference`/
+  `config` commands — the out-of-scope flags (`-d`/`-R`/`-s`/`-r`) and
+  registry/package/user commands are not parsed and appear nowhere. `init`
+  scaffolds a project **byte-identical** to the oracle (bundled `init.txt`
+  template, `mapper % 255` / `mirroring % 15` quirks preserved). `config`
+  get/set/list round-trips through `~/.nessemble/config` (tab-separated;
+  registry-free). `-C` **coverage** prints the reference per-bank
+  `PRG XX:`/`CHR XX:` summary — verified byte-for-byte against the oracle. The
+  `reference` command is backed by **locally bundled data** (the `nessemble-isa`
+  opcode table + a static directive list) instead of the C tool's network call;
+  QR output belongs to the out-of-scope user-auth path and is excluded. `scripts`
+  creates `~/.nessemble/scripts` (the bundled `ease` script arrives in Phase 8).
+  Assembler parity holds at **119/119**.
 
 ### Phase 7 — i18n (Project Fluent)
 - **Scope:** `nessemble-i18n` crate; wire a `t!`-style lookup through all CLI /
