@@ -9,7 +9,24 @@ around them changed. This page covers what a 1.x user needs to know.
 - **No changes needed to your source.** The assembly language (instructions,
   addressing modes, expressions, labels, macros, conditionals, includes, data
   and iNES directives, media importers) is unchanged, and assembled ROMs are
-  byte-for-byte identical to 1.x output.
+  byte-for-byte identical to 1.x output. The one behavioral change is how
+  relative filenames are resolved — see [Include & asset paths](#include--asset-paths).
+
+## Include & asset paths
+
+- In 1.x, every filename-based directive resolved its path against a single
+  global working directory (the top-level file's directory). A relative path in
+  an included file was therefore resolved from the project root, not from the
+  included file.
+- In 2.x, relative filenames in `.include`, `.inestrn`, and the `.inc*` media
+  importers (`.incbin`, `.incpng`, `.incpal`, `.incrle`, `.incwav`) resolve
+  relative to **the directory of the file that contains the directive**. This
+  makes subdirectory modules self-contained: a file in `sub/` that does
+  `.include "helper.asm"` or `.incbin "data.bin"` now finds them in `sub/`.
+- **What to check:** if a file you `.include` from a subdirectory referenced a
+  sibling file or asset by a path written relative to the *project root*, update
+  that path to be relative to the including file instead. Projects that keep each
+  file's includes and assets alongside it need no changes.
 
 ## Custom pseudo-instructions
 

@@ -6,7 +6,7 @@
 //! here we set the iNES-related state (so address math and `.org` validation
 //! match) but emit the raw written region.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
@@ -138,9 +138,11 @@ pub struct Assembler {
     cur_line: u32,
     cur_file: u32,
     files: Vec<String>,
-    /// Directory that media includes (`.incbin`/`.incpng`/…) resolve against —
-    /// the top-level file's directory, matching the reference `cwd_path`.
-    base_dir: PathBuf,
+    /// Directory each source file resolves filename-based directives
+    /// (`.incbin`/`.incpng`/… and custom pseudo-ops) against, parallel to
+    /// `files`. Indexed by `cur_file`, so a directive is resolved relative to
+    /// the file that contains it rather than the top-level file.
+    dirs: Vec<PathBuf>,
     /// Resolver for custom pseudo-ops (`.foo`): given the directive name, its
     /// numeric and string arguments, and the base directory, it returns the
     /// bytes to emit (or an error message).
@@ -157,7 +159,7 @@ impl Assembler {
         undocumented: bool,
         empty_byte: u8,
         files: Vec<String>,
-        base_dir: PathBuf,
+        dirs: Vec<PathBuf>,
         custom: CustomResolver,
     ) -> Self {
         Assembler {
@@ -190,7 +192,7 @@ impl Assembler {
             cur_line: 1,
             cur_file: 0,
             files,
-            base_dir,
+            dirs,
             custom,
         }
     }
@@ -810,10 +812,19 @@ impl Assembler {
                 CustomArg::Str(s) => texts.push(s.clone()),
             }
         }
-        match (self.custom)(name, &ints, &texts, &self.base_dir) {
+        match (self.custom)(name, &ints, &texts, self.cur_dir()) {
             Ok(bytes) => self.write_all(&bytes),
             Err(msg) => self.hard_error(msg),
         }
+    }
+
+    /// Directory of the file the current line came from, which filename-based
+    /// directives resolve against. Falls back to the current directory if the
+    /// file id has no recorded directory (should not happen in practice).
+    fn cur_dir(&self) -> &Path {
+        self.dirs
+            .get(self.cur_file as usize)
+            .map_or_else(|| Path::new("."), PathBuf::as_path)
     }
 
     // -- media importers ----------------------------------------------------
@@ -825,9 +836,10 @@ impl Assembler {
         }
     }
 
-    /// Read a media file resolved against the base directory.
+    /// Read a media file resolved against the directory of the file that
+    /// contains the directive (see [`Self::cur_dir`]).
     fn read_media_file(&self, name: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.base_dir.join(name)).ok()
+        std::fs::read(self.cur_dir().join(name)).ok()
     }
 
     /// Read and decode a media PNG (open failure and decode failure are

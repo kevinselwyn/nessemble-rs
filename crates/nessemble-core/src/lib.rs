@@ -138,9 +138,11 @@ pub fn render_list_file(symbols: &[ListSymbol]) -> String {
 
 /// Assemble source text into output bytes.
 ///
-/// Includes are resolved relative to the current working directory and the
-/// source is reported as `stdin` in diagnostics. Custom pseudo-ops (`.foo`) are
-/// unresolved; use [`assemble_with`] to supply a resolver.
+/// Top-level includes and filename-based directives resolve relative to the
+/// current working directory (nested includes resolve relative to the file that
+/// contains them), and the source is reported as `stdin` in diagnostics. Custom
+/// pseudo-ops (`.foo`) are unresolved; use [`assemble_with`] to supply a
+/// resolver.
 pub fn assemble(source: &str, options: &Options) -> Result<Assembly, AssembleError> {
     assemble_with(source, options, default_custom_resolver())
 }
@@ -155,7 +157,10 @@ pub fn assemble_with(
     assemble_impl(source, options, base, "stdin", custom)
 }
 
-/// Assemble the file at `path`, resolving includes relative to its directory.
+/// Assemble the file at `path`, resolving includes and filename-based
+/// directives relative to each file's own directory (the top-level file's
+/// directory for its own directives, and each included file's directory for
+/// the directives it contains).
 pub fn assemble_file(path: &Path, options: &Options) -> Result<Assembly, AssembleError> {
     assemble_file_with(path, options, default_custom_resolver())
 }
@@ -205,11 +210,11 @@ fn assemble_impl(
     top_name: &str,
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
-    let (tokens, files) = preprocess::preprocess(source, base_dir.clone(), top_name)
-        .map_err(AssembleError::Diagnostic)?;
-    let lines = parse::parse(tokens).map_err(|e| {
+    let pre =
+        preprocess::preprocess(source, base_dir, top_name).map_err(AssembleError::Diagnostic)?;
+    let lines = parse::parse(pre.tokens).map_err(|e| {
         AssembleError::Diagnostic(Diag {
-            file: files.get(e.file as usize).cloned().unwrap_or_default(),
+            file: pre.files.get(e.file as usize).cloned().unwrap_or_default(),
             line: e.line,
             message: e.message,
         })
@@ -218,8 +223,8 @@ fn assemble_impl(
         options.nes,
         options.undocumented,
         options.empty_byte,
-        files,
-        base_dir,
+        pre.files,
+        pre.dirs,
         custom,
     );
     let rom = asm.run(&lines).map_err(AssembleError::Diagnostic)?;
