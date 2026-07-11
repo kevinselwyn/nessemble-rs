@@ -7,8 +7,9 @@
 //! done here, on the token stream, *before* parsing and assembly:
 //!
 //! - `.include "file"` recursively lexes the referenced file and splices its
-//!   tokens in place (relative to the top-level file's directory, matching the
-//!   reference's global `cwd_path`), enforcing the depth limit.
+//!   tokens in place (resolved relative to the directory of the file that
+//!   contains the `.include`, so nested includes are file-relative), enforcing
+//!   the depth limit.
 //! - `.macrodef NAME` … `.endm` captures the body tokens; `.macro NAME, a, b`
 //!   re-emits that body with each `\N` replaced by the (parenthesised) tokens of
 //!   argument *N*, `\#` by the argument count, and `\@` by a per-invocation
@@ -30,28 +31,42 @@ use crate::Diag;
 /// Matches the reference `MAX_INCLUDE_DEPTH`.
 const MAX_INCLUDE_DEPTH: usize = 10;
 
-/// Preprocess `source` (already read from `top_name`), resolving includes
-/// relative to `base_dir` and expanding macros. Returns the final flat token
-/// stream plus the table of file display names (indexed by `Token::file`).
-pub fn preprocess(
-    source: &str,
-    base_dir: PathBuf,
-    top_name: &str,
-) -> Result<(Vec<Token>, Vec<String>), Diag> {
+/// The flattened result of preprocessing: the token stream plus two parallel
+/// tables (indexed by `Token::file`) of per-file display names and directories.
+pub struct Preprocessed {
+    pub tokens: Vec<Token>,
+    /// File display names, for diagnostics.
+    pub files: Vec<String>,
+    /// Directory each file resolves its filename-based directives against.
+    pub dirs: Vec<PathBuf>,
+}
+
+/// Preprocess `source` (already read from `top_name`), resolving includes and
+/// expanding macros. Each `.include`/`.inestrn` is resolved relative to the
+/// directory of the file that contains it (seeded from `base_dir` for the
+/// top-level file), so the assembler can resolve filename-based directives
+/// against the file that contains them.
+pub fn preprocess(source: &str, base_dir: PathBuf, top_name: &str) -> Result<Preprocessed, Diag> {
     let mut pre = Pre {
-        base_dir,
         files: vec![top_name.to_string()],
+        dirs: vec![base_dir],
         macros: HashMap::new(),
         out: Vec::new(),
         unique: 0,
     };
     pre.process_file(source, 0, 0)?;
-    Ok((pre.out, pre.files))
+    Ok(Preprocessed {
+        tokens: pre.out,
+        files: pre.files,
+        dirs: pre.dirs,
+    })
 }
 
 struct Pre {
-    base_dir: PathBuf,
     files: Vec<String>,
+    /// Directory each file resolves relative includes against, parallel to
+    /// `files`. `dirs[0]` is the top-level `base_dir`.
+    dirs: Vec<PathBuf>,
     macros: HashMap<String, Vec<Token>>,
     out: Vec<Token>,
     unique: u32,
@@ -184,13 +199,22 @@ impl Pre {
         }
 
         let name = target.trim_matches('"').to_string();
-        let path = self.base_dir.join(&name);
+        // Resolve relative to the directory of the file that contains the
+        // directive, so a nested include (or an include in a subdirectory) is
+        // resolved from *its* location rather than the top-level file's.
+        let dir = self.dirs[file_id].clone();
+        let path = dir.join(&name);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Err(self.diag(file_id, line, t!("could-not-include", file = name)));
         };
 
         let child_id = self.files.len();
         self.files.push(name);
+        // The included file's own directory becomes the base for its includes.
+        let child_dir = path
+            .parent()
+            .map_or_else(|| dir.clone(), std::path::Path::to_path_buf);
+        self.dirs.push(child_dir);
         self.process_file(&text, child_id, depth + 1)
     }
 

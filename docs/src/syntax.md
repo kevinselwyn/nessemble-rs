@@ -883,6 +883,12 @@ Example:
 > available to all other files, provided that they are included after the
 > definition.
 
+> Relative filenames in `.include` — and in every filename-based directive
+> (`.incbin`, `.incpng`, `.incpal`, `.incrle`, `.incwav`, `.inestrn`) — are
+> resolved relative to the directory of the file that contains the directive.
+> A file included from a subdirectory therefore resolves its own includes and
+> assets from that subdirectory, not from the top-level project directory.
+
 ### .incpal
 
 Include palette from PNG.
