@@ -82,7 +82,7 @@ Grounded in the current code (not aspirational):
   async runtime), and a synchronous request loop is a fine fit for analyzing one
   document at a time. The cost is a little more manual message routing. The
   alternative, `tower-lsp`, is more ergonomic but pulls an async stack; we'd
-  reach for it only if we later need heavy concurrency. **Proposed: lsp-server.**
+  reach for it only if we later need heavy concurrency. **Decided: lsp-server.**
 - **Document store:** an in-memory map of `Uri -> (text, version)` kept in sync
   via `textDocument/didOpen|didChange|didClose`; analysis runs against this text.
 - **Analysis bridge:** a thin adapter that runs core analysis on a buffer and
@@ -199,9 +199,8 @@ Deliverable is the **server plus setup documentation**, not a bespoke extension:
 **Made:**
 
 1. **CLI surface** — `nessemble lsp` subcommand over stdio (feature-gated `lsp`).
-2. **Transport** — *recommendation:* **`lsp-server`** (sync, minimal deps),
-   matching the project's ethos; `tower-lsp` only if concurrency demands it.
-   (Pending your ack of the recommendation.)
+2. **Transport** — **`lsp-server`** (sync, minimal deps), matching the project's
+   ethos; `tower-lsp` only if concurrency demands it.
 3. **Editor deliverable** — **server + docs only**; no in-repo extension; a
    dedicated VS Code/Cursor extension is deferred/optional.
 4. **Priorities / phase order** — diagnostics, then completion, then
