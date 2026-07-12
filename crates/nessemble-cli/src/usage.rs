@@ -14,7 +14,7 @@ const PROGRAM_COPYRIGHT: &str = "2017";
 const PROGRAM_AUTHOR: &str = "Kevin Selwyn";
 
 /// The GPL notice printed by `--license` (the body after the version header).
-const LICENSE_TEXT: &str = include_str!("data/license.txt");
+const LICENSE_TEXT: &str = include_str!("../../../LICENSE.txt");
 
 /// In-scope option rows (`invocation`, `description`).
 const OPTIONS: &[(&str, &str)] = &[

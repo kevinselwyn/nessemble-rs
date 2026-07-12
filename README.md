@@ -8,6 +8,9 @@ custom pseudo-instructions written in [Rhai](https://rhai.rs).
 > **Upgrading from 1.x?** 2.0 is a ground-up Rust rewrite. Your assembly source
 > and ROM output are unchanged, but the tooling around them moved. See
 > [`docs/src/upgrading.md`](docs/src/upgrading.md) for what changed.
+>
+> **Looking for 1.x?** The original C implementation of `nessemble` lives at
+> [kevinselwyn/nessemble](https://github.com/kevinselwyn/nessemble).
 
 ## Features
 
