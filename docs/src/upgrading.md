@@ -41,6 +41,11 @@ around them changed. This page covers what a 1.x user needs to know.
 - Rhai scripts can still read and write files (as the old Lua/Scheme hosts
   could), via the `rhai-fs` `open_file` API; relative paths resolve against the
   source file's directory. See [Filesystem access](extending.md#filesystem-access).
+- **Script paths in a `--pseudo` mapping now resolve relative to the mapping
+  file's own directory**, not the source file's directory. In 1.x the paths were
+  resolved against the input file's location (the tool's `cwd_path`). If your
+  `pseudo.txt` sits next to the source you assemble, nothing changes; otherwise,
+  keep each script beside the mapping file that names it (or update the paths).
 
 ## Removed commands and options
 

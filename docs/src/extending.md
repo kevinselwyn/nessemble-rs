@@ -28,9 +28,11 @@ To assemble:
 nessemble example.asm --pseudo pseudo.txt
 ```
 
-Directive script paths are resolved relative to the source file's directory.
-Bundled scripts installed with `nessemble scripts` (into `~/.nessemble/scripts`)
-are resolved via `~/.nessemble/scripts/scripts.txt` and need no `--pseudo` flag.
+A script path in the mapping file is resolved relative to the **mapping file's
+own directory**, so a `pseudo.txt` and the scripts it names can live together and
+be pointed at from anywhere. Bundled scripts installed with `nessemble scripts`
+(into `~/.nessemble/scripts`) are resolved via `~/.nessemble/scripts/scripts.txt`
+and need no `--pseudo` flag.
 
 ## Writing a script
 
