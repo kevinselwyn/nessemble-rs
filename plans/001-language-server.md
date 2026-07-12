@@ -166,13 +166,31 @@ shippable to `main`.
   and tokens are colorized via semantic tokens. ✅ (formatter unit tests incl.
   idempotence; lexer tests; LSP unit tests for both requests; end-to-end stdio.)
 
-### Phase 4 — Precise spans (deferred core refactor)
-- Extend the Phase-3 column work into full start/end **spans** through parser and
-  assembler; upgrade diagnostics from line-level to token-accurate ranges and add
-  parse-level **error recovery** so multiple problems report at once. Must keep
-  ROM output identical — `xtask parity` stays 122/122.
+### Phase 4 — Precise diagnostics & multi-error — ✅ done
+- **Multiple errors at once** (core recovery): the parser gained a recovering
+  variant (`parse_recovering`: record the error, skip to the next line, continue)
+  and the assembler a collect mode (`hard_error` records without aborting; a
+  defensive `if_depth` guard makes continuing panic-safe). A new
+  `diagnose_source_as` orchestrates preprocess → recovering parse → collect-mode
+  assemble and returns every deduplicated error/warning plus symbols. The parity
+  `assemble`/`assemble_file` path is **untouched** (still first-error), so the
+  error-corpus tests and parity (122/122) are unchanged.
+- **Token-accurate ranges** (LSP): instead of threading byte-spans through the
+  whole assembler (high parity risk for little extra benefit), the LSP narrows
+  each diagnostic's range to the backtick-quoted subject of its message located
+  on the reported line (reusing the source text; the messages already quote the
+  offending symbol/opcode), falling back to the line's trimmed content span. This
+  achieves the visible outcome — exact squiggles on the offending token — with no
+  risk to ROM output.
 - **Done when:** diagnostics highlight exact ranges; multiple errors surface
-  together; parity + all existing tests green.
+  together; parity + all existing tests green. ✅ (core recovery/no-panic tests;
+  LSP multi-error + range-narrowing tests; end-to-end stdio.)
+
+> **Note on approach.** The plan originally envisioned threading spans through the
+> parser and assembler. In practice the two visible outcomes (exact ranges +
+> multi-error) are delivered with far less parity risk by *recovery in the core*
+> plus *range narrowing in the LSP* (reusing Phase-3's tooling lexer/text). Full
+> span threading remains a possible future refinement.
 
 ### Phase 5 — Navigation, symbols & hover (deferred)
 - Track symbol **definition** (and ideally reference) positions; implement

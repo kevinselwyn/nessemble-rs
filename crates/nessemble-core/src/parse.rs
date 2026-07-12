@@ -26,6 +26,18 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Line>, ParseError> {
     .parse_program()
 }
 
+/// Parse `tokens`, recovering from errors: on a statement error, record it and
+/// skip to the next line, continuing. Returns the successfully-parsed lines plus
+/// every error found. Used by the tooling diagnostics path; [`parse`] (strict,
+/// first-error) is unchanged.
+pub fn parse_recovering(tokens: Vec<Token>) -> (Vec<Line>, Vec<ParseError>) {
+    Parser {
+        toks: tokens,
+        pos: 0,
+    }
+    .parse_program_recovering()
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -106,6 +118,48 @@ impl Parser {
             }
         }
         Ok(lines)
+    }
+
+    /// Like [`Self::parse_program`], but on a statement error it records the
+    /// error and skips to the next line instead of returning early. The
+    /// per-line skip loop guarantees progress, so this always terminates.
+    fn parse_program_recovering(&mut self) -> (Vec<Line>, Vec<ParseError>) {
+        let mut lines = Vec::new();
+        let mut errors = Vec::new();
+        loop {
+            while matches!(self.peek(), Some(Tok::Endl)) {
+                self.pos += 1;
+            }
+            if self.peek().is_none() {
+                break;
+            }
+            let indented = matches!(self.peek(), Some(Tok::Indent));
+            if indented {
+                self.pos += 1;
+                if matches!(self.peek(), Some(Tok::Endl) | None) {
+                    continue;
+                }
+            }
+            let line_no = self.cur_line();
+            let file_no = self.cur_file();
+            match self.parse_stmt(indented) {
+                Ok(Some(stmt)) => lines.push(Line {
+                    stmt,
+                    line: line_no,
+                    file: file_no,
+                }),
+                Ok(None) => {}
+                Err(e) => errors.push(e),
+            }
+            // Skip to (and past) end-of-line: the recovery point.
+            while !matches!(self.peek(), Some(Tok::Endl) | None) {
+                self.pos += 1;
+            }
+            if matches!(self.peek(), Some(Tok::Endl)) {
+                self.pos += 1;
+            }
+        }
+        (lines, errors)
     }
 
     fn parse_stmt(&mut self, indented: bool) -> Result<Option<Stmt>, ParseError> {
