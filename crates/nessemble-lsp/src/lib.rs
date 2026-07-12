@@ -12,10 +12,14 @@
 //! - **Completion** (Phase 2): `textDocument/completion` offers instruction
 //!   mnemonics (from `nessemble-isa`), directives, in-scope labels/constants,
 //!   and macro names.
+//! - **Formatting & highlighting** (Phase 3): `textDocument/formatting` tidies a
+//!   buffer (via `nessemble_core::tooling::format`), and
+//!   `textDocument/semanticTokens/full` classifies tokens for highlighting, both
+//!   built on the lossless tooling lexer.
 //!
-//! Column-accurate ranges, formatting, and highlighting arrive in later phases.
+//! Column-accurate diagnostics and navigation arrive in later phases.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
@@ -23,16 +27,39 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, Request as _};
+use lsp_types::request::{Completion, Formatting, Request as _, SemanticTokensFullRequest};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    DidOpenTextDocumentParams, DocumentFormattingParams, OneOf, Position, PublishDiagnosticsParams,
+    Range, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
 };
 
+use nessemble_core::tooling::{self, LexKind};
 use nessemble_core::{assemble_source_as, AssembleError, Diag, Options};
 use nessemble_isa::{DIRECTIVES, OPCODES};
+
+/// Semantic-token type legend. The index of each entry is the `token_type`
+/// referenced by emitted tokens (see [`token_type`]).
+const TOKEN_TYPES: [SemanticTokenType; 7] = [
+    SemanticTokenType::KEYWORD,  // 0: directive
+    SemanticTokenType::FUNCTION, // 1: instruction mnemonic
+    SemanticTokenType::VARIABLE, // 2: identifier (label/constant/register)
+    SemanticTokenType::NUMBER,   // 3
+    SemanticTokenType::STRING,   // 4: string/char literal
+    SemanticTokenType::COMMENT,  // 5
+    SemanticTokenType::OPERATOR, // 6: punctuation/operator
+];
+const TT_KEYWORD: u32 = 0;
+const TT_FUNCTION: u32 = 1;
+const TT_VARIABLE: u32 = 2;
+const TT_NUMBER: u32 = 3;
+const TT_STRING: u32 = 4;
+const TT_COMMENT: u32 = 5;
+const TT_OPERATOR: u32 = 6;
 
 /// A boxed, thread-safe error, matching what the stdio transport surfaces.
 type LspError = Box<dyn std::error::Error + Sync + Send>;
@@ -115,6 +142,29 @@ impl Server {
             items.extend(macro_names(&doc.text).iter().map(|name| macro_item(name)));
         }
         items
+    }
+
+    /// Produce a whole-document formatting edit for `uri`, or `None` if the
+    /// document is unknown. An already-formatted document yields no edits.
+    fn format_document(&self, uri: &Url) -> Option<Vec<TextEdit>> {
+        let text = &self.documents.get(uri)?.text;
+        let formatted = tooling::format(text);
+        if formatted == *text {
+            return Some(Vec::new());
+        }
+        Some(vec![TextEdit {
+            range: full_range(text),
+            new_text: formatted,
+        }])
+    }
+
+    /// Full-document semantic tokens for `uri`, or `None` if it is unknown.
+    fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokensResult> {
+        let text = &self.documents.get(uri)?.text;
+        Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: semantic_tokens(text),
+        }))
     }
 
     /// Number of documents currently open.
@@ -214,6 +264,79 @@ fn line_len_utf16(text: &str, line: u32) -> u32 {
         .map_or(0, |l| l.encode_utf16().count() as u32)
 }
 
+/// UTF-16 code-unit length of a string (LSP measures positions in UTF-16).
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
+}
+
+/// The range covering the entire document, `(0,0)` to the end of the last line.
+fn full_range(text: &str) -> Range {
+    let last_line = text.split('\n').next_back().unwrap_or("");
+    let last_index = text.split('\n').count().saturating_sub(1) as u32;
+    Range::new(
+        Position::new(0, 0),
+        Position::new(last_index, utf16_len(last_line)),
+    )
+}
+
+/// Build delta-encoded LSP semantic tokens from the lossless lexeme stream.
+/// Whitespace and newlines advance the cursor but emit no token.
+fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
+    // Lower-cased documented+undocumented mnemonics, for classifying idents.
+    let mnemonics: HashSet<String> = OPCODES
+        .iter()
+        .map(|o| o.mnemonic.to_ascii_lowercase())
+        .collect();
+
+    let mut data = Vec::new();
+    let (mut line, mut col) = (0u32, 0u32);
+    let (mut prev_line, mut prev_col) = (0u32, 0u32);
+    for lx in tooling::lex(text) {
+        let piece = &text[lx.start..lx.end];
+        match lx.kind {
+            LexKind::Newline => {
+                line += 1;
+                col = 0;
+            }
+            LexKind::Whitespace => col += utf16_len(piece),
+            kind => {
+                let len = utf16_len(piece);
+                let delta_line = line - prev_line;
+                let delta_start = if delta_line == 0 { col - prev_col } else { col };
+                data.push(SemanticToken {
+                    delta_line,
+                    delta_start,
+                    length: len,
+                    token_type: token_type(kind, piece, &mnemonics),
+                    token_modifiers_bitset: 0,
+                });
+                (prev_line, prev_col) = (line, col);
+                col += len;
+            }
+        }
+    }
+    data
+}
+
+/// Map a lexeme to its semantic-token type index (see [`TOKEN_TYPES`]).
+fn token_type(kind: LexKind, piece: &str, mnemonics: &HashSet<String>) -> u32 {
+    match kind {
+        LexKind::Directive => TT_KEYWORD,
+        LexKind::Ident => {
+            if mnemonics.contains(&piece.to_ascii_lowercase()) {
+                TT_FUNCTION
+            } else {
+                TT_VARIABLE
+            }
+        }
+        LexKind::Number => TT_NUMBER,
+        LexKind::String | LexKind::Char => TT_STRING,
+        LexKind::Comment => TT_COMMENT,
+        // Punctuation, and the unreachable Whitespace/Newline (handled above).
+        LexKind::Punct | LexKind::Whitespace | LexKind::Newline => TT_OPERATOR,
+    }
+}
+
 /// Completion items for every documented instruction mnemonic (lower-cased to
 /// match the usual nessemble style), detailing its addressing modes.
 fn mnemonic_items() -> Vec<CompletionItem> {
@@ -298,6 +421,18 @@ fn server_capabilities() -> ServerCapabilities {
             trigger_characters: Some(vec![".".to_string()]),
             ..Default::default()
         }),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+                legend: SemanticTokensLegend {
+                    token_types: TOKEN_TYPES.to_vec(),
+                    token_modifiers: Vec::new(),
+                },
+                range: Some(false),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+            },
+        )),
         ..Default::default()
     }
 }
@@ -342,6 +477,19 @@ fn main_loop(connection: &Connection) -> LspResult<Server> {
                             .map(|p| server.complete(&p.text_document_position.text_document.uri))
                             .unwrap_or_default();
                         Response::new_ok(req.id, CompletionResponse::Array(items))
+                    }
+                    Formatting::METHOD => {
+                        let edits = serde_json::from_value::<DocumentFormattingParams>(req.params)
+                            .ok()
+                            .and_then(|p| server.format_document(&p.text_document.uri))
+                            .unwrap_or_default();
+                        Response::new_ok(req.id, edits)
+                    }
+                    SemanticTokensFullRequest::METHOD => {
+                        let result = serde_json::from_value::<SemanticTokensParams>(req.params)
+                            .ok()
+                            .and_then(|p| server.semantic_tokens(&p.text_document.uri));
+                        Response::new_ok(req.id, result)
                     }
                     other => Response::new_err(
                         req.id,
@@ -432,6 +580,42 @@ mod tests {
         assert!(ls.iter().any(|l| l == "start"), "missing label");
         assert!(ls.iter().any(|l| l == "count"), "missing constant");
         assert!(ls.iter().any(|l| l == "greet"), "missing macro");
+    }
+
+    #[test]
+    fn formatting_produces_a_whole_document_edit() {
+        let mut server = Server::default();
+        server.apply_notification(
+            DidOpenTextDocument::METHOD,
+            open_params("file:///f.asm", "lda #$00\n"),
+        );
+        let uri = Url::parse("file:///f.asm").unwrap();
+        let edits = server.format_document(&uri).expect("known document");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "    lda #$00\n");
+    }
+
+    #[test]
+    fn formatting_an_already_formatted_document_is_a_no_op() {
+        let mut server = Server::default();
+        server.apply_notification(
+            DidOpenTextDocument::METHOD,
+            open_params("file:///g.asm", "    lda #$00\n"),
+        );
+        let uri = Url::parse("file:///g.asm").unwrap();
+        assert!(server.format_document(&uri).unwrap().is_empty());
+    }
+
+    #[test]
+    fn semantic_tokens_classify_a_mnemonic_and_number() {
+        let toks = semantic_tokens("lda #$00\n");
+        // First token is the mnemonic `lda` at (0,0), length 3.
+        assert_eq!(
+            (toks[0].delta_line, toks[0].delta_start, toks[0].length),
+            (0, 0, 3)
+        );
+        assert_eq!(toks[0].token_type, TT_FUNCTION);
+        assert!(toks.iter().any(|t| t.token_type == TT_NUMBER));
     }
 
     /// Drive the server through a full lifecycle over an in-memory connection,

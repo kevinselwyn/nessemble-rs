@@ -16,6 +16,7 @@ pub mod ast;
 mod lexer;
 mod parse;
 mod preprocess;
+pub mod tooling;
 
 pub use assemble::{CoverageReport, CustomResolver, Diag, ListSymbol};
 

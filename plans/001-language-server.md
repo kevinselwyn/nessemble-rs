@@ -139,27 +139,32 @@ shippable to `main`.
   the completion detail. ✅ (completion unit test + lifecycle protocol test +
   an end-to-end stdio check.)
 
-### Phase 3 — Formatting & highlighting — *priority*
-- **Formatting** (`textDocument/formatting`, optionally `rangeFormatting`): a
-  **comment-preserving ("lossless")** reformatter. The lexer gains a mode that
-  emits *every* token including trivia — whitespace and `Comment(";…")` — each
-  with its position; the formatter walks that full token stream, attaches each
-  comment (leading vs. trailing), and pretty-prints structural tokens with
-  normalized indentation, operand spacing, and case while carrying comments
-  along. This is more robust than a line-based pass (handles comments anywhere,
-  understands nesting, enables comment-column alignment/reflow) and its
-  trivia-and-position-aware token stream is reusable by highlighting and the
-  Phase-4 span work.
-- **Highlighting** (`textDocument/semanticTokens`): classify each token
-  (mnemonic, register, number, string, label, directive, comment, …). This reuses
-  the **per-token columns** the lossless lex pass already records. LSP-native, so
-  it works in any semantic-tokens-capable client with no editor grammar to ship.
+### Phase 3 — Formatting & highlighting — *priority* — ✅ done
+- **Lossless tooling lexer** (`nessemble_core::tooling`): a new, position-tracking
+  scanner that segments the *entire* input — whitespace and comments included —
+  into gap-free `Lexeme`s with byte ranges. It is deliberately **separate** from
+  the parity lexer (which stays byte-for-byte untouched, parity 122/122), and is
+  the shared base for the two features below (and reusable by the Phase-4 span
+  work).
+- **Formatting** (`textDocument/formatting`): `tooling::format` normalizes leading
+  indentation (instructions indent 4; labels/directives/constants at column 0),
+  tidies spacing around commas, and trims trailing whitespace, while **preserving
+  comments, other internal spacing, blank lines, and identifier case**. It is
+  idempotent. Deliberately conservative — broader operand-spacing reflow,
+  comment-column alignment, and case-forcing are deferred (the lossless
+  foundation enables them later) to avoid mangling files.
+- **Highlighting** (`textDocument/semanticTokens/full`): classifies each lexeme
+  (directive→keyword, mnemonic→function, ident→variable, number, string, comment,
+  punct→operator; mnemonics detected via `nessemble-isa`) into delta-encoded
+  semantic tokens. LSP-native, so it works in any semantic-tokens-capable client
+  with no editor grammar to ship.
 
 > **Shared foundation.** The lossless, position-tracking lex pass built here is
 > the base that Phase 4 extends into full parser/assembler spans — so the lexer
 > work is done once and reused, not thrown away.
 - **Done when:** "Format Document" tidies a file deterministically (idempotent),
-  and tokens are colorized via semantic tokens in VS Code/Cursor.
+  and tokens are colorized via semantic tokens. ✅ (formatter unit tests incl.
+  idempotence; lexer tests; LSP unit tests for both requests; end-to-end stdio.)
 
 ### Phase 4 — Precise spans (deferred core refactor)
 - Extend the Phase-3 column work into full start/end **spans** through parser and
