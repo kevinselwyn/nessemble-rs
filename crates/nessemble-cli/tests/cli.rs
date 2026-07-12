@@ -198,45 +198,46 @@ fn custom_pseudo_ops_resolve_via_pseudo_file() {
 }
 
 #[test]
-fn custom_pseudo_in_included_file_resolves_script_relative_to_that_file() {
-    // A `.foo` used inside an included subdirectory file resolves its `--pseudo`
-    // script relative to that file's directory, like the `.inc*` directives.
+fn custom_pseudo_script_resolves_relative_to_the_pseudo_file() {
+    // A script path in the `--pseudo` mapping resolves relative to the mapping
+    // file's own directory — not the source `.asm` — even when the directive is
+    // used from an included file in another directory.
     let root = std::env::temp_dir().join(format!(
         "nessemble-pseudo-rel-{}-{}",
         std::process::id(),
         line!()
     ));
     let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("cfg")).unwrap();
     std::fs::create_dir_all(root.join("sub")).unwrap();
 
     std::fs::write(root.join("main.asm"), b".include \"sub/mod.asm\"\n").unwrap();
     std::fs::write(root.join("sub/mod.asm"), b".double 5\n").unwrap();
-    // The script lives next to the file that uses the directive.
+    // The mapping and its script live together in `cfg/`; the bare script path
+    // resolves against `cfg/`.
+    std::fs::write(root.join("cfg/pseudo.txt"), b".double = double.rhai\n").unwrap();
     std::fs::write(
-        root.join("sub/double.rhai"),
+        root.join("cfg/double.rhai"),
         b"fn custom(ints, texts) { [ints[0] * 2] }\n",
     )
     .unwrap();
-    // A decoy next to the top-level file — the old base-directory behavior would
-    // have run this (5 * 100) instead.
+    // A decoy next to the source file that uses `.double` — the old
+    // source-relative behavior would have run this (5 * 100) instead.
     std::fs::write(
-        root.join("double.rhai"),
+        root.join("sub/double.rhai"),
         b"fn custom(ints, texts) { [ints[0] * 100] }\n",
     )
     .unwrap();
-    // The mapping's script path is bare, so it resolves against the directory of
-    // whichever file invokes `.double`.
-    std::fs::write(root.join("pseudo.txt"), b".double = double.rhai\n").unwrap();
 
     let out = bin()
         .arg(root.join("main.asm"))
         .args(["--pseudo"])
-        .arg(root.join("pseudo.txt"))
+        .arg(root.join("cfg/pseudo.txt"))
         .args(["--output", "-"])
         .output()
         .unwrap();
     assert!(out.status.success());
-    // 5 * 2 = 10 (from sub/double.rhai), not 5 * 100 from the root decoy.
+    // 5 * 2 = 10 (from cfg/double.rhai), not 5 * 100 from the sub/ decoy.
     assert_eq!(out.stdout, vec![10]);
 
     let _ = std::fs::remove_dir_all(&root);
