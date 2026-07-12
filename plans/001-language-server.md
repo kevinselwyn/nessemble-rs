@@ -1,8 +1,8 @@
 # nessemble-rs: A Plan for a Language Server
 
-> Status: **Draft — key decisions made, ready to refine.** Direction is settled
-> (see [§9 Decisions](#9-decisions)); a few sub-choices remain inside the
-> formatting phase. No implementation until explicitly greenlit.
+> Status: **Ready to implement.** All planning decisions are settled (see
+> [§9 Decisions](#9-decisions)); implementation proceeds phase by phase starting
+> at Phase 0.
 
 ---
 
