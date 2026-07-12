@@ -123,16 +123,23 @@ shippable, and each shipped phase is a **minor version bump**.
 
 ### Phase 3 — Formatting & highlighting — *priority*
 - **Formatting** (`textDocument/formatting`, optionally `rangeFormatting`): a
-  normalizer for nessemble asm — consistent indentation, operand spacing,
-  comment alignment, and case. Sub-decision (see §9): the current lexer discards
-  comments/whitespace, so formatting needs either a comment-preserving
-  ("lossless") lex pass or a lighter line-based normalizer; we'll pick during
-  this phase.
+  **comment-preserving ("lossless")** reformatter. The lexer gains a mode that
+  emits *every* token including trivia — whitespace and `Comment(";…")` — each
+  with its position; the formatter walks that full token stream, attaches each
+  comment (leading vs. trailing), and pretty-prints structural tokens with
+  normalized indentation, operand spacing, and case while carrying comments
+  along. This is more robust than a line-based pass (handles comments anywhere,
+  understands nesting, enables comment-column alignment/reflow) and its
+  trivia-and-position-aware token stream is reusable by highlighting and the
+  Phase-4 span work.
 - **Highlighting** (`textDocument/semanticTokens`): classify each token
-  (mnemonic, register, number, string, label, directive, comment, …). Requires
-  **per-token columns**, so this phase includes a focused lexer enhancement to
-  record each token's start column and length. This is LSP-native, so it works in
-  any semantic-tokens-capable client with no editor grammar to ship.
+  (mnemonic, register, number, string, label, directive, comment, …). This reuses
+  the **per-token columns** the lossless lex pass already records. LSP-native, so
+  it works in any semantic-tokens-capable client with no editor grammar to ship.
+
+> **Shared foundation.** The lossless, position-tracking lex pass built here is
+> the base that Phase 4 extends into full parser/assembler spans — so the lexer
+> work is done once and reused, not thrown away.
 - **Done when:** "Format Document" tidies a file deterministically (idempotent),
   and tokens are colorized via semantic tokens in VS Code/Cursor.
 
@@ -186,8 +193,9 @@ Deliverable is the **server plus setup documentation**, not a bespoke extension:
 - **Highlighting vs. deferred spans.** Semantic tokens need columns; mitigated by
   scoping a *narrow* lexer-column pass in Phase 3, leaving full diagnostic spans
   to Phase 4.
-- **Formatter + trivia.** The lexer drops comments/whitespace; mitigated by
-  choosing the lossless-lex vs. line-based approach up front (§9).
+- **Formatter + trivia.** The lexer drops comments/whitespace today; the Phase-3
+  lossless lex pass adds trivia + positions. Mitigated by making it an additive
+  mode (the existing token stream is unchanged) and guarding on parity + tests.
 - **Dependency weight.** Addressed by choosing `lsp-server` (no async runtime)
   and feature-gating the `lsp` feature.
 - **In-memory vs. disk includes.** Start disk-resolved; add an open-buffer overlay
@@ -211,13 +219,11 @@ Deliverable is the **server plus setup documentation**, not a bespoke extension:
    with `--no-default-features`).
 7. **Shared catalog home** — the `DIRECTIVES` catalog moves into `nessemble-isa`,
    next to the opcode table.
+8. **Formatter approach (Phase 3)** — a **comment-preserving ("lossless") lex
+   pass**: the lexer emits whitespace/comment trivia with positions and the
+   formatter re-emits from that full token stream. Chosen over a line-based
+   normalizer for robustness and because its position-tracking foundation is
+   reused by highlighting and the Phase-4 span refactor.
 
-**Still open (small, decide when we reach it):**
-
-- **A. Formatter approach (Phase 3)** — a **line-based normalizer** (simpler,
-  heuristic, per-line: split into label / instruction+operands / comment, then
-  normalize spacing/case/indent; comments preserved by splitting on the first
-  `;` outside a string) vs. a **comment-preserving ("lossless") lex pass** (the
-  lexer also emits whitespace/comment trivia with positions, and the formatter
-  re-emits from that full token stream — more robust and extensible, more work).
-  Leaning line-based first, graduating to lossless if it proves limiting.
+All planning decisions are settled; remaining choices are implementation details
+within each phase.
