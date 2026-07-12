@@ -19,7 +19,7 @@ repository = "https://github.com/kevinselwyn/nessemble-rs"
 authors = ["nessemble-rs contributors"]
 
 # The reference implementation whose behavior we target for parity.
-# See PLAN.md.
+# See plans/000-reimplementation.md.
 [workspace.metadata.nessemble]
 reference-version = "1.1.1"
 
