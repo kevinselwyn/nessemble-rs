@@ -46,6 +46,7 @@ const COMMANDS: &[(&str, &str)] = &[
         "get reference info about assembly terms",
     ),
     ("config [<key>] [<val>]", "list/get/set config info"),
+    ("lsp", "run the language server (stdio)"),
 ];
 
 /// Render a two-column block, aligning descriptions two spaces past the longest

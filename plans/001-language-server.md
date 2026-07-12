@@ -96,15 +96,23 @@ Grounded in the current code (not aspirational):
 
 Ordered by your priorities: **diagnostics → completion → formatting/highlighting**,
 with precise spans and navigation deferred. Each phase is independently
-shippable, and each shipped phase is a **minor version bump**.
+shippable to `main`.
 
-### Phase 0 — Scaffold & transport
-- New `nessemble-lsp` crate; `nessemble lsp` subcommand (stdio, `lsp-server`);
-  LSP lifecycle (`initialize` → advertise capabilities → `initialized` →
-  `shutdown`/`exit`); `textDocument` open/change/close into a document store. No
-  analysis yet.
+> **Versioning across phases.** To avoid cutting a release per phase, the
+> workspace version stays at the pre-release **`2.5.0-dev`** while phases land;
+> the release workflow skips pre-release versions. The final phase drops the
+> `-dev` suffix to **`2.5.0`**, which cuts a single release containing all the
+> language-server work.
+
+### Phase 0 — Scaffold & transport — ✅ done
+- New `nessemble-lsp` crate; `nessemble lsp` subcommand (stdio, `lsp-server`,
+  feature `lsp` on by default); LSP lifecycle (`initialize` → advertise
+  capabilities → `initialized` → `shutdown`/`exit`); `textDocument`
+  open/change/close into an in-memory document store. Full-text sync advertised;
+  no analysis yet.
 - **Done when:** an LSP client connects, completes the handshake, and the server
-  tracks open documents (verified by a protocol-level test).
+  tracks open documents (verified by an in-memory protocol test and an
+  end-to-end stdio smoke test). ✅
 
 ### Phase 1 — Diagnostics (line-level) — *priority*
 - On open/change (debounced), assemble the in-memory buffer (base dir = the

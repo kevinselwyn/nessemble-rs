@@ -6,12 +6,13 @@ members = [
     "crates/nessemble-media",
     "crates/nessemble-script",
     "crates/nessemble-i18n",
+    "crates/nessemble-lsp",
     "crates/nessemble-cli",
     "xtask",
 ]
 
 [workspace.package]
-version = "2.4.0"
+version = "2.5.0-dev"
 edition = "2021"
 rust-version = "1.83"
 license = "GPL-3.0-or-later"
@@ -44,11 +45,12 @@ struct_excessive_bools = "allow"
 missing_errors_doc = "allow"
 
 [workspace.dependencies]
-nessemble-isa = { path = "crates/nessemble-isa", version = "2.4.0" }
-nessemble-core = { path = "crates/nessemble-core", version = "2.4.0" }
-nessemble-media = { path = "crates/nessemble-media", version = "2.4.0" }
-nessemble-script = { path = "crates/nessemble-script", version = "2.4.0" }
-nessemble-i18n = { path = "crates/nessemble-i18n", version = "2.4.0" }
+nessemble-isa = { path = "crates/nessemble-isa", version = "2.5.0-dev" }
+nessemble-core = { path = "crates/nessemble-core", version = "2.5.0-dev" }
+nessemble-media = { path = "crates/nessemble-media", version = "2.5.0-dev" }
+nessemble-script = { path = "crates/nessemble-script", version = "2.5.0-dev" }
+nessemble-i18n = { path = "crates/nessemble-i18n", version = "2.5.0-dev" }
+nessemble-lsp = { path = "crates/nessemble-lsp", version = "2.5.0-dev" }
 clap = { version = "=4.5.23", features = ["derive"] }
 
 [profile.release]
