@@ -75,8 +75,8 @@ Grounded in the current code (not aspirational):
   unit-testable without spawning a process.
 - **CLI entry point:** `nessemble lsp` (a subcommand, mirroring `init`/`scripts`),
   speaking LSP over **stdio**. `nessemble-cli` depends on `nessemble-lsp`,
-  **feature-gated** (`lsp`) like `scripting`, so `--no-default-features` stays
-  lean and the heavier LSP deps are opt-out.
+  **feature-gated** (`lsp`, **on by default**) like `scripting`, so a stock build
+  ships `nessemble lsp` while `--no-default-features` drops it and its deps.
 - **Transport — recommendation: `lsp-server` (sync, minimal).** It matches the
   project's pure-Rust, minimal-dependency, clean-cross-compile ethos (no tokio /
   async runtime), and a synchronous request loop is a fine fit for analyzing one
@@ -88,9 +88,9 @@ Grounded in the current code (not aspirational):
 - **Analysis bridge:** a thin adapter that runs core analysis on a buffer and
   translates results to LSP diagnostics/completions/tokens. Where the core lacks
   positions, fall back to whole-line ranges (diagnostics) until Phase 4.
-- **Shared metadata:** promote the `DIRECTIVES` catalog into a shared location
-  (e.g. `nessemble-isa` or a small `nessemble-lang` module) so the CLI
-  `reference` command and the LSP consume one source of truth.
+- **Shared metadata:** promote the `DIRECTIVES` catalog into **`nessemble-isa`**
+  (alongside the opcode table) so the CLI `reference` command and the LSP consume
+  one source of truth.
 
 ## 5. Phased plan
 
@@ -207,12 +207,17 @@ Deliverable is the **server plus setup documentation**, not a bespoke extension:
    formatting + highlighting; navigation/hover deferred to Phase 5.
 5. **Diagnostic precision** — **line-level first**; precise spans + multi-error
    recovery deferred to Phase 4.
+6. **Feature default** — the `lsp` cargo feature is **on by default** (opt out
+   with `--no-default-features`).
+7. **Shared catalog home** — the `DIRECTIVES` catalog moves into `nessemble-isa`,
+   next to the opcode table.
 
-**Still open (small, decide when we reach them):**
+**Still open (small, decide when we reach it):**
 
-- **A. Formatter approach** — comment-preserving ("lossless") lex pass vs. a
-  line-based normalizer (Phase 3).
-- **B. Feature default** — is the `lsp` cargo feature **on or off by default**?
-  (Affects the default binary size / dependency set.)
-- **C. Shared catalog home** — put `DIRECTIVES` in `nessemble-isa` vs. a new
-  `nessemble-lang` module.
+- **A. Formatter approach (Phase 3)** — a **line-based normalizer** (simpler,
+  heuristic, per-line: split into label / instruction+operands / comment, then
+  normalize spacing/case/indent; comments preserved by splitting on the first
+  `;` outside a string) vs. a **comment-preserving ("lossless") lex pass** (the
+  lexer also emits whitespace/comment trivia with positions, and the formatter
+  re-emits from that full token stream — more robust and extensible, more work).
+  Leaning line-based first, graduating to lossless if it proves limiting.
