@@ -114,12 +114,16 @@ shippable to `main`.
   tracks open documents (verified by an in-memory protocol test and an
   end-to-end stdio smoke test). ✅
 
-### Phase 1 — Diagnostics (line-level) — *priority*
-- On open/change (debounced), assemble the in-memory buffer (base dir = the
-  document's directory; includes/media from disk). Map the error + `warnings` to
-  `publishDiagnostics` with **whole-line ranges**.
+### Phase 1 — Diagnostics (line-level) — *priority* — ✅ done
+- On open/change, assemble the in-memory buffer (via `nessemble_core::
+  assemble_source_as`: base dir = the document's directory, includes/media from
+  disk) and publish the error + `warnings` as `publishDiagnostics` with
+  **whole-line ranges** (UTF-16 line length); `didClose` clears them. Errors map
+  to their own line; include-originated diagnostics anchor at the top with their
+  origin noted. (Debounce and *all-errors-at-once* recovery come in Phase 4.)
 - **Done when:** a syntax/opcode error shows a squiggle on the right line and
-  clears when fixed; warnings appear as warnings.
+  clears when fixed; warnings appear as warnings. ✅ (in-memory protocol test +
+  `analyze` unit tests + an end-to-end stdio check.)
 
 ### Phase 2 — Completion — *priority*
 - `textDocument/completion` for: mnemonics (from `nessemble-isa`), directives
