@@ -14,13 +14,31 @@
 //!   blob. Returning `()` emits nothing.
 //! - Signal an error with `throw "message"`; the message becomes the assembler
 //!   diagnostic.
+//! - Scripts may read and write files via the [`rhai-fs`](https://docs.rs/rhai-fs)
+//!   package (`open_file`, `File#read_string`, `File#read_blob`, `File#write`,
+//!   …), so a directive can pull bytes from disk. Because of this, pseudo-op
+//!   scripts are **not** sandboxed from the filesystem — run only ones you trust.
 
+use std::path::{Path, PathBuf};
+
+use rhai::packages::Package;
 use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult};
+use rhai_fs::FilesystemPackage;
 
 /// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
 /// or a human-readable error message (a thrown string, or an engine error).
-pub fn run(source: &str, ints: &[i64], texts: &[String]) -> Result<Vec<u8>, String> {
-    let engine = engine();
+///
+/// A relative path opened by the script (via rhai-fs's `open_file`) resolves
+/// against `base_dir` — the directory of the source file that contains the
+/// directive — matching how `.include` and the `.inc*` importers resolve paths.
+/// Absolute paths are used as-is.
+pub fn run(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+) -> Result<Vec<u8>, String> {
+    let engine = engine(base_dir);
     let ast = engine.compile(source).map_err(|e| e.to_string())?;
 
     let int_arr: Array = ints.iter().map(|&i| Dynamic::from(i)).collect();
@@ -34,16 +52,45 @@ pub fn run(source: &str, ints: &[i64], texts: &[String]) -> Result<Vec<u8>, Stri
     dynamic_to_bytes(result)
 }
 
-/// A sandboxed engine with guards against runaway scripts. Rhai has no ambient
-/// filesystem or network access, so this is safe to run untrusted directives.
-fn engine() -> Engine {
+/// A resource-guarded engine with filesystem access.
+///
+/// The [`FilesystemPackage`] from `rhai-fs` is registered so scripts can read
+/// and write files (e.g. `open_file`, `File#read_string`, `File#write`), which
+/// lets a custom directive pull bytes from disk rather than only computing them.
+///
+/// The runaway-script guards (operation/recursion/size limits) still apply, but
+/// **filesystem access means scripts are no longer sandboxed** — a directive can
+/// touch any path the assembler process can. Only run pseudo-op scripts you
+/// trust, the same as any build tooling.
+fn engine(base_dir: &Path) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(10_000_000);
     engine.set_max_call_levels(64);
-    engine.set_max_string_size(1_000_000);
-    engine.set_max_array_size(1_000_000);
+    // Leave the string/array size limits unbounded (0): rhai-fs's `read_string`
+    // / `read_blob` (with no explicit length) fill a buffer sized to these
+    // limits, so a finite cap would pad a whole-file read out to the cap. A
+    // whole file must come back as exactly its bytes; runaway *compute* is still
+    // bounded by the operation and call-depth limits above.
+    engine.set_max_string_size(0);
+    engine.set_max_array_size(0);
     // Allow deeply-nested arithmetic expressions (e.g. easing polynomials).
     engine.set_max_expr_depths(0, 0);
+    // Filesystem access (`open_file`, `File` I/O) for scripts that read/write
+    // assets on disk.
+    FilesystemPackage::new().register_into_engine(&mut engine);
+    // Root the script's relative paths at the directive's source directory,
+    // overriding rhai-fs's default (which resolves against the process CWD).
+    // rhai-fs turns a path string into a `PathBuf` via this `path` function, so
+    // redefining it reroutes every relative `open_file`/`open_dir`.
+    let base = base_dir.to_path_buf();
+    engine.register_fn("path", move |p: &str| -> PathBuf {
+        let path = PathBuf::from(p);
+        if path.is_relative() {
+            base.join(path)
+        } else {
+            path
+        }
+    });
     engine
 }
 
@@ -96,10 +143,15 @@ fn error_message(err: &EvalAltResult) -> String {
 mod tests {
     use super::*;
 
+    /// Base directory for scripts that don't touch the filesystem.
+    fn cwd() -> &'static Path {
+        Path::new(".")
+    }
+
     #[test]
     fn sums_integer_arguments() {
         let src = "fn custom(ints, texts) { let s = 0; for i in ints { s += i; } [s % 256] }";
-        assert_eq!(run(src, &[1, 2, 3], &[]).unwrap(), vec![6]);
+        assert_eq!(run(src, &[1, 2, 3], &[], cwd()).unwrap(), vec![6]);
     }
 
     #[test]
@@ -109,18 +161,90 @@ mod tests {
                    let t = ints[0].to_float() / ints[1].to_float(); \
                    [(t * 16.0).floor().to_int() % 256] }";
         // (3 / 4) * 16 = 12
-        assert_eq!(run(src, &[3, 4], &[]).unwrap(), vec![12]);
+        assert_eq!(run(src, &[3, 4], &[], cwd()).unwrap(), vec![12]);
     }
 
     #[test]
     fn thrown_string_becomes_the_error() {
         let src = "fn custom(ints, texts) { throw \"bad thing\" }";
-        assert_eq!(run(src, &[], &[]).unwrap_err(), "bad thing");
+        assert_eq!(run(src, &[], &[], cwd()).unwrap_err(), "bad thing");
     }
 
     #[test]
     fn receives_string_arguments() {
         let src = "fn custom(ints, texts) { texts[0].to_blob() }";
-        assert_eq!(run(src, &[], &["Hi".to_string()]).unwrap(), b"Hi");
+        assert_eq!(run(src, &[], &["Hi".to_string()], cwd()).unwrap(), b"Hi");
+    }
+
+    /// A unique, freshly-created directory in the OS temp area, removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "nessemble-script-{tag}-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn reads_a_file_relative_to_the_base_dir() {
+        // A bare relative path resolves against `base_dir`, and rhai-fs returns
+        // the file's bytes verbatim.
+        let dir = TempDir::new("read");
+        std::fs::write(dir.0.join("asset.bin"), b"\x01\x02\x03NES").unwrap();
+        let src = r#"fn custom(ints, texts) { open_file("asset.bin", "r").read_blob() }"#;
+        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), b"\x01\x02\x03NES");
+    }
+
+    #[test]
+    fn reads_a_named_file_as_a_string() {
+        let dir = TempDir::new("read-str");
+        std::fs::write(dir.0.join("note.txt"), b"hello").unwrap();
+        let src = r#"fn custom(ints, texts) { open_file(texts[0], "r").read_string().to_blob() }"#;
+        assert_eq!(
+            run(src, &[], &["note.txt".to_string()], &dir.0).unwrap(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn writes_a_file_relative_to_the_base_dir() {
+        // A script can also write: `open_file(path)` opens read/write (creating
+        // or truncating), and `File#write` persists the bytes.
+        let dir = TempDir::new("write");
+        let src = r#"fn custom(ints, texts) { open_file("out.bin").write("ok"); () }"#;
+        let out = run(src, &[], &[], &dir.0).unwrap();
+        assert_eq!(out, Vec::<u8>::new());
+        assert_eq!(std::fs::read(dir.0.join("out.bin")).unwrap(), b"ok");
+    }
+
+    #[test]
+    fn absolute_paths_bypass_the_base_dir() {
+        // An absolute path is used as-is, regardless of `base_dir`.
+        let dir = TempDir::new("abs");
+        let file = dir.0.join("data.bin");
+        std::fs::write(&file, b"ABS").unwrap();
+        let src = r#"fn custom(ints, texts) { open_file(texts[0], "r").read_blob() }"#;
+        // `base_dir` is an unrelated directory; the absolute path still resolves.
+        let out = run(
+            src,
+            &[],
+            &[file.to_string_lossy().into_owned()],
+            Path::new("/nonexistent-base"),
+        );
+        assert_eq!(out.unwrap(), b"ABS");
     }
 }

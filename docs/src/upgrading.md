@@ -38,6 +38,9 @@ around them changed. This page covers what a 1.x user needs to know.
   emitted bytes. See [Extending](extending.md).
 - The bundled `ease` script is provided as `.rhai`; run `nessemble scripts` to
   install it.
+- Rhai scripts can still read and write files (as the old Lua/Scheme hosts
+  could), via the `rhai-fs` `open_file` API; relative paths resolve against the
+  source file's directory. See [Filesystem access](extending.md#filesystem-access).
 
 ## Removed commands and options
 
