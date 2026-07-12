@@ -125,13 +125,19 @@ shippable to `main`.
   clears when fixed; warnings appear as warnings. ✅ (in-memory protocol test +
   `analyze` unit tests + an end-to-end stdio check.)
 
-### Phase 2 — Completion — *priority*
-- `textDocument/completion` for: mnemonics (from `nessemble-isa`), directives
-  (shared catalog), in-scope labels/constants (names from the symbol table), and
-  macro names; snippet completions for common instruction/directive forms.
-  Optional: label vs. mnemonic context-awareness based on the current line.
-- **Done when:** typing offers relevant mnemonics/directives/labels with docs
-  (opcode modes/cycles, directive descriptions) in the completion detail.
+### Phase 2 — Completion — *priority* — ✅ done
+- `textDocument/completion` offers: mnemonics (from `nessemble-isa`, with their
+  addressing modes as detail), directives (the shared catalog, `.`-triggered,
+  with descriptions), in-scope labels/constants (from the symbol table, cached
+  per document so they survive transient errors), and macro names (scanned from
+  `.macrodef`). Client-side prefix filtering; context-awareness and snippets are
+  future polish.
+- Moved the `DIRECTIVES` catalog and an `AddressingMode::label()` helper into
+  `nessemble-isa` (decision C), so the `reference` command and the LSP share one
+  source of truth.
+- **Done when:** typing offers relevant mnemonics/directives/labels with docs in
+  the completion detail. ✅ (completion unit test + lifecycle protocol test +
+  an end-to-end stdio check.)
 
 ### Phase 3 — Formatting & highlighting — *priority*
 - **Formatting** (`textDocument/formatting`, optionally `rangeFormatting`): a

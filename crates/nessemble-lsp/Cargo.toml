@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 nessemble-core.workspace = true
+nessemble-isa.workspace = true
 lsp-server = "0.7"
 lsp-types = "0.95"
 serde_json = "1"

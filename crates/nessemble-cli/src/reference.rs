@@ -6,59 +6,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use nessemble_i18n::t;
-use nessemble_isa::{AddressingMode, OPCODES};
-
-/// In-scope assembler directives with a one-line description.
-const DIRECTIVES: &[(&str, &str)] = &[
-    (".org", "set the program counter"),
-    (".db / .byte", "define bytes"),
-    (".dw / .word", "define words (little-endian)"),
-    (".ascii", "define bytes from a string"),
-    (".fill", "fill a region with a byte"),
-    (".hibytes / .lobytes", "define the high/low bytes of values"),
-    (".checksum", "emit a CRC-32 of preceding data"),
-    (".random", "emit pseudo-random bytes"),
-    (".color", "emit nearest NES palette indices"),
-    (".enum / .endenum", "assign incrementing constants"),
-    (".rs / .rsset", "reserve sequential storage"),
-    (
-        ".if / .ifdef / .ifndef / .else / .endif",
-        "conditional assembly",
-    ),
-    (".macro / .macrodef / .endm", "invoke / define macros"),
-    (".include", "include another source file"),
-    (".incbin", "include a raw binary"),
-    (".incpng", "include a PNG as CHR tiles"),
-    (".incpal", "include a PNG as a palette"),
-    (".incrle", "include a run-length-encoded binary"),
-    (".incwav", "include a WAV as DPCM"),
-    (".font", "emit bundled font glyphs"),
-    (".defchr", "define an 8x8 tile inline"),
-    (
-        ".inesprg / .ineschr / .inesmap / .inesmir / .inestrn",
-        "iNES header fields",
-    ),
-    (".prg / .chr / .segment", "select a PRG/CHR bank"),
-];
-
-/// The addressing-mode label used in reference output.
-fn mode_name(mode: AddressingMode) -> &'static str {
-    match mode {
-        AddressingMode::Implied => "implied",
-        AddressingMode::Accumulator => "accumulator",
-        AddressingMode::Relative => "relative",
-        AddressingMode::Immediate => "immediate",
-        AddressingMode::ZeroPage => "zeropage",
-        AddressingMode::ZeroPageX => "zeropage,x",
-        AddressingMode::ZeroPageY => "zeropage,y",
-        AddressingMode::Absolute => "absolute",
-        AddressingMode::AbsoluteX => "absolute,x",
-        AddressingMode::AbsoluteY => "absolute,y",
-        AddressingMode::Indirect => "indirect",
-        AddressingMode::IndirectX => "indirect,x",
-        AddressingMode::IndirectY => "indirect,y",
-    }
-}
+use nessemble_isa::{DIRECTIVES, OPCODES};
 
 /// Run `reference` with 0, 1, or 2 terms. Returns `(output, exit_code)`.
 pub fn run(term1: Option<&str>, term2: Option<&str>) -> (String, u8) {
@@ -113,7 +61,7 @@ fn instruction_detail(mnemonic: &str) -> (String, u8) {
         let _ = writeln!(
             out,
             "  {:<12} ${:02X}  {} byte(s), {} cycles{}",
-            mode_name(o.mode),
+            o.mode.label(),
             o.opcode,
             o.length,
             o.timing,
