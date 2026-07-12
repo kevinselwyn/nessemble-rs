@@ -7,12 +7,16 @@ name: Release
 # every platform artifact and publishes a tagged GitHub Release for it. Bumping
 # the workspace version is therefore all it takes to cut a release.
 #
-# Artifacts (matching the upstream v1.1.1 release):
-#   macOS          nessemble_<v>.pkg
+# Artifacts:
+#   macOS          nessemble_<v>.pkg  nessemble_<v>_macos.tar.gz
 #   Linux amd64    nessemble_<v>_amd64.deb
 #   Linux i386     nessemble_<v>_i386.deb
 #   Windows 32-bit nessemble_<v>_win32.exe  nessemble_<v>_win32.msi
 #   Windows 64-bit nessemble_<v>_win64.exe  nessemble_<v>_win64.msi
+#
+# The macOS .pkg is unsigned, so Gatekeeper blocks it after download; the plain
+# binary tarball is provided as a signing-free alternative (see the release
+# notes / installation docs for the one-time `xattr` step).
 
 on:
   push:
@@ -130,15 +134,24 @@ jobs:
           pkgbuild --root payload --identifier com.nessemble.cli \
             --version "${{ needs.version.outputs.version }}" --install-location / \
             "nessemble_${{ needs.version.outputs.version }}.pkg"
+      - name: Build plain binary tarball
+        # An unsigned/unnotarized .pkg is blocked by Gatekeeper when downloaded;
+        # ship the raw binary too, so users can install it without the .pkg (see
+        # the release notes / installation docs for the one-time xattr step).
+        run: |
+          tar -czf "nessemble_${{ needs.version.outputs.version }}_macos.tar.gz" \
+            -C target/x86_64-apple-darwin/release nessemble
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-pkg
-          path: "*.pkg"
+          name: macos
+          path: |
+            *.pkg
+            *.tar.gz
 
   # ----------------------------------------------------------------- Release
   #
   # Creates the `v<version>` tag (at this commit) and its GitHub Release,
-  # uploads all seven artifacts, and auto-generates release notes listing every
+  # uploads all eight artifacts, and auto-generates release notes listing every
   # pull request merged since the previous release (GitHub's "What's Changed"
   # changelog; grouping is configured in .github/release.yml).
   release:
@@ -169,13 +182,33 @@ jobs:
 
             | Platform       | Artifact(s)                                |
             |----------------|--------------------------------------------|
-            | macOS          | `nessemble_*.pkg`                          |
+            | macOS          | `nessemble_*.pkg`, `nessemble_*_macos.tar.gz` |
             | Linux amd64    | `nessemble_*_amd64.deb`                    |
             | Linux i386     | `nessemble_*_i386.deb`                     |
             | Windows 32-bit | `nessemble_*_win32.exe`, `…_win32.msi`     |
             | Windows 64-bit | `nessemble_*_win64.exe`, `…_win64.msi`     |
+
+            #### macOS: "Apple could not verify…" on the `.pkg`
+
+            The `.pkg` is not signed with an Apple Developer ID, so macOS
+            Gatekeeper blocks it after download. Either clear the quarantine flag
+            and install the `.pkg` normally:
+
+            ```sh
+            xattr -d com.apple.quarantine nessemble_*.pkg
+            sudo installer -pkg nessemble_*.pkg -target /
+            ```
+
+            …or skip the installer entirely and use the plain binary tarball:
+
+            ```sh
+            tar -xzf nessemble_*_macos.tar.gz
+            xattr -d com.apple.quarantine nessemble        # clear quarantine
+            sudo mv nessemble /usr/local/bin/               # onto your PATH
+            ```
           files: |
             artifacts/**/*.deb
             artifacts/**/*.exe
             artifacts/**/*.msi
             artifacts/**/*.pkg
+            artifacts/**/*.tar.gz

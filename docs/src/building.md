@@ -50,6 +50,8 @@ Release artifacts are produced by the CI release workflow
 - **`.deb`** (Linux) via [`cargo-deb`](https://crates.io/crates/cargo-deb).
 - **`.msi`** (Windows) via [`cargo-wix`](https://crates.io/crates/cargo-wix).
 - **`.pkg`** (macOS) via `pkgbuild`.
+- **`.tar.gz`** (macOS) — the raw binary, as a signing-free alternative to the
+  unsigned `.pkg` (which Gatekeeper blocks after download).
 
 ## Scripting
 
