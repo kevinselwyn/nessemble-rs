@@ -41,7 +41,13 @@ jobs:
         run: |
           version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+          # A pre-release version (anything with a `-<suffix>`, e.g. 2.5.0-dev) is
+          # work-in-progress and is never released; `exists=true` gates every
+          # build/release job below off. Drop the suffix to cut the release.
+          if [[ "$version" == *-* ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Workspace version **$version** is a pre-release; skipping release." >> "$GITHUB_STEP_SUMMARY"
+          elif git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Workspace version **$version** — tag \`v$version\` already exists; nothing to release." >> "$GITHUB_STEP_SUMMARY"
           else

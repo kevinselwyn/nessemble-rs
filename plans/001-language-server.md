@@ -96,7 +96,13 @@ Grounded in the current code (not aspirational):
 
 Ordered by your priorities: **diagnostics → completion → formatting/highlighting**,
 with precise spans and navigation deferred. Each phase is independently
-shippable, and each shipped phase is a **minor version bump**.
+shippable to `main`.
+
+> **Versioning across phases.** To avoid cutting a release per phase, the
+> workspace version stays at the pre-release **`2.5.0-dev`** while phases land;
+> the release workflow skips pre-release versions. The final phase drops the
+> `-dev` suffix to **`2.5.0`**, which cuts a single release containing all the
+> language-server work.
 
 ### Phase 0 — Scaffold & transport — ✅ done
 - New `nessemble-lsp` crate; `nessemble lsp` subcommand (stdio, `lsp-server`,

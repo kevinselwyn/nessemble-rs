@@ -39,6 +39,15 @@ If the version is unchanged (the tag already exists), the pipeline resolves the
 version, sees the tag, and does nothing — so ordinary pushes to `main` never
 re-release.
 
+## Pre-release versions (work in progress)
+
+A version with a pre-release suffix — anything like `2.5.0-dev` or `2.5.0-alpha`
+— is treated as work in progress and is **never released**: the pipeline
+resolves the version, sees the `-` suffix, and stops. This lets a multi-part
+feature land on `main` across several PRs under a single `-dev` version without
+cutting a release each time. When the feature is complete, drop the suffix
+(`2.5.0-dev` → `2.5.0`) and merge — that one change cuts the release.
+
 ## Re-running on demand
 
 The Release workflow can also be started manually (Actions → *Release* → *Run
