@@ -185,6 +185,31 @@ pub fn assemble_file_with(
     assemble_impl(&source, options, base, &display_name(path), custom)
 }
 
+/// Assemble in-memory `source` as though it were the file at `path`: includes
+/// and media resolve relative to `path`'s directory and diagnostics use its
+/// display name, but the top-level text is taken from `source` rather than read
+/// from disk. Intended for tooling that holds unsaved buffers (e.g. the language
+/// server), where the editor's current text differs from the on-disk copy.
+///
+/// Custom pseudo-ops are unresolved (as in [`assemble`]).
+pub fn assemble_source_as(
+    path: &Path,
+    source: &str,
+    options: &Options,
+) -> Result<Assembly, AssembleError> {
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    assemble_impl(
+        source,
+        options,
+        base,
+        &display_name(path),
+        default_custom_resolver(),
+    )
+}
+
 /// The basename used to refer to `path` in diagnostics.
 fn display_name(path: &Path) -> String {
     path.file_name()

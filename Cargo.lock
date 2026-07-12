@@ -494,6 +494,8 @@ version = "2.5.0-dev"
 dependencies = [
  "lsp-server",
  "lsp-types",
+ "nessemble-core",
+ "nessemble-isa",
  "serde_json",
 ]
 

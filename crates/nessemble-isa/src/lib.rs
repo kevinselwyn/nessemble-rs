@@ -45,7 +45,66 @@ impl AddressingMode {
             | AddressingMode::Indirect => 2,
         }
     }
+
+    /// A short human-readable label for the mode (e.g. `"zeropage,x"`), used in
+    /// `reference` output and language-server completion/hover detail.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            AddressingMode::Implied => "implied",
+            AddressingMode::Accumulator => "accumulator",
+            AddressingMode::Relative => "relative",
+            AddressingMode::Immediate => "immediate",
+            AddressingMode::ZeroPage => "zeropage",
+            AddressingMode::ZeroPageX => "zeropage,x",
+            AddressingMode::ZeroPageY => "zeropage,y",
+            AddressingMode::Absolute => "absolute",
+            AddressingMode::AbsoluteX => "absolute,x",
+            AddressingMode::AbsoluteY => "absolute,y",
+            AddressingMode::Indirect => "indirect",
+            AddressingMode::IndirectX => "indirect,x",
+            AddressingMode::IndirectY => "indirect,y",
+        }
+    }
 }
+
+/// The assembler's directive catalog: each entry pairs one or more directive
+/// spellings (slash-separated, e.g. `".db / .byte"`) with a one-line
+/// description. This is language-level metadata (not strictly ISA), colocated
+/// here as the single shared source of truth for the `reference` command and the
+/// language server. Split an entry's name on `/` and whitespace for the
+/// individual directive spellings.
+pub const DIRECTIVES: &[(&str, &str)] = &[
+    (".org", "set the program counter"),
+    (".db / .byte", "define bytes"),
+    (".dw / .word", "define words (little-endian)"),
+    (".ascii", "define bytes from a string"),
+    (".fill", "fill a region with a byte"),
+    (".hibytes / .lobytes", "define the high/low bytes of values"),
+    (".checksum", "emit a CRC-32 of preceding data"),
+    (".random", "emit pseudo-random bytes"),
+    (".color", "emit nearest NES palette indices"),
+    (".enum / .endenum", "assign incrementing constants"),
+    (".rs / .rsset", "reserve sequential storage"),
+    (
+        ".if / .ifdef / .ifndef / .else / .endif",
+        "conditional assembly",
+    ),
+    (".macro / .macrodef / .endm", "invoke / define macros"),
+    (".include", "include another source file"),
+    (".incbin", "include a raw binary"),
+    (".incpng", "include a PNG as CHR tiles"),
+    (".incpal", "include a PNG as a palette"),
+    (".incrle", "include a run-length-encoded binary"),
+    (".incwav", "include a WAV as DPCM"),
+    (".font", "emit bundled font glyphs"),
+    (".defchr", "define an 8x8 tile inline"),
+    (
+        ".inesprg / .ineschr / .inesmap / .inesmir / .inestrn",
+        "iNES header fields",
+    ),
+    (".prg / .chr / .segment", "select a PRG/CHR bank"),
+];
 
 /// Opcode has no special metadata.
 pub const META_NONE: u8 = 0x00;

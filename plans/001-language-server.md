@@ -114,20 +114,30 @@ shippable to `main`.
   tracks open documents (verified by an in-memory protocol test and an
   end-to-end stdio smoke test). ✅
 
-### Phase 1 — Diagnostics (line-level) — *priority*
-- On open/change (debounced), assemble the in-memory buffer (base dir = the
-  document's directory; includes/media from disk). Map the error + `warnings` to
-  `publishDiagnostics` with **whole-line ranges**.
+### Phase 1 — Diagnostics (line-level) — *priority* — ✅ done
+- On open/change, assemble the in-memory buffer (via `nessemble_core::
+  assemble_source_as`: base dir = the document's directory, includes/media from
+  disk) and publish the error + `warnings` as `publishDiagnostics` with
+  **whole-line ranges** (UTF-16 line length); `didClose` clears them. Errors map
+  to their own line; include-originated diagnostics anchor at the top with their
+  origin noted. (Debounce and *all-errors-at-once* recovery come in Phase 4.)
 - **Done when:** a syntax/opcode error shows a squiggle on the right line and
-  clears when fixed; warnings appear as warnings.
+  clears when fixed; warnings appear as warnings. ✅ (in-memory protocol test +
+  `analyze` unit tests + an end-to-end stdio check.)
 
-### Phase 2 — Completion — *priority*
-- `textDocument/completion` for: mnemonics (from `nessemble-isa`), directives
-  (shared catalog), in-scope labels/constants (names from the symbol table), and
-  macro names; snippet completions for common instruction/directive forms.
-  Optional: label vs. mnemonic context-awareness based on the current line.
-- **Done when:** typing offers relevant mnemonics/directives/labels with docs
-  (opcode modes/cycles, directive descriptions) in the completion detail.
+### Phase 2 — Completion — *priority* — ✅ done
+- `textDocument/completion` offers: mnemonics (from `nessemble-isa`, with their
+  addressing modes as detail), directives (the shared catalog, `.`-triggered,
+  with descriptions), in-scope labels/constants (from the symbol table, cached
+  per document so they survive transient errors), and macro names (scanned from
+  `.macrodef`). Client-side prefix filtering; context-awareness and snippets are
+  future polish.
+- Moved the `DIRECTIVES` catalog and an `AddressingMode::label()` helper into
+  `nessemble-isa` (decision C), so the `reference` command and the LSP share one
+  source of truth.
+- **Done when:** typing offers relevant mnemonics/directives/labels with docs in
+  the completion detail. ✅ (completion unit test + lifecycle protocol test +
+  an end-to-end stdio check.)
 
 ### Phase 3 — Formatting & highlighting — *priority*
 - **Formatting** (`textDocument/formatting`, optionally `rangeFormatting`): a
