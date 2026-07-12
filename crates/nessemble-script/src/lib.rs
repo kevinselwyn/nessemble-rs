@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use rhai::packages::Package;
-use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult};
+use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
 use rhai_fs::FilesystemPackage;
 
 /// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
@@ -91,7 +91,32 @@ fn engine(base_dir: &Path) -> Engine {
             path
         }
     });
+    // PNG decoding for scripts: `decode_png(blob)` → a map of width/height and
+    // interleaved RGBA pixels (typically fed an `open_file(...).read_blob()`).
+    engine.register_fn("decode_png", decode_png);
     engine
+}
+
+/// `decode_png(blob)` — decode PNG bytes (e.g. from `open_file(path).read_blob()`)
+/// into `#{ width: int, height: int, pixels: [r, g, b, a, …] }`, where `pixels`
+/// holds `width * height * 4` integers in row-major RGBA order. Throws if the
+/// blob is not a valid PNG.
+// Rhai's `register_fn` takes the argument by value (or `&mut`); owned lets it be
+// called uniformly on variables, temporaries, and constants.
+#[allow(clippy::needless_pass_by_value)]
+fn decode_png(blob: Blob) -> Result<Map, Box<EvalAltResult>> {
+    let img = nessemble_media::decode_png_rgba(&blob)
+        .map_err(|_| -> Box<EvalAltResult> { "decode_png: input is not a valid PNG".into() })?;
+    let pixels: Array = img
+        .rgba
+        .iter()
+        .map(|&b| Dynamic::from(i64::from(b)))
+        .collect();
+    let mut map = Map::new();
+    map.insert("width".into(), Dynamic::from(i64::from(img.width)));
+    map.insert("height".into(), Dynamic::from(i64::from(img.height)));
+    map.insert("pixels".into(), Dynamic::from(pixels));
+    Ok(map)
 }
 
 /// Convert a script's return value into emitted bytes.
@@ -246,5 +271,47 @@ mod tests {
             Path::new("/nonexistent-base"),
         );
         assert_eq!(out.unwrap(), b"ABS");
+    }
+
+    /// Encode an RGBA image to PNG bytes for the `decode_png` tests.
+    fn png_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn decode_png_exposes_dimensions_and_rgba_pixels() {
+        // The documented flow: open a PNG, read its bytes, and decode them into
+        // `#{ width, height, pixels: [r, g, b, a, …] }`.
+        let dir = TempDir::new("png");
+        let png = png_bytes(2, 1, &[10, 20, 30, 40, 50, 60, 70, 80]);
+        std::fs::write(dir.0.join("img.png"), &png).unwrap();
+
+        let src = r#"
+            fn custom(ints, texts) {
+                let img = decode_png(open_file("img.png", "r").read_blob());
+                let out = [img.width, img.height];
+                out += img.pixels;
+                out
+            }
+        "#;
+        // width, height, then the two pixels' RGBA bytes.
+        assert_eq!(
+            run(src, &[], &[], &dir.0).unwrap(),
+            vec![2, 1, 10, 20, 30, 40, 50, 60, 70, 80]
+        );
+    }
+
+    #[test]
+    fn decode_png_rejects_a_non_png_blob() {
+        let dir = TempDir::new("png-bad");
+        std::fs::write(dir.0.join("bad.png"), b"not a png").unwrap();
+        let src = r#"fn custom(ints, texts) { decode_png(open_file("bad.png", "r").read_blob()) }"#;
+        let err = run(src, &[], &[], &dir.0).unwrap_err();
+        assert!(err.contains("not a valid PNG"), "unexpected error: {err}");
     }
 }

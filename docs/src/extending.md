@@ -128,6 +128,39 @@ fn custom(ints, texts) {
 > `nessemble` process can. Only run pseudo-op scripts you trust, as with any
 > build tooling.
 
+### Decoding PNGs
+
+`decode_png(blob)` decodes PNG bytes (typically from `open_file(...).read_blob()`)
+into a map of the image's dimensions and its pixels:
+
+```rust,ignore
+let img = decode_png(open_file("sprite.png", "r").read_blob());
+```
+
+The returned map has:
+
+- `width` — the image width in pixels (integer).
+- `height` — the image height in pixels (integer).
+- `pixels` — a flat array of `width * height * 4` integers, four per pixel in
+  **`R, G, B, A`** order, row-major. Pixel `(x, y)` starts at index
+  `(y * width + x) * 4`.
+
+`decode_png` throws if the blob is not a valid PNG. For example, a directive that
+emits a single tile's worth of a PNG's red channel:
+
+```rust,ignore
+fn custom(ints, texts) {
+    let img = decode_png(open_file(texts[0], "r").read_blob());
+    let out = [];
+    for y in 0..8 {
+        for x in 0..8 {
+            out.push(img.pixels[(y * img.width + x) * 4]);   // red channel
+        }
+    }
+    out
+}
+```
+
 ## Bundled scripts
 
 Running `nessemble scripts` installs the bundled scripts. The `ease` script

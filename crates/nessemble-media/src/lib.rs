@@ -12,7 +12,7 @@ mod rle;
 mod wav;
 
 pub use color::{match_nes_color, two_bit_color};
-pub use png::{decode_png, png_to_palette, png_to_tiles, Png, PngError};
+pub use png::{decode_png, decode_png_rgba, png_to_palette, png_to_tiles, Png, PngError, PngRgba};
 pub use rle::rle_encode;
 pub use wav::{wav_to_dpcm, WavError};
 
@@ -79,5 +79,28 @@ mod tests {
         assert_eq!(rle_encode(&[0xAA; 5]), vec![0x05, 0xAA, 0xFF]);
         // One or two distinct bytes buffer as a literal run (0x80 | len).
         assert_eq!(rle_encode(&[0x01, 0x02]), vec![0x82, 0x01, 0x02, 0xFF]);
+    }
+
+    #[test]
+    fn decode_png_rgba_preserves_dimensions_and_alpha() {
+        use image::ImageEncoder;
+        // Encode a 2x1 RGBA image with known (non-opaque) pixels, then decode.
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([10, 20, 30, 40]));
+        img.put_pixel(1, 0, image::Rgba([50, 60, 70, 80]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(img.as_raw(), 2, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+
+        let decoded = decode_png_rgba(&png).unwrap();
+        assert_eq!(decoded.width, 2);
+        assert_eq!(decoded.height, 1);
+        assert_eq!(decoded.rgba, vec![10, 20, 30, 40, 50, 60, 70, 80]);
+    }
+
+    #[test]
+    fn decode_png_rgba_rejects_non_png() {
+        assert!(decode_png_rgba(b"not a png").is_err());
     }
 }

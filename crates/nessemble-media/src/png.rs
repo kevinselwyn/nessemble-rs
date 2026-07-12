@@ -37,6 +37,27 @@ pub fn decode_png(bytes: &[u8]) -> Result<Png, PngError> {
     })
 }
 
+/// A decoded PNG as 8-bit RGBA, row-major (`(y * width + x) * 4`), preserving
+/// the alpha channel. Used by the scripting host's `decode_png`, which exposes
+/// full RGBA pixels (unlike [`decode_png`], which forces RGB for `.incpng`).
+pub struct PngRgba {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` bytes, in `R, G, B, A` order.
+    pub rgba: Vec<u8>,
+}
+
+/// Decode PNG bytes to 8-bit RGBA pixels, keeping the alpha channel.
+pub fn decode_png_rgba(bytes: &[u8]) -> Result<PngRgba, PngError> {
+    let img = image::load_from_memory(bytes).map_err(|_| PngError)?;
+    let rgba = img.to_rgba8();
+    Ok(PngRgba {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    })
+}
+
 /// Convert a PNG to CHR tiles (`.incpng`): each 8×8 tile becomes two bitplanes
 /// (low then high) of 8 bytes. `offset` skips leading tiles; `limit` (`None` =
 /// all) caps how many tiles after `offset` are emitted.

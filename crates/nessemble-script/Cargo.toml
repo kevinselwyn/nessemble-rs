@@ -9,8 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+nessemble-media.workspace = true
 rhai = { version = "1", default-features = false, features = ["std"] }
 rhai-fs = { version = "0.1.5", default-features = false }
+
+[dev-dependencies]
+# Encodes small PNGs for the `decode_png` tests.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true
