@@ -211,6 +211,78 @@ pub fn assemble_source_as(
     )
 }
 
+/// A best-effort diagnostic scan of an in-memory buffer, for tooling (the
+/// language server). Unlike [`assemble`], it does **not** stop at the first
+/// error: parse and assembly errors are collected with recovery so several
+/// problems surface at once, alongside warnings and the defined symbols.
+pub struct Diagnostics {
+    /// All errors found (deduplicated), in source order.
+    pub errors: Vec<Diag>,
+    /// All warnings found (deduplicated).
+    pub warnings: Vec<Diag>,
+    /// Symbols defined by the (best-effort) assembly, for completion.
+    pub symbols: Vec<ListSymbol>,
+}
+
+/// Collect all diagnostics for in-memory `source` as though it were the file at
+/// `path` (see [`assemble_source_as`] for the path/base-directory semantics).
+/// A preprocessing failure (e.g. a missing include) is reported as a single
+/// error; otherwise parse errors are collected with recovery, and if the parse
+/// is clean the assembler runs in collect mode to gather every error/warning.
+#[must_use]
+pub fn diagnose_source_as(path: &Path, source: &str, options: &Options) -> Diagnostics {
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let top_name = display_name(path);
+
+    let pre = match preprocess::preprocess(source, base, &top_name) {
+        Ok(pre) => pre,
+        Err(diag) => {
+            return Diagnostics {
+                errors: vec![diag],
+                warnings: Vec::new(),
+                symbols: Vec::new(),
+            }
+        }
+    };
+
+    let (lines, parse_errors) = parse::parse_recovering(pre.tokens);
+    if !parse_errors.is_empty() {
+        // Syntax errors block semantic analysis (missing symbols would cascade),
+        // so report them alone.
+        let errors = parse_errors
+            .into_iter()
+            .map(|e| Diag {
+                file: pre.files.get(e.file as usize).cloned().unwrap_or_default(),
+                line: e.line,
+                message: e.message,
+            })
+            .collect();
+        return Diagnostics {
+            errors,
+            warnings: Vec::new(),
+            symbols: Vec::new(),
+        };
+    }
+
+    let mut asm = assemble::Assembler::new(
+        options.nes,
+        options.undocumented,
+        options.empty_byte,
+        pre.files,
+        pre.dirs,
+        default_custom_resolver(),
+    );
+    let (errors, warnings) = asm.diagnostics(&lines);
+    Diagnostics {
+        errors,
+        warnings,
+        symbols: asm.list_symbols(),
+    }
+}
+
 /// The basename used to refer to `path` in diagnostics.
 fn display_name(path: &Path) -> String {
     path.file_name()
@@ -278,6 +350,51 @@ mod tests {
     fn defaults_match_reference() {
         let opts = Options::default();
         assert_eq!(opts.empty_byte, 0xFF);
+    }
+
+    #[test]
+    fn diagnose_collects_multiple_assembler_errors() {
+        // Two unknown-opcode lines: both are reported, not just the first.
+        let d = diagnose_source_as(
+            Path::new("t.asm"),
+            "  notareal\n  alsobad\n",
+            &Options::default(),
+        );
+        assert_eq!(d.errors.len(), 2, "errors: {:?}", d.errors);
+        assert_eq!(d.errors[0].line, 1);
+        assert_eq!(d.errors[1].line, 2);
+    }
+
+    #[test]
+    fn diagnose_recovers_from_multiple_syntax_errors() {
+        // A line starting with a register char is a statement error; recovery
+        // reports both instead of stopping at the first.
+        let d = diagnose_source_as(Path::new("t.asm"), "x = 1\ny = 2\n", &Options::default());
+        assert_eq!(d.errors.len(), 2, "errors: {:?}", d.errors);
+        assert_eq!((d.errors[0].line, d.errors[1].line), (1, 2));
+    }
+
+    #[test]
+    fn diagnose_does_not_panic_on_unbalanced_deep_nesting() {
+        // 20 nested `.ifdef` past the nesting limit must not index out of range.
+        let mut src = String::new();
+        for _ in 0..20 {
+            src.push_str(".ifdef FOO\n");
+        }
+        src.push_str("  nop\n");
+        let _ = diagnose_source_as(Path::new("t.asm"), &src, &Options::default());
+    }
+
+    #[test]
+    fn diagnose_keeps_symbols_for_a_valid_buffer() {
+        let d = diagnose_source_as(
+            Path::new("t.asm"),
+            "start:\n  nop\ncount = 5\n",
+            &Options::default(),
+        );
+        assert!(d.errors.is_empty(), "errors: {:?}", d.errors);
+        let names: Vec<&str> = d.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"start") && names.contains(&"count"));
     }
 
     #[test]

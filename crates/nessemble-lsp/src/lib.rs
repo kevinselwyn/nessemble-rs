@@ -5,10 +5,10 @@
 //! `shutdown`/`exit`), tracks open documents via
 //! `textDocument/didOpen|didChange|didClose`, and provides:
 //!
-//! - **Diagnostics** (Phase 1): each open buffer is assembled and its
-//!   errors/warnings are published via `textDocument/publishDiagnostics`.
-//!   Line-level for now — today's core reports a line but no column, so each
-//!   diagnostic covers its whole line.
+//! - **Diagnostics** (Phases 1 & 4): each open buffer is scanned (via
+//!   `nessemble_core::diagnose_source_as`, which recovers past errors) and *all*
+//!   errors/warnings are published via `textDocument/publishDiagnostics`, each
+//!   with a **token-accurate range** (narrowed to the offending token).
 //! - **Completion** (Phase 2): `textDocument/completion` offers instruction
 //!   mnemonics (from `nessemble-isa`), directives, in-scope labels/constants,
 //!   and macro names.
@@ -17,7 +17,7 @@
 //!   `textDocument/semanticTokens/full` classifies tokens for highlighting, both
 //!   built on the lossless tooling lexer.
 //!
-//! Column-accurate diagnostics and navigation arrive in later phases.
+//! Navigation (go-to-definition, hover) arrives in a later phase.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -39,7 +39,7 @@ use lsp_types::{
 };
 
 use nessemble_core::tooling::{self, LexKind};
-use nessemble_core::{assemble_source_as, AssembleError, Diag, Options};
+use nessemble_core::{diagnose_source_as, Diag, Options};
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
 /// Semantic-token type legend. The index of each entry is the `token_type`
@@ -100,7 +100,7 @@ impl Server {
                     uri.clone(),
                     Document {
                         text: p.text_document.text,
-                        symbols: analysis.symbols.unwrap_or_default(),
+                        symbols: analysis.symbols,
                     },
                 );
                 Some(publish(uri, analysis.diagnostics))
@@ -113,10 +113,10 @@ impl Server {
                 let analysis = analyze(&uri, &change.text);
                 let doc = self.documents.entry(uri.clone()).or_default();
                 doc.text = change.text;
-                // Refresh the symbol cache only on a successful assembly, so it
-                // survives transient errors while editing.
-                if let Some(symbols) = analysis.symbols {
-                    doc.symbols = symbols;
+                // Keep the previous symbols when the new scan found none (e.g. a
+                // transient syntax error), so completion doesn't blank out.
+                if !analysis.symbols.is_empty() {
+                    doc.symbols = analysis.symbols;
                 }
                 Some(publish(uri, analysis.diagnostics))
             }
@@ -180,17 +180,17 @@ impl Server {
     }
 }
 
-/// The outcome of assembling a buffer for the language server.
+/// The outcome of a diagnostic scan of a buffer for the language server.
 struct Analysis {
     diagnostics: Vec<Diagnostic>,
-    /// Symbol names (labels/constants) from a successful assembly, or `None` if
-    /// assembly failed — letting the caller keep the previously cached set.
-    symbols: Option<Vec<String>>,
+    /// Symbol names (labels/constants) from the best-effort assembly, for
+    /// completion. Empty when a syntax error blocked semantic analysis.
+    symbols: Vec<String>,
 }
 
-/// Assemble `text` as the buffer at `uri` and translate the result: warnings and
-/// the single error become diagnostics, and a successful assembly yields the
-/// symbol names for completion. (Collecting *all* errors at once is Phase 4.)
+/// Scan `text` (the buffer at `uri`) for *all* errors and warnings — with
+/// recovery, so several problems surface at once — and translate them into LSP
+/// diagnostics with token-accurate ranges.
 fn analyze(uri: &Url, text: &str) -> Analysis {
     let path = uri
         .to_file_path()
@@ -201,24 +201,22 @@ fn analyze(uri: &Url, text: &str) -> Analysis {
         .unwrap_or("stdin")
         .to_string();
 
-    match assemble_source_as(&path, text, &Options::default()) {
-        Ok(assembly) => Analysis {
-            diagnostics: assembly
-                .warnings
-                .iter()
-                .map(|d| to_diagnostic(d, DiagnosticSeverity::WARNING, &top_name, text))
-                .collect(),
-            symbols: Some(assembly.symbols.iter().map(|s| s.name.clone()).collect()),
-        },
-        Err(AssembleError::Diagnostic(d)) => Analysis {
-            diagnostics: vec![to_diagnostic(
-                &d,
-                DiagnosticSeverity::ERROR,
-                &top_name,
-                text,
-            )],
-            symbols: None,
-        },
+    let found = diagnose_source_as(&path, text, &Options::default());
+    let mut diagnostics = Vec::with_capacity(found.errors.len() + found.warnings.len());
+    for d in &found.errors {
+        diagnostics.push(to_diagnostic(d, DiagnosticSeverity::ERROR, &top_name, text));
+    }
+    for d in &found.warnings {
+        diagnostics.push(to_diagnostic(
+            d,
+            DiagnosticSeverity::WARNING,
+            &top_name,
+            text,
+        ));
+    }
+    Analysis {
+        diagnostics,
+        symbols: found.symbols.iter().map(|s| s.name.clone()).collect(),
     }
 }
 
@@ -231,10 +229,10 @@ fn publish(uri: Url, diagnostics: Vec<Diagnostic>) -> PublishDiagnosticsParams {
     }
 }
 
-/// Convert a core [`Diag`] into a whole-line LSP diagnostic. A diagnostic that
-/// originates in the top-level buffer maps to its own line; one from an included
-/// file (whose lines aren't in this buffer) is anchored at the top with its
-/// origin noted in the message.
+/// Convert a core [`Diag`] into an LSP diagnostic with a token-accurate range.
+/// A diagnostic that originates in the top-level buffer maps to its own line;
+/// one from an included file (whose lines aren't in this buffer) is anchored at
+/// the top with its origin noted in the message.
 fn to_diagnostic(
     diag: &Diag,
     severity: DiagnosticSeverity,
@@ -246,9 +244,8 @@ fn to_diagnostic(
     } else {
         (0, format!("{} [{}:{}]", diag.message, diag.file, diag.line))
     };
-    let end = line_len_utf16(text, line);
     Diagnostic {
-        range: Range::new(Position::new(line, 0), Position::new(line, end)),
+        range: diagnostic_range(text, line, &message),
         severity: Some(severity),
         source: Some("nessemble".to_string()),
         message,
@@ -256,12 +253,49 @@ fn to_diagnostic(
     }
 }
 
-/// UTF-16 length of a 0-based line (LSP character offsets are UTF-16), or 0 if
-/// the line is past the end of the text.
-fn line_len_utf16(text: &str, line: u32) -> u32 {
-    text.lines()
-        .nth(line as usize)
-        .map_or(0, |l| l.encode_utf16().count() as u32)
+/// The range to highlight for a diagnostic on `line`: the backtick-quoted
+/// subject of the message if it occurs on the line (token-accurate), otherwise
+/// the line's significant span (its content with indentation/trailing trimmed).
+fn diagnostic_range(text: &str, line: u32, message: &str) -> Range {
+    let src = text.lines().nth(line as usize).unwrap_or("");
+
+    // Default: the trimmed content span (byte offsets, always char boundaries
+    // since the trimmed bytes are ASCII whitespace).
+    let (mut start, mut end) = {
+        let trimmed = src.trim();
+        if trimmed.is_empty() {
+            (0, 0)
+        } else {
+            let lead = src.len() - src.trim_start().len();
+            (lead, lead + trimmed.len())
+        }
+    };
+
+    // Narrow to a `quoted` subject present on the line.
+    if let Some(subject) = quoted_subject(message) {
+        if let Some(pos) = src.find(subject) {
+            start = pos;
+            end = pos + subject.len();
+        }
+    }
+
+    Range::new(
+        Position::new(line, utf16_col(src, start)),
+        Position::new(line, utf16_col(src, end)),
+    )
+}
+
+/// The text between the first pair of backticks in `message`, if any.
+fn quoted_subject(message: &str) -> Option<&str> {
+    let start = message.find('`')? + 1;
+    let end = message[start..].find('`')? + start;
+    Some(&message[start..end])
+}
+
+/// UTF-16 column of a byte offset within `line` (LSP columns are UTF-16). The
+/// offset must fall on a character boundary.
+fn utf16_col(line: &str, byte: usize) -> u32 {
+    line[..byte].encode_utf16().count() as u32
 }
 
 /// UTF-16 code-unit length of a string (LSP measures positions in UTF-16).
@@ -557,6 +591,27 @@ mod tests {
         let diags = analyze(&uri, "  lda #$00\n  nop\n  notareal\n").diagnostics;
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].range.start.line, 2);
+    }
+
+    #[test]
+    fn analyze_collects_multiple_errors() {
+        let uri = Url::parse("file:///m.asm").unwrap();
+        let diags = analyze(&uri, "  notareal\n  alsobad\n").diagnostics;
+        assert_eq!(diags.len(), 2);
+        assert!(diags
+            .iter()
+            .all(|d| d.severity == Some(DiagnosticSeverity::ERROR)));
+    }
+
+    #[test]
+    fn diagnostic_range_narrows_to_the_offending_token() {
+        let uri = Url::parse("file:///r.asm").unwrap();
+        // `foo` is undefined; the range should cover exactly `foo` (cols 6..9),
+        // not the whole line.
+        let diags = analyze(&uri, "  lda foo\n").diagnostics;
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].range.start.character, 6);
+        assert_eq!(diags[0].range.end.character, 9);
     }
 
     #[test]

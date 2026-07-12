@@ -135,6 +135,11 @@ pub struct Assembler {
     errors: Vec<Diag>,
     warnings: Vec<Diag>,
     aborted: bool,
+    /// When set, a hard error records a diagnostic but does **not** abort the
+    /// run, so multiple problems can be collected in one pass (for tooling
+    /// diagnostics). The normal `assemble` path leaves this `false` and stops at
+    /// the first hard error, exactly as before.
+    collect_all: bool,
     cur_line: u32,
     cur_file: u32,
     files: Vec<String>,
@@ -189,12 +194,35 @@ impl Assembler {
             errors: Vec::new(),
             warnings: Vec::new(),
             aborted: false,
+            collect_all: false,
             cur_line: 1,
             cur_file: 0,
             files,
             dirs,
             custom,
         }
+    }
+
+    /// Run both passes in collect mode and return every distinct error and
+    /// warning (deduplicated by file/line/message, preserving first-seen order).
+    /// The output bytes are discarded — this is for diagnostics only.
+    pub fn diagnostics(&mut self, lines: &[Line]) -> (Vec<Diag>, Vec<Diag>) {
+        self.collect_all = true;
+        // Pass 1: build symbols and size the ROM (best effort past errors).
+        self.pass = 1;
+        self.reset_state();
+        self.run_pass(lines);
+        if self.nes {
+            self.offset_max = (self.ines.prg * BANK_PRG + self.ines.chr * BANK_CHR).max(0) as usize;
+        }
+        // Pass 2: surface symbol-resolution errors; write_byte is bounds-checked.
+        self.rom = vec![self.empty_byte; self.offset_max];
+        self.coverage = vec![false; self.offset_max];
+        self.trainer = vec![self.empty_byte; TRAINER_MAX];
+        self.pass = 2;
+        self.reset_state();
+        self.run_pass(lines);
+        (dedup(&self.errors), dedup(&self.warnings))
     }
 
     /// The per-bank coverage summary (`-C`), or `None` when not in iNES mode
@@ -310,6 +338,12 @@ impl Assembler {
         if !self.if_active {
             return false;
         }
+        // Defensive bound: unbalanced `.if` nesting past the limit can only
+        // happen on malformed input (which produces no golden ROM); guarding
+        // here keeps collect-mode analysis from indexing out of range.
+        if self.if_depth >= MAX_NESTED_IFS {
+            return false;
+        }
         if !self.if_cond[self.if_depth] {
             return true;
         }
@@ -371,7 +405,10 @@ impl Assembler {
 
     fn hard_error(&mut self, message: impl Into<String>) {
         self.error(message);
-        self.aborted = true;
+        // In collect mode, keep going so more problems can be reported.
+        if !self.collect_all {
+            self.aborted = true;
+        }
     }
 
     fn warning(&mut self, message: impl Into<String>) {
@@ -1307,4 +1344,16 @@ fn match_color(r1: u8, g1: u8, b1: u8) -> u8 {
     } else {
         color as u8
     }
+}
+
+/// Deduplicate diagnostics by (file, line, message), preserving first-seen
+/// order. Collect mode runs both passes, so the same error can be recorded
+/// twice; this collapses those.
+fn dedup(diags: &[Diag]) -> Vec<Diag> {
+    let mut seen = std::collections::HashSet::new();
+    diags
+        .iter()
+        .filter(|d| seen.insert((d.file.clone(), d.line, d.message.clone())))
+        .cloned()
+        .collect()
 }
