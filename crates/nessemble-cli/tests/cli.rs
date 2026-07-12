@@ -243,6 +243,43 @@ fn custom_pseudo_in_included_file_resolves_script_relative_to_that_file() {
 }
 
 #[test]
+fn custom_pseudo_reads_a_file_via_rhai_fs() {
+    // End-to-end: a custom directive whose script uses rhai-fs to read a file
+    // and emit its bytes. The script's relative path resolves against the `.asm`
+    // file's directory (the same base as `.include`/`.incbin`).
+    let root = std::env::temp_dir().join(format!(
+        "nessemble-fs-embed-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    std::fs::write(root.join("main.asm"), b".embed \"payload.bin\"\n").unwrap();
+    // The asset the script reads, alongside the source file.
+    std::fs::write(root.join("payload.bin"), [0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+    // A script that opens the named file and returns its bytes verbatim.
+    std::fs::write(
+        root.join("embed.rhai"),
+        b"fn custom(ints, texts) { open_file(texts[0], \"r\").read_blob() }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("pseudo.txt"), b".embed = embed.rhai\n").unwrap();
+
+    let out = bin()
+        .arg(root.join("main.asm"))
+        .args(["--pseudo"])
+        .arg(root.join("pseudo.txt"))
+        .args(["--output", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn bundled_ease_script_resolves_after_install() {
     let home = std::env::temp_dir().join(format!("nessemble-ease-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);

@@ -16,6 +16,7 @@ checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
  "const-random",
+ "getrandom 0.3.4",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -72,7 +73,7 @@ version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.17",
  "once_cell",
  "tiny-keccak",
 ]
@@ -192,6 +193,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "getrandom"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi",
+ "wasip2",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -224,6 +237,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -239,6 +258,12 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "miniz_oxide"
@@ -262,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "nessemble-cli"
-version = "2.1.2"
+version = "2.2.0"
 dependencies = [
  "nessemble-core",
  "nessemble-i18n",
@@ -272,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "nessemble-core"
-version = "2.1.2"
+version = "2.2.0"
 dependencies = [
  "nessemble-i18n",
  "nessemble-isa",
@@ -281,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "nessemble-i18n"
-version = "2.1.2"
+version = "2.2.0"
 dependencies = [
  "fluent-bundle",
  "unic-langid",
@@ -289,20 +314,21 @@ dependencies = [
 
 [[package]]
 name = "nessemble-isa"
-version = "2.1.2"
+version = "2.2.0"
 
 [[package]]
 name = "nessemble-media"
-version = "2.1.2"
+version = "2.2.0"
 dependencies = [
  "image",
 ]
 
 [[package]]
 name = "nessemble-script"
-version = "2.1.2"
+version = "2.2.0"
 dependencies = [
  "rhai",
+ "rhai-fs",
 ]
 
 [[package]]
@@ -373,6 +399,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "r-efi"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
 name = "rhai"
 version = "1.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -387,6 +419,17 @@ dependencies = [
  "smartstring",
  "thin-vec",
  "web-time",
+]
+
+[[package]]
+name = "rhai-fs"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e704b3f6fbe64d1f278f5752706444a63bfdb7060f795e6d8f6221f0cda0309"
+dependencies = [
+ "rhai",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -461,6 +504,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.150"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -601,6 +657,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
+name = "wasip2"
+version = "1.0.4+wasi-0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -656,8 +721,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
 name = "xtask"
-version = "2.1.2"
+version = "2.2.0"
 
 [[package]]
 name = "zerocopy"
@@ -694,3 +765,9 @@ dependencies = [
  "serde",
  "zerofrom",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"

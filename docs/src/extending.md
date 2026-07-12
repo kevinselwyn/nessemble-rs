@@ -1,7 +1,9 @@
 # Extending
 
 `nessemble` can be extended with custom pseudo-instructions written in
-[Rhai](https://rhai.rs), a small, sandboxed, pure-Rust scripting language.
+[Rhai](https://rhai.rs), a small, pure-Rust scripting language. Scripts can also
+read and write files (see [Filesystem access](#filesystem-access)), so run only
+scripts you trust.
 
 ## Usage
 
@@ -94,6 +96,37 @@ fn custom(ints, texts) {
     []
 }
 ```
+
+### Filesystem access
+
+Scripts can read and write files through the
+[`rhai-fs`](https://docs.rs/rhai-fs) package, so a directive can pull bytes from
+disk instead of only computing them. The main entry point is `open_file`:
+
+- `open_file(path, "r")` opens a file for reading; `open_file(path)` opens it for
+  reading and writing, **creating or truncating** it.
+- On the returned file handle: `read_blob()` / `read_string()` return the whole
+  file, `read_blob(n)` / `read_string(n)` read `n` bytes, `write(blob_or_string)`
+  writes bytes and returns the count, and `seek(pos)` moves the cursor.
+
+Relative paths resolve against the **source file's directory** — the same base
+as `.include` and the `.inc*` importers — while absolute paths are used as-is.
+
+A `.embed "file"` directive that emits a file's bytes verbatim:
+
+```rust,ignore
+fn custom(ints, texts) {
+    open_file(texts[0], "r").read_blob()
+}
+```
+
+```text
+.embed "logo.chr"   ; emits the raw bytes of logo.chr
+```
+
+> **Filesystem access is not sandboxed.** A script can read or write any path the
+> `nessemble` process can. Only run pseudo-op scripts you trust, as with any
+> build tooling.
 
 ## Bundled scripts
 

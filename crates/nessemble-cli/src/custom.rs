@@ -56,7 +56,7 @@ fn resolve(
 
     let source =
         std::fs::read_to_string(&path).map_err(|_| t!("custom-not-exist", pseudo = pseudo))?;
-    run_script(&source, ints, texts)
+    run_script(&source, ints, texts, base_dir)
 }
 
 /// Read a `.name = path` mapping file into `name -> path` (name without dot).
@@ -78,11 +78,21 @@ fn read_mapping(path: impl AsRef<Path>) -> HashMap<String, String> {
 }
 
 #[cfg(feature = "scripting")]
-fn run_script(source: &str, ints: &[i64], texts: &[String]) -> Result<Vec<u8>, String> {
-    nessemble_script::run(source, ints, texts)
+fn run_script(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+) -> Result<Vec<u8>, String> {
+    nessemble_script::run(source, ints, texts, base_dir)
 }
 
 #[cfg(not(feature = "scripting"))]
-fn run_script(_source: &str, _ints: &[i64], _texts: &[String]) -> Result<Vec<u8>, String> {
+fn run_script(
+    _source: &str,
+    _ints: &[i64],
+    _texts: &[String],
+    _base_dir: &Path,
+) -> Result<Vec<u8>, String> {
     Err("scripting is disabled".to_string())
 }
