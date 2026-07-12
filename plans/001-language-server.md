@@ -98,13 +98,15 @@ Ordered by your priorities: **diagnostics → completion → formatting/highligh
 with precise spans and navigation deferred. Each phase is independently
 shippable, and each shipped phase is a **minor version bump**.
 
-### Phase 0 — Scaffold & transport
-- New `nessemble-lsp` crate; `nessemble lsp` subcommand (stdio, `lsp-server`);
-  LSP lifecycle (`initialize` → advertise capabilities → `initialized` →
-  `shutdown`/`exit`); `textDocument` open/change/close into a document store. No
-  analysis yet.
+### Phase 0 — Scaffold & transport — ✅ done
+- New `nessemble-lsp` crate; `nessemble lsp` subcommand (stdio, `lsp-server`,
+  feature `lsp` on by default); LSP lifecycle (`initialize` → advertise
+  capabilities → `initialized` → `shutdown`/`exit`); `textDocument`
+  open/change/close into an in-memory document store. Full-text sync advertised;
+  no analysis yet.
 - **Done when:** an LSP client connects, completes the handshake, and the server
-  tracks open documents (verified by a protocol-level test).
+  tracks open documents (verified by an in-memory protocol test and an
+  end-to-end stdio smoke test). ✅
 
 ### Phase 1 — Diagnostics (line-level) — *priority*
 - On open/change (debounced), assemble the in-memory buffer (base dir = the

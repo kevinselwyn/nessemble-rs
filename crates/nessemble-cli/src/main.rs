@@ -10,6 +10,7 @@ mod config;
 mod custom;
 mod home;
 mod init;
+mod lsp;
 mod reference;
 mod scripts;
 mod usage;
@@ -222,6 +223,7 @@ fn dispatch(args: &Args) -> u8 {
     if let Some(first) = args.positionals.first() {
         match first.as_str() {
             "init" => return init::run(&args.positionals[1..]),
+            "lsp" => return lsp::run(),
             "scripts" => return scripts::run(),
             "reference" => {
                 let (out, code) = reference::run(

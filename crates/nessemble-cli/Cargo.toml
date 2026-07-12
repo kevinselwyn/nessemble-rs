@@ -13,16 +13,20 @@ name = "nessemble"
 path = "src/main.rs"
 
 [features]
-# Custom pseudo-op scripting (Rhai) is on by default; disabling it drops the
-# scripting dependency and makes custom directives report "scripting disabled".
-default = ["scripting"]
+# Custom pseudo-op scripting (Rhai) and the language server are on by default;
+# disabling a feature drops its dependency. Without `scripting`, custom
+# directives report "scripting disabled"; without `lsp`, `nessemble lsp` reports
+# that the build lacks LSP support.
+default = ["scripting", "lsp"]
 scripting = ["dep:nessemble-script"]
+lsp = ["dep:nessemble-lsp"]
 
 [dependencies]
 nessemble-core.workspace = true
 nessemble-isa.workspace = true
 nessemble-i18n.workspace = true
 nessemble-script = { workspace = true, optional = true }
+nessemble-lsp = { workspace = true, optional = true }
 
 [lints]
 workspace = true
