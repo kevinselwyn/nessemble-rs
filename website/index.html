@@ -6,7 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Nessemble | NES Assembler</title>
     <link rel="shortcut icon" href="static/favicon.ico">
-    <link rel="stylesheet" type="text/css" href="static/css/website.css" />
+    <!-- Bootstrap 3.3.7 and Font Awesome 4.6.3 from CDN; theme + custom styles are local. -->
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.3.7/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/font-awesome/4.6.3/css/font-awesome.min.css" />
+    <link rel="stylesheet" type="text/css" href="static/css/grayscale.css" />
+    <link rel="stylesheet" type="text/css" href="static/css/style.css" />
     <link rel="stylesheet" type="text/css" href="static/nessemble/nessemble-assembler.css" />
     <link rel="stylesheet" type="text/css" href="//fonts.googleapis.com/css?family=Lora:400,700,400italic,700italic" />
     <link rel="stylesheet" type="text/css" href="//fonts.googleapis.com/css?family=Montserrat:400,700" />
@@ -283,7 +287,13 @@ palette:
         </div>
     </footer>
 
-    <script src="static/js/website.js"></script>
+    <!-- jQuery 1.12.4, Bootstrap 3.3.7, jQuery Easing 1.3 from CDN; theme + emulator local. -->
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.3.7/js/bootstrap.min.js"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery-easing/1.3/jquery.easing.min.js"></script>
+    <script src="static/js/grayscale.js"></script>
+    <script src="static/js/dynamicaudio-min.js"></script>
+    <script src="static/js/jsnes.js"></script>
     <script src="static/nessemble/nessemble-assembler.js"></script>
     <script type="text/javascript">
         // Emulator with no auto-loaded ROM; it plays whatever the assembler builds.
