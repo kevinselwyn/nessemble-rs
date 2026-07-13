@@ -48,6 +48,9 @@ Once connected, the server provides:
   open buffers.
 - **Code actions** — convert a numeric literal between hexadecimal, decimal, and
   binary.
+- **Custom pseudo-instructions** — directives declared in a `--pseudo`-style
+  mapping file in the workspace are recognized, so they aren't flagged as unknown,
+  and cmd/ctrl-click on one opens the script that implements it.
 
 ## Editor setup
 
@@ -182,5 +185,10 @@ works the same way.
   send one automatically). Opening a lone file with no folder still works, but
   each file is then analyzed on its own, so cross-file symbols may be reported as
   undefined.
+- Custom pseudo-instructions are discovered from any `*.txt` mapping file in the
+  workspace (or next to the open file) whose `.name = script` entries point at
+  existing scripts — the same mapping you pass to the CLI's `--pseudo`. Their
+  scripts are **not** executed during analysis, so the bytes they emit aren't
+  modeled; addresses after a custom pseudo-op may be approximate.
 
 [lsp]: https://microsoft.github.io/language-server-protocol/
