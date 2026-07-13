@@ -101,6 +101,11 @@ run/disassemble modes and a custom-pseudo playground. Docs embedded it as
   - Errors/warnings rendered distinctly (the old component's red-styled output).
   - Options via attributes / a `data-opts` JSON attribute for parity, including
     `pseudo`.
+- **`assembled` event:** on each run the element dispatches a custom DOM event
+  (e.g. `nessemble:assembled`) carrying the ROM bytes and any errors in
+  `detail`, so an embedding page can react to a fresh build — notably to hand the
+  ROM to an emulator (see Phase 3). This is the page-facing hook beyond the
+  built-in hex dump / download.
 - **Legacy parity:** an optional upgrader that also enhances
   `<div class="nessemble-assembler" data-opts="…">` elements, so the old docs'
   embedding syntax keeps working alongside the new tag.
@@ -117,8 +122,9 @@ run/disassemble modes and a custom-pseudo playground. Docs embedded it as
   they deploy under `site/docs/`.
 - **`xtask dist`** gains the `wasm` step before the mdBook build; **`pages.yml`**
   installs the wasm toolchain (`wasm-pack`, `wasm32-unknown-unknown`).
-- **Marketing homepage:** embed the component as a playground in
-  `website/index.html`, loading the same assets.
+- **Marketing homepage:** replace the Asciinema recording with the component,
+  seeded with the demo program and wired to **play its freshly-assembled ROM in
+  the existing JSNES emulator** (see Phase 3).
 - **Release asset:** `release.yml` builds the wasm bundle and attaches it to the
   GitHub release for the version.
 
@@ -166,10 +172,27 @@ must stay green).
 - **Done when:** a local `xtask dist` produces a `site/docs/` whose pages run the
   assembler in-browser; CSP/MIME/asset-path issues resolved.
 
-### Phase 3 — Marketing homepage playground
-- Embed the component as a playground on `website/index.html` (seeded with a
-  representative example), reusing the Phase-1 assets.
-- **Done when:** the built `site/` root page has a working interactive assembler.
+### Phase 3 — Homepage: live assemble-and-play (replaces the Asciinema demo)
+Today `website/index.html` shows a **recorded** Asciinema terminal session next
+to a **JSNES** emulator that plays a *pre-built* `static/data/roms/example.nes`.
+Replace the recording with a live, interactive demo: edit → assemble → play.
+
+- Swap the `<asciinema-player>` for a `<nessemble-assembler>`, **pre-populated
+  with the demo program** (`website/static/data/recording/example.asm`, a full
+  iNES program) and configured to assemble as iNES (`format: nes`).
+- **Wire assemble → play.** On a successful assemble, feed the resulting ROM
+  bytes into the **existing JSNES emulator** (via the component's `assembled`
+  event; §4.2) instead of loading the static `example.nes`. Visitors edit,
+  assemble, and run the program in the browser — a far better demo than a
+  recording. (The ROM is *played* by JSNES, the existing JS NES emulator; the
+  Rust core still only assembles — consistent with the §8 non-goals.)
+- **Remove the now-unused assets:** the Asciinema player + CSS
+  (`static/js/asciinema-player.js`, `static/css/asciinema-player.css`), the
+  recording data (`static/data/recording/*`), and the pre-built
+  `static/data/roms/example.nes` (assembled live now). Keep `jsnes.js`.
+- **Done when:** the homepage loads with the demo program in the editor; clicking
+  **Assemble** produces the ROM and the JSNES emulator plays it; edits reassemble
+  and replay; assembly errors surface in the component without breaking the page.
 
 ### Phase 4 — Release artifact
 - Build the wasm bundle in `release.yml` and attach it to the GitHub release.
