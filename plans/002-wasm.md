@@ -1,10 +1,10 @@
 # nessemble-rs: A Plan for a WASM Build & Assembler Web Component
 
-> Status: **Phase 0 done; Phases 1–4 planned.** Decisions in [§6](#6-decisions)
-> are settled. The `nessemble-wasm` crate compiles to `wasm32`, assembles (incl.
-> custom pseudo-ops) in Node, and is covered by host + smoke tests; the remaining
-> phases build the Web Component and wire it into the docs, homepage, and
-> releases.
+> Status: **Phases 0–3 done; Phase 4 (release asset) planned.** Decisions in
+> [§6](#6-decisions) are settled. The `nessemble-wasm` crate compiles to `wasm32`
+> and the `<nessemble-assembler>` Web Component is embedded in the mdBook docs and
+> powers the marketing homepage's live assemble-and-play demo (all verified in
+> headless Chromium). Only the release-asset step remains.
 
 ---
 
@@ -155,27 +155,41 @@ must stay green).
   `wasm-opt -Oz` + gzip (via `wasm-pack`) will cut that substantially — a budget
   input for Phase 2, where an assemble-only fallback stays in reserve if needed.
 
-### Phase 1 — Assembler Web Component
-- Implement the vanilla `<nessemble-assembler>` element (editor, Assemble, hex
-  dump, download, reset/clear, error/warning display) + CSS, with shared lazy wasm
-  init and `data-opts`/attribute options (incl. `pseudo`). Add the legacy
-  `.nessemble-assembler` div upgrader.
-- **Done when:** a standalone static test page with several embedded elements
-  assembles source, shows the hex dump + byte count, downloads a `.rom`, and
-  reports errors — loading the wasm once.
+### Phase 1 — Assembler Web Component — ✅ done
+- Implemented the vanilla `<nessemble-assembler>` element (`web/`): editor,
+  Assemble, hex dump + byte count, download, reset/clear, error/warning display,
+  a shared lazy wasm init (one module per page), `data-opts` options (incl.
+  `pseudo`), the `nessemble:assembled` event, and the legacy
+  `.nessemble-assembler` div upgrader. Indentation is preserved (nessemble is
+  column-sensitive: col 0 = label, indented = instruction). ✅
+- **Done when:** ✅ verified in headless Chromium on a standalone page — plain
+  assembly (correct column semantics), an inline custom pseudo-op, legacy-div
+  upgrade, download, error styling, and the assembled event, loading the wasm
+  once.
 
-### Phase 2 — Embed in the mdBook docs
-- Wire `additional-js`/`additional-css`; make `xtask dist` build + stage the wasm
-  and component assets into the book output; update `pages.yml` toolchain.
-- Add interactive examples to `docs/src/syntax.md` (and other pages where the old
-  docs demonstrated features), mirroring the old inline-demo style.
-- **Done when:** a local `xtask dist` produces a `site/docs/` whose pages run the
-  assembler in-browser; CSP/MIME/asset-path issues resolved.
+### Phase 2 — Embed in the mdBook docs — ✅ done
+- `docs/theme/head.hbs` loads the component on every page via `{{ path_to_root }}`
+  (chosen over `additional-js`, which loads classic scripts — the wasm glue is an
+  ES module the component `import()`s). `xtask dist` builds the wasm and stages
+  the component + wasm into `docs/src/nessemble/` (mdBook copies it into the book)
+  and `website/static/nessemble/`; `pages.yml` installs the wasm target +
+  `wasm-bindgen-cli`. ✅
+- Added interactive examples to `docs/src/syntax.md`: a labels/branch demo, a
+  `.ascii` demo, and a `.ease` custom-pseudo-op demo (Rhai scripting in the
+  browser). ✅
+- **Done when:** ✅ a local `xtask dist` produces a `site/docs/` whose pages run
+  the assembler in-browser (verified in headless Chromium, all three examples
+  incl. the scripted one).
 
-### Phase 3 — Homepage: live assemble-and-play (replaces the Asciinema demo)
-Today `website/index.html` shows a **recorded** Asciinema terminal session next
-to a **JSNES** emulator that plays a *pre-built* `static/data/roms/example.nes`.
-Replace the recording with a live, interactive demo: edit → assemble → play.
+### Phase 3 — Homepage: live assemble-and-play (replaces the Asciinema demo) — ✅ done
+`website/index.html` showed a **recorded** Asciinema session next to a **JSNES**
+emulator that played a *pre-built* `static/data/roms/example.nes`. Replaced the
+recording with a live demo: edit → assemble → play. **Verified in headless
+Chromium** — the page seeds `example.asm`, assembles it to the exact 24592-byte
+iNES ROM (byte-for-byte identical to the old `example.nes`), and JSNES renders a
+non-blank frame. One caveat: the Asciinema *code* is bundled inside
+`website.js`/`website.css`, so only the standalone leftover files and the
+`<asciinema-player>` usage were removed; the dead bundled code was left in place.
 
 - Swap the `<asciinema-player>` for a `<nessemble-assembler>`, **pre-populated
   with the demo program** (`website/static/data/recording/example.asm`, a full
@@ -202,8 +216,12 @@ Replace the recording with a live, interactive demo: edit → assemble → play.
 
 **Made:**
 
-1. **Toolchain — `wasm-pack`** (emits optimized `.wasm` + JS glue + TS types from
-   a `cdylib` crate).
+1. **Toolchain — `wasm-bindgen` (`--target web`).** *Refined from the original
+   `wasm-pack` choice during implementation:* `wasm-pack` just orchestrates
+   `cargo build` + `wasm-bindgen` (+ optional `wasm-opt`), and `xtask wasm`
+   invokes those directly — no extra tool to install, the bindings match the
+   `wasm-bindgen` version pinned in `Cargo.lock`, and CI only needs the wasm
+   target + `wasm-bindgen-cli`. (`wasm-opt` size optimization can be added later.)
 2. **Component — a vanilla-JS custom element** (`customElements.define`), no
    framework, no JS build step.
 3. **Scope — assemble *plus* custom pseudo-ops** (Rhai compiled to wasm with
