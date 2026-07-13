@@ -10,4 +10,7 @@
 /docs/book/
 /site/
 
+# WebAssembly build output (wasm-pack)
+/crates/nessemble-wasm/pkg/
+
 # mdBook installed for verification (kept out of the repo)

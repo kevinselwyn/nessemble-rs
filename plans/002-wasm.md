@@ -1,8 +1,10 @@
 # nessemble-rs: A Plan for a WASM Build & Assembler Web Component
 
-> Status: **Proposed.** Decisions in [§6](#6-decisions) are settled; ready to
-> implement phase by phase once approved. This plan is **planning only** — no
-> code in the introducing PR.
+> Status: **Phase 0 done; Phases 1–4 planned.** Decisions in [§6](#6-decisions)
+> are settled. The `nessemble-wasm` crate compiles to `wasm32`, assembles (incl.
+> custom pseudo-ops) in Node, and is covered by host + smoke tests; the remaining
+> phases build the Web Component and wire it into the docs, homepage, and
+> releases.
 
 ---
 
@@ -126,17 +128,26 @@ Each phase is independently shippable; parity is unaffected throughout (a new
 crate + tooling; the `assemble`/`assemble_file` path is untouched — **122/122**
 must stay green).
 
-### Phase 0 — WASM crate & build
-- Scaffold `nessemble-wasm` (cdylib, `wasm-bindgen`); confirm `nessemble-core`
-  compiles to `wasm32-unknown-unknown`; add the panic hook and the structured
-  `assemble(source, opts)` result.
-- Make `rhai-fs` **optional** in `nessemble-script` (feature-gated) so the wasm
-  build excludes it; wire the scripting resolver + embedded built-in scripts.
-- Add `xtask wasm` (runs `wasm-pack build`).
-- **Done when:** a headless/Node harness loads the module and
-  `assemble("  lda #$00\n")` returns the expected bytes; a bundled-script example
-  (`ease`) and an inline script both assemble; `rhai-fs` scripts return a clear
-  error. Workspace tests + **parity 122/122** unaffected.
+### Phase 0 — WASM crate & build — ✅ done
+- Scaffolded `crates/nessemble-wasm` (cdylib + rlib, `wasm-bindgen`); confirmed
+  `nessemble-core` + Rhai compile to `wasm32-unknown-unknown`. Exposes
+  `assemble(source, opts_json) -> AssembleResult { rom, errors, warnings, ok }`
+  (errors returned as **data**, never a throw) plus a `start()` panic hook. ✅
+- Made `rhai-fs` **optional** in `nessemble-script` (`fs` feature, on by default);
+  the wasm crate takes `nessemble-script` as a direct path dep with
+  `default-features = false` so `fs` is genuinely dropped from the wasm graph.
+  Built-in scripts are embedded (`ease`, shared via `include_str!` from the CLI
+  crate); `opts.pseudo` enables built-ins by name or supplies inline Rhai. ✅
+- Added `xtask wasm` (runs `wasm-pack build … --target web`). ✅
+- **Done when:** ✅ six host unit tests (`cargo test -p nessemble-wasm`, no wasm
+  toolchain needed) plus a Node smoke test over the real `wasm-bindgen` bundle
+  cover: `lda #$00` → `A9 00`; a bad program → error (no panic); an inline
+  script (`.double 5` → `0A`); the built-in `ease` script by name; and an
+  `open_file` script erroring cleanly (no filesystem). Workspace tests +
+  **parity 122/122** unaffected.
+- **Size note:** the raw `wasm-bindgen` output is ~3.0 MB (Rhai dominates);
+  `wasm-opt -Oz` + gzip (via `wasm-pack`) will cut that substantially — a budget
+  input for Phase 2, where an assemble-only fallback stays in reserve if needed.
 
 ### Phase 1 — Assembler Web Component
 - Implement the vanilla `<nessemble-assembler>` element (editor, Assemble, hex

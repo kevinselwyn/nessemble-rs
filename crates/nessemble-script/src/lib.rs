@@ -19,10 +19,14 @@
 //!   …), so a directive can pull bytes from disk. Because of this, pseudo-op
 //!   scripts are **not** sandboxed from the filesystem — run only ones you trust.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "fs")]
+use std::path::PathBuf;
 
+#[cfg(feature = "fs")]
 use rhai::packages::Package;
 use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
+#[cfg(feature = "fs")]
 use rhai_fs::FilesystemPackage;
 
 /// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
@@ -76,21 +80,28 @@ fn engine(base_dir: &Path) -> Engine {
     // Allow deeply-nested arithmetic expressions (e.g. easing polynomials).
     engine.set_max_expr_depths(0, 0);
     // Filesystem access (`open_file`, `File` I/O) for scripts that read/write
-    // assets on disk.
-    FilesystemPackage::new().register_into_engine(&mut engine);
-    // Root the script's relative paths at the directive's source directory,
-    // overriding rhai-fs's default (which resolves against the process CWD).
-    // rhai-fs turns a path string into a `PathBuf` via this `path` function, so
-    // redefining it reroutes every relative `open_file`/`open_dir`.
-    let base = base_dir.to_path_buf();
-    engine.register_fn("path", move |p: &str| -> PathBuf {
-        let path = PathBuf::from(p);
-        if path.is_relative() {
-            base.join(path)
-        } else {
-            path
-        }
-    });
+    // assets on disk. Compiled out on filesystem-less targets (feature `fs`
+    // off), where the file API is simply absent.
+    #[cfg(feature = "fs")]
+    {
+        FilesystemPackage::new().register_into_engine(&mut engine);
+        // Root the script's relative paths at the directive's source directory,
+        // overriding rhai-fs's default (which resolves against the process CWD).
+        // rhai-fs turns a path string into a `PathBuf` via this `path` function,
+        // so redefining it reroutes every relative `open_file`/`open_dir`.
+        let base = base_dir.to_path_buf();
+        engine.register_fn("path", move |p: &str| -> PathBuf {
+            let path = PathBuf::from(p);
+            if path.is_relative() {
+                base.join(path)
+            } else {
+                path
+            }
+        });
+    }
+    #[cfg(not(feature = "fs"))]
+    let _ = base_dir;
+
     // PNG decoding for scripts: `decode_png(blob)` → a map of width/height and
     // interleaved RGBA pixels (typically fed an `open_file(...).read_blob()`).
     engine.register_fn("decode_png", decode_png);

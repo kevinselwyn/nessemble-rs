@@ -7,6 +7,7 @@ members = [
     "crates/nessemble-script",
     "crates/nessemble-i18n",
     "crates/nessemble-lsp",
+    "crates/nessemble-wasm",
     "crates/nessemble-cli",
     "xtask",
 ]

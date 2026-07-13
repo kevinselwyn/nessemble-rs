@@ -11,7 +11,14 @@ authors.workspace = true
 [dependencies]
 nessemble-media.workspace = true
 rhai = { version = "1", default-features = false, features = ["std"] }
-rhai-fs = { version = "0.1.5", default-features = false }
+rhai-fs = { version = "0.1.5", default-features = false, optional = true }
+
+[features]
+default = ["fs"]
+# Filesystem access for scripts (`open_file`, `File` I/O) via `rhai-fs`. On by
+# default; disabled for targets without a filesystem (e.g. `wasm32-unknown-unknown`),
+# where scripts that call the file API get a clear "function not found" error.
+fs = ["dep:rhai-fs"]
 
 [dev-dependencies]
 # Encodes small PNGs for the `decode_png` tests.
