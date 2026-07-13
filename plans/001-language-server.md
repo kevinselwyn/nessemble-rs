@@ -205,8 +205,10 @@ shippable to `main`.
   test; the `editor.md` docs page documents setup.)
 
 ### Phase 6 — Advanced (optional / later)
-- Folding ranges, rename, code actions (quick-fixes), open-buffer include overlay.
-  Scope TBD after Phase 5.
+- Folding ranges, rename, code actions (quick-fixes).
+- **Workspace-aware analysis** (project entry-point resolution + open-buffer
+  include overlay) — fixes cross-file "symbol not defined" false positives.
+  Broken out into its own plan: [002-workspace-analysis.md](002-workspace-analysis.md).
 
 ## 6. Editor integration (server + docs)
 
