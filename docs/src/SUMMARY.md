@@ -6,6 +6,7 @@
 - [Upgrading](upgrading.md)
 - [Usage](usage.md)
 - [Syntax](syntax.md)
+- [Editor support](editor.md)
 - [Extending](extending.md)
 - [Building](building.md)
 - [Translating](translating.md)

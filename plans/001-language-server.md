@@ -1,8 +1,9 @@
 # nessemble-rs: A Plan for a Language Server
 
-> Status: **Ready to implement.** All planning decisions are settled (see
-> [§9 Decisions](#9-decisions)); implementation proceeds phase by phase starting
-> at Phase 0.
+> Status: **Complete.** All phases (0–5) are implemented and merged; the server
+> ships behind the default-on `lsp` feature and is run with `nessemble lsp`.
+> Phase 6 (advanced) remains optional/future. All planning decisions are settled
+> (see [§9 Decisions](#9-decisions)).
 
 ---
 
@@ -192,12 +193,16 @@ shippable to `main`.
 > plus *range narrowing in the LSP* (reusing Phase-3's tooling lexer/text). Full
 > span threading remains a possible future refinement.
 
-### Phase 5 — Navigation, symbols & hover (deferred)
-- Track symbol **definition** (and ideally reference) positions; implement
+### Phase 5 — Navigation, symbols & hover — ✅ done
+- Track symbol **definition** (and reference) positions; implement
   `documentSymbol` (outline), `definition`, `references`, and `hover`
-  (symbol value/kind; opcode/addressing details; directive descriptions).
+  (symbol value/kind; opcode/addressing details; directive descriptions). ✅
+  Positions come from a positioned pass over the lossless tooling lexer
+  (`located_lexemes`), keeping the parity path untouched.
 - **Done when:** outline lists labels/constants/macros; go-to-definition jumps to
-  a label; hover shows opcode and symbol info.
+  a label; hover shows opcode and symbol info. ✅ (documentSymbol/definition/
+  references/hover unit tests + a hover round-trip in the lifecycle protocol
+  test; the `editor.md` docs page documents setup.)
 
 ### Phase 6 — Advanced (optional / later)
 - Folding ranges, rename, code actions (quick-fixes), open-buffer include overlay.
