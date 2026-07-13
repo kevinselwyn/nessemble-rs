@@ -21,12 +21,23 @@
 //! here: they depend on assembly-time values and are evaluated by the assembler.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nessemble_i18n::t;
 
 use crate::lexer::{Lexer, Tok, Token};
 use crate::Diag;
+
+/// A source overlay for tooling: given the resolved path of a file about to be
+/// spliced by `.include` / `.inestrn`, returns the in-memory text to use
+/// instead of reading from disk, or `None` to fall back to
+/// `std::fs::read_to_string`.
+///
+/// The language server builds one from its open (unsaved) buffers so a project
+/// is preprocessed as the editor currently sees it. The default, no-overlay
+/// path reads only from disk — exactly as the CLI does — so the assembler's
+/// behavior (and ROM parity) is unchanged.
+pub type FileOverlay<'a> = dyn Fn(&Path) -> Option<String> + 'a;
 
 /// Matches the reference `MAX_INCLUDE_DEPTH`.
 const MAX_INCLUDE_DEPTH: usize = 10;
@@ -47,12 +58,24 @@ pub struct Preprocessed {
 /// top-level file), so the assembler can resolve filename-based directives
 /// against the file that contains them.
 pub fn preprocess(source: &str, base_dir: PathBuf, top_name: &str) -> Result<Preprocessed, Diag> {
+    preprocess_with(source, base_dir, top_name, None)
+}
+
+/// Like [`preprocess`], but consulting `overlay` before disk for each included
+/// file (see [`FileOverlay`]). Passing `None` is identical to [`preprocess`].
+pub fn preprocess_with(
+    source: &str,
+    base_dir: PathBuf,
+    top_name: &str,
+    overlay: Option<&FileOverlay>,
+) -> Result<Preprocessed, Diag> {
     let mut pre = Pre {
         files: vec![top_name.to_string()],
         dirs: vec![base_dir],
         macros: HashMap::new(),
         out: Vec::new(),
         unique: 0,
+        overlay,
     };
     pre.process_file(source, 0, 0)?;
     Ok(Preprocessed {
@@ -62,7 +85,7 @@ pub fn preprocess(source: &str, base_dir: PathBuf, top_name: &str) -> Result<Pre
     })
 }
 
-struct Pre {
+struct Pre<'a> {
     files: Vec<String>,
     /// Directory each file resolves relative includes against, parallel to
     /// `files`. `dirs[0]` is the top-level `base_dir`.
@@ -70,9 +93,11 @@ struct Pre {
     macros: HashMap<String, Vec<Token>>,
     out: Vec<Token>,
     unique: u32,
+    /// Optional tooling overlay consulted before disk when splicing includes.
+    overlay: Option<&'a FileOverlay<'a>>,
 }
 
-impl Pre {
+impl Pre<'_> {
     fn diag(&self, file: usize, line: u32, message: impl Into<String>) -> Diag {
         Diag {
             file: self.files.get(file).cloned().unwrap_or_default(),
@@ -204,7 +229,14 @@ impl Pre {
         // resolved from *its* location rather than the top-level file's.
         let dir = self.dirs[file_id].clone();
         let path = dir.join(&name);
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        // Prefer an overlay entry (an unsaved editor buffer) when present; a
+        // buffer can even resolve a file that isn't on disk yet. Otherwise read
+        // from disk, as the CLI/assembler path always does.
+        let text = if let Some(text) = self.overlay.and_then(|f| f(&path)) {
+            text
+        } else if let Ok(text) = std::fs::read_to_string(&path) {
+            text
+        } else {
             return Err(self.diag(file_id, line, t!("could-not-include", file = name)));
         };
 
