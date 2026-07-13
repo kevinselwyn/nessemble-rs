@@ -21,6 +21,12 @@
 //!   `textDocument/references` (jump to / list a symbol's occurrences), and
 //!   `textDocument/hover` (opcode/addressing details, directive descriptions,
 //!   symbol values), all driven by the lossless tooling lexer over the buffer.
+//! - **Workspace-aware diagnostics** (Phase 7): when a workspace folder is open,
+//!   a file is analyzed in the context of the `.include` project it belongs to,
+//!   so cross-file symbols aren't flagged as undefined.
+//! - **Editing aids** (Phase 8): `textDocument/foldingRange` (macro/conditional
+//!   blocks and comment runs), `textDocument/rename` (a symbol across open
+//!   buffers), and `textDocument/codeAction` (numeric base conversions).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -31,19 +37,22 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, References,
-    Request as _, SemanticTokensFullRequest,
+    CodeActionRequest, Completion, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
+    GotoDefinition, HoverRequest, References, Rename, Request as _, SemanticTokensFullRequest,
 };
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, Location, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams,
-    Range, ReferenceParams, SemanticToken, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CompletionItem, CompletionItemKind, CompletionOptions,
+    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    FoldingRange, FoldingRangeKind, FoldingRangeParams, FoldingRangeProviderCapability,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
+    MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, ReferenceParams,
+    RenameParams, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 
 use nessemble_core::tooling::{self, LexKind};
@@ -364,6 +373,56 @@ impl Server {
             }),
             range: Some(token.range),
         })
+    }
+
+    /// Foldable regions in the document at `uri`: macro and conditional blocks,
+    /// and runs of consecutive line comments. `None` if `uri` is unknown.
+    fn folding_ranges(&self, uri: &Url) -> Option<Vec<FoldingRange>> {
+        Some(folding_ranges(&self.documents.get(uri)?.text))
+    }
+
+    /// Rename the symbol under `pos` in the document at `uri` to `new_name`,
+    /// across every open document (nessemble symbols share one global scope).
+    /// `None` if the cursor isn't on an identifier or `new_name` is not a legal
+    /// identifier.
+    fn rename(&self, uri: &Url, pos: Position, new_name: &str) -> Option<WorkspaceEdit> {
+        let name = word_at(&self.documents.get(uri)?.text, pos)?;
+        if !is_identifier(new_name) {
+            return None;
+        }
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for (doc_uri, doc) in &self.documents {
+            let edits: Vec<TextEdit> = located_lexemes(&doc.text)
+                .into_iter()
+                .filter(|t| t.kind == LexKind::Ident && t.text == name)
+                .map(|t| TextEdit {
+                    range: t.range,
+                    new_text: new_name.to_string(),
+                })
+                .collect();
+            if !edits.is_empty() {
+                changes.insert(doc_uri.clone(), edits);
+            }
+        }
+        (!changes.is_empty()).then(|| WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        })
+    }
+
+    /// Code actions offered for `range` in the document at `uri`: base
+    /// conversions when the cursor is on a numeric literal.
+    fn code_actions(&self, uri: &Url, range: Range) -> Vec<CodeActionOrCommand> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(token) = token_at(&doc.text, range.start) else {
+            return Vec::new();
+        };
+        if token.kind != LexKind::Number {
+            return Vec::new();
+        }
+        number_conversions(uri, token.text, token.range)
     }
 
     /// Number of documents currently open.
@@ -1060,6 +1119,174 @@ fn format_hex(value: i64) -> String {
     }
 }
 
+/// A block-directive folding tag: a macro body or a conditional block.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockTag {
+    Macro,
+    If,
+}
+
+/// Foldable regions: `.macrodef`…`.endm` and `.if*`…`.endif` blocks (nested via
+/// a stack), plus runs of two or more consecutive line comments.
+fn folding_ranges(text: &str) -> Vec<FoldingRange> {
+    let mut ranges = Vec::new();
+    let mut stack: Vec<(BlockTag, u32)> = Vec::new();
+    let mut comment_start: Option<u32> = None;
+    let lines: Vec<&str> = text.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        let i = i as u32;
+        let trimmed = line.trim_start();
+
+        // Comment-run folding: close the run at the first non-comment line.
+        if trimmed.starts_with(';') {
+            comment_start.get_or_insert(i);
+        } else if let Some(start) = comment_start.take() {
+            if i - 1 > start {
+                ranges.push(fold(start, i - 1, FoldingRangeKind::Comment));
+            }
+        }
+
+        match leading_directive(trimmed).as_deref() {
+            Some("macrodef") => stack.push((BlockTag::Macro, i)),
+            Some("if" | "ifdef" | "ifndef") => stack.push((BlockTag::If, i)),
+            Some("endm") => close_block(&mut stack, BlockTag::Macro, i, &mut ranges),
+            Some("endif") => close_block(&mut stack, BlockTag::If, i, &mut ranges),
+            _ => {}
+        }
+    }
+
+    // A comment run extending to the last line.
+    if let Some(start) = comment_start {
+        let last = lines.len().saturating_sub(1) as u32;
+        if last > start {
+            ranges.push(fold(start, last, FoldingRangeKind::Comment));
+        }
+    }
+    ranges
+}
+
+/// Close the nearest open block of `tag`, emitting its fold.
+fn close_block(
+    stack: &mut Vec<(BlockTag, u32)>,
+    tag: BlockTag,
+    end: u32,
+    out: &mut Vec<FoldingRange>,
+) {
+    if let Some(pos) = stack.iter().rposition(|(t, _)| *t == tag) {
+        let (_, start) = stack.remove(pos);
+        if end > start {
+            out.push(fold(start, end, FoldingRangeKind::Region));
+        }
+    }
+}
+
+fn fold(start_line: u32, end_line: u32, kind: FoldingRangeKind) -> FoldingRange {
+    FoldingRange {
+        start_line,
+        end_line,
+        kind: Some(kind),
+        ..Default::default()
+    }
+}
+
+/// The directive word on a line (lower-cased, without the leading `.`), e.g.
+/// `.ifdef FOO` → `Some("ifdef")`. `None` when the line isn't a directive.
+fn leading_directive(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix('.')?;
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!word.is_empty()).then(|| word.to_ascii_lowercase())
+}
+
+/// Whether `s` is a legal nessemble identifier (for validating a rename target).
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Base-conversion code actions for a numeric literal `text` at `range`: one
+/// per base other than the literal's current one.
+fn number_conversions(uri: &Url, text: &str, range: Range) -> Vec<CodeActionOrCommand> {
+    let Some(value) = parse_number(text) else {
+        return Vec::new();
+    };
+    if value < 0 {
+        return Vec::new();
+    }
+    let current = base_of(text);
+    [
+        (Base::Hex, "hexadecimal", format!("${value:X}")),
+        (Base::Dec, "decimal", value.to_string()),
+        (Base::Bin, "binary", format!("%{value:b}")),
+    ]
+    .into_iter()
+    .filter(|(base, _, _)| Some(*base) != current)
+    .map(|(_, label, formatted)| {
+        let mut changes = HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![TextEdit {
+                range,
+                new_text: formatted.clone(),
+            }],
+        );
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Convert to {label} ({formatted})"),
+            kind: Some(CodeActionKind::REFACTOR_REWRITE),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    })
+    .collect()
+}
+
+/// Numeric literal base.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Base {
+    Hex,
+    Dec,
+    Bin,
+}
+
+/// The base a numeric literal is written in, or `None` for octal (which isn't
+/// one of the offered targets, so all three conversions are shown).
+fn base_of(text: &str) -> Option<Base> {
+    if text.starts_with('$') {
+        Some(Base::Hex)
+    } else if text.starts_with('%') {
+        Some(Base::Bin)
+    } else if text.len() > 1 && text.starts_with('0') {
+        None // octal
+    } else {
+        Some(Base::Dec)
+    }
+}
+
+/// Parse a nessemble numeric literal (`$hex`, `%bin`, `0octal`, or decimal).
+fn parse_number(text: &str) -> Option<i64> {
+    if let Some(hex) = text.strip_prefix('$') {
+        i64::from_str_radix(hex, 16).ok()
+    } else if let Some(bin) = text.strip_prefix('%') {
+        i64::from_str_radix(bin, 2).ok()
+    } else if text.len() > 1
+        && text.starts_with('0')
+        && text.bytes().all(|b| (b'0'..=b'7').contains(&b))
+    {
+        i64::from_str_radix(text, 8).ok()
+    } else {
+        text.parse::<i64>().ok()
+    }
+}
+
 /// Completion items for every documented instruction mnemonic (lower-cased to
 /// match the usual nessemble style), detailing its addressing modes.
 fn mnemonic_items() -> Vec<CompletionItem> {
@@ -1160,6 +1387,9 @@ fn server_capabilities() -> ServerCapabilities {
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        rename_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         ..Default::default()
     }
 }
@@ -1285,6 +1515,28 @@ fn main_loop(connection: &Connection, workspace_roots: Vec<PathBuf>) -> LspResul
                                 let tdp = p.text_document_position_params;
                                 server.hover(&tdp.text_document.uri, tdp.position)
                             });
+                        Response::new_ok(req.id, result)
+                    }
+                    FoldingRangeRequest::METHOD => {
+                        let result = serde_json::from_value::<FoldingRangeParams>(req.params)
+                            .ok()
+                            .and_then(|p| server.folding_ranges(&p.text_document.uri));
+                        Response::new_ok(req.id, result)
+                    }
+                    Rename::METHOD => {
+                        let result = serde_json::from_value::<RenameParams>(req.params)
+                            .ok()
+                            .and_then(|p| {
+                                let tdp = p.text_document_position;
+                                server.rename(&tdp.text_document.uri, tdp.position, &p.new_name)
+                            });
+                        Response::new_ok(req.id, result)
+                    }
+                    CodeActionRequest::METHOD => {
+                        let result = serde_json::from_value::<CodeActionParams>(req.params)
+                            .ok()
+                            .map(|p| server.code_actions(&p.text_document.uri, p.range))
+                            .unwrap_or_default();
                         Response::new_ok(req.id, result)
                     }
                     other => Response::new_err(
@@ -1814,5 +2066,101 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    // ---- Phase 8: folding, rename, code actions ---------------------------
+
+    #[test]
+    fn folding_ranges_cover_blocks_and_comment_runs() {
+        let text = concat!(
+            "; a comment\n",        // 0
+            "; still commenting\n", // 1
+            ".macrodef greet\n",    // 2
+            "  nop\n",              // 3
+            ".endm\n",              // 4
+            ".ifdef FOO\n",         // 5
+            "  nop\n",              // 6
+            ".endif\n",             // 7
+        );
+        let ranges = folding_ranges(text);
+        // Comment run 0..1.
+        assert!(ranges.iter().any(|r| r.start_line == 0
+            && r.end_line == 1
+            && r.kind == Some(FoldingRangeKind::Comment)));
+        // Macro block 2..4.
+        assert!(ranges.iter().any(|r| r.start_line == 2
+            && r.end_line == 4
+            && r.kind == Some(FoldingRangeKind::Region)));
+        // Conditional block 5..7.
+        assert!(ranges.iter().any(|r| r.start_line == 5 && r.end_line == 7));
+    }
+
+    #[test]
+    fn rename_edits_every_occurrence_in_open_buffers() {
+        let mut server = Server::default();
+        let text = "start:\n  jmp start\n  jmp start\n";
+        open(&mut server, "file:///r.asm", text);
+        let uri = Url::parse("file:///r.asm").unwrap();
+        // Cursor on the label definition; rename to `begin`.
+        let edit = server
+            .rename(&uri, Position::new(0, 0), "begin")
+            .expect("rename produces an edit");
+        let edits = &edit.changes.unwrap()[&uri];
+        assert_eq!(edits.len(), 3); // the definition + two uses
+        assert!(edits.iter().all(|e| e.new_text == "begin"));
+    }
+
+    #[test]
+    fn rename_rejects_an_invalid_identifier() {
+        let mut server = Server::default();
+        open(&mut server, "file:///ri.asm", "start:\n  jmp start\n");
+        let uri = Url::parse("file:///ri.asm").unwrap();
+        assert!(server.rename(&uri, Position::new(0, 0), "1bad").is_none());
+        assert!(server
+            .rename(&uri, Position::new(0, 0), "has space")
+            .is_none());
+    }
+
+    #[test]
+    fn code_action_converts_a_number_base() {
+        let mut server = Server::default();
+        // `$10` on the operand of an lda.
+        open(&mut server, "file:///n.asm", "  lda #$10\n");
+        let uri = Url::parse("file:///n.asm").unwrap();
+        // Cursor inside `$10` (the literal spans cols 7..10).
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(0, 8), Position::new(0, 8)));
+        let titles: Vec<String> = actions
+            .iter()
+            .filter_map(|a| match a {
+                CodeActionOrCommand::CodeAction(c) => Some(c.title.clone()),
+                CodeActionOrCommand::Command(_) => None,
+            })
+            .collect();
+        // $10 == 16 decimal == %10000 binary; hex is the current base, so it's
+        // not offered.
+        assert!(
+            titles.iter().any(|t| t.contains("decimal (16)")),
+            "{titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("binary (%10000)")),
+            "{titles:?}"
+        );
+        assert!(
+            !titles.iter().any(|t| t.contains("hexadecimal")),
+            "{titles:?}"
+        );
+    }
+
+    #[test]
+    fn code_action_is_empty_off_a_number() {
+        let mut server = Server::default();
+        open(&mut server, "file:///nn.asm", "  lda #$10\n");
+        let uri = Url::parse("file:///nn.asm").unwrap();
+        // Cursor on the mnemonic, not a number.
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(0, 2), Position::new(0, 2)));
+        assert!(actions.is_empty());
     }
 }

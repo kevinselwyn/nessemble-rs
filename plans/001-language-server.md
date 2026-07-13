@@ -1,11 +1,10 @@
 # nessemble-rs: A Plan for a Language Server
 
-> Status: **Phases 0–7 complete** (0–6 merged; 7 in review); the server ships
-> behind the default-on `lsp` feature and is run with `nessemble lsp`. Phase 7
-> adds **workspace-aware analysis** (auto include-graph discovery + the Phase-6
-> overlay), fixing cross-file "symbol not defined" false positives. Only the
-> optional **Phase 8** (folding/rename/code actions) remains; once it's done (or
-> declared out of scope), the `-dev` suffix drops to `2.5.0` for the release.
+> Status: **Complete — all phases (0–8) done.** The server ships behind the
+> default-on `lsp` feature and is run with `nessemble lsp`, with diagnostics,
+> completion, formatting, highlighting, navigation, hover, workspace-aware
+> project analysis, folding, rename, and code actions. The version is bumped to
+> **`2.5.0`** to cut the single release containing all the language-server work.
 > All planning decisions are settled (see [§9 Decisions](#9-decisions)).
 
 ---
@@ -104,10 +103,10 @@ with precise spans and navigation deferred. Each phase is independently
 shippable to `main`.
 
 > **Versioning across phases.** To avoid cutting a release per phase, the
-> workspace version stays at the pre-release **`2.5.0-dev`** while phases land;
-> the release workflow skips pre-release versions. Only once **all** phases are
-> complete does the final phase drop the `-dev` suffix to **`2.5.0`**, cutting a
-> single release containing all the language-server work.
+> workspace version stayed at the pre-release **`2.5.0-dev`** while phases landed;
+> the release workflow skips pre-release versions. With all phases now complete,
+> the final phase (Phase 8) drops the `-dev` suffix to **`2.5.0`**, cutting a
+> single release containing all the language-server work. ✅
 
 ### Phase 0 — Scaffold & transport — ✅ done
 - New `nessemble-lsp` crate; `nessemble lsp` subcommand (stdio, `lsp-server`,
@@ -264,8 +263,21 @@ undefined. The fix analyzes each open file *in the context of its project*.
   an end-to-end stdio check through a real `workspaceFolders` handshake; core
   `overlay`/paths tests; **parity 122/122**.)
 
-### Phase 8 — Advanced (optional / later)
-- Folding ranges, rename, code actions (quick-fixes). Scope TBD.
+### Phase 8 — Editing aids (folding, rename, code actions) — ✅ done
+- **Folding ranges** (`textDocument/foldingRange`): `.macrodef`…`.endm` and
+  `.if*`…`.endif` blocks (nested via a stack) plus runs of consecutive line
+  comments. ✅
+- **Rename** (`textDocument/rename`): rename the symbol under the cursor across
+  every **open** buffer (nessemble's symbol scope is global); the new name is
+  validated as an identifier. Occurrences in unopened project files are left
+  untouched — a documented limitation, safer than editing files the user can't
+  see. ✅
+- **Code actions** (`textDocument/codeAction`): numeric-base conversions
+  (hex/decimal/binary) for the literal under the cursor. ✅
+- **Done when:** blocks and comment runs fold; renaming a label updates its
+  definition and uses; a code action rewrites a number's base. ✅ (five LSP
+  unit tests + an end-to-end stdio check of all three requests; **parity
+  122/122**.)
 
 ## 6. Editor integration (server + docs)
 

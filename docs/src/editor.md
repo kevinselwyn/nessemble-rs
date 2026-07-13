@@ -40,6 +40,12 @@ Once connected, the server provides:
   macros; go-to-definition and find-all-references for symbols.
 - **Hover** — opcode and addressing-mode details for an instruction, the
   description of a directive, and the resolved value of a constant or label.
+- **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)
+  blocks, and runs of consecutive comments, can be collapsed.
+- **Rename** — renaming a symbol updates its definition and every use across the
+  open buffers.
+- **Code actions** — convert a numeric literal between hexadecimal, decimal, and
+  binary.
 
 ## Editor setup
 
