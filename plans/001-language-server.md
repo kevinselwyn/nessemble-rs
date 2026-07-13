@@ -1,10 +1,11 @@
 # nessemble-rs: A Plan for a Language Server
 
-> Status: **Phases 0–5 complete** (implemented and merged); the server ships
-> behind the default-on `lsp` feature and is run with `nessemble lsp`.
-> **Phases 6–7 are planned** — workspace-aware analysis, to fix cross-file
-> "symbol not defined" false positives. Phase 8 (advanced) remains
-> optional/future. All planning decisions are settled (see
+> Status: **Phases 0–6 complete** (implemented and merged); the server ships
+> behind the default-on `lsp` feature and is run with `nessemble lsp`, and the
+> core now has an opt-in file-content overlay (Phase 6). **Phase 7 is planned** —
+> workspace-aware analysis wiring the overlay + include-graph discovery into the
+> server, to fix cross-file "symbol not defined" false positives. Phase 8
+> (advanced) remains optional/future. All planning decisions are settled (see
 > [§9 Decisions](#9-decisions)).
 
 ---
@@ -207,22 +208,28 @@ shippable to `main`.
   references/hover unit tests + a hover round-trip in the lifecycle protocol
   test; the `editor.md` docs page documents setup.)
 
-### Phase 6 — File-content overlay (core seam) — *planned*
+### Phase 6 — File-content overlay (core seam) — ✅ done
 
 Foundational for Phase 7; no LSP behavior change on its own.
 
-- **Problem it unblocks.** `preprocess::do_include` reads each `.include`d file
+- **Problem it unblocks.** `preprocess::do_include` read each `.include`d file
   straight from disk (`std::fs::read_to_string`). To analyze the *project* while
   honoring the editor's unsaved edits, the preprocessor must be able to read an
   open buffer's current text instead of the on-disk copy.
-- Add an **opt-in file-content provider** — an overlay `map<canonical path →
-  text>` consulted before disk; on a miss it falls back to `read_to_string`
-  exactly as today. Threaded through `preprocess` → `assemble_impl` →
-  `diagnose_source_as` as a new optional argument.
-- The CLI passes **no** overlay, so its path is byte-for-byte unchanged.
+- Added an **opt-in file-content provider**: `pub type FileOverlay =
+  dyn Fn(&Path) -> Option<String>` — consulted before disk in `do_include`; on
+  `None` it falls back to `read_to_string` exactly as today (a closure, so the
+  caller owns path-matching/normalization). ✅ Threaded via
+  `preprocess::preprocess_with` and the public
+  `diagnose_source_with_overlay(path, source, options, overlay)`; the existing
+  `preprocess` / `diagnose_source_as` delegate with `None`.
+- The `assemble` / `assemble_file` (CLI) path is **untouched** — it never builds
+  an overlay — so it stays byte-for-byte identical.
 - **Done when:** an overlay entry substitutes buffer text for an included file
-  during preprocessing; the default (no-overlay) path is unchanged; unit tests
-  cover overlay hit/miss; **parity 122/122 stays green.**
+  during preprocessing (even one absent from disk), and takes precedence over
+  disk; the default (no-overlay) path is unchanged. ✅ (core unit tests
+  `overlay_supplies_an_include_absent_from_disk` and
+  `overlay_takes_precedence_over_the_on_disk_file`; **parity 122/122**.)
 
 ### Phase 7 — Workspace-aware analysis (project diagnostics) — *planned*
 

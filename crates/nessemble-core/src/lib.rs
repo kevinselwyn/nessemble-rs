@@ -19,6 +19,7 @@ mod preprocess;
 pub mod tooling;
 
 pub use assemble::{CoverageReport, CustomResolver, Diag, ListSymbol};
+pub use preprocess::FileOverlay;
 
 /// The reference implementation version this crate targets for output parity.
 pub const REFERENCE_VERSION: &str = "1.1.1";
@@ -231,13 +232,36 @@ pub struct Diagnostics {
 /// is clean the assembler runs in collect mode to gather every error/warning.
 #[must_use]
 pub fn diagnose_source_as(path: &Path, source: &str, options: &Options) -> Diagnostics {
+    diagnose_impl(path, source, options, None)
+}
+
+/// Like [`diagnose_source_as`], but resolving `.include` / `.inestrn` targets
+/// through `overlay` (an editor's unsaved buffers) before disk. This lets the
+/// language server diagnose a file in the context of its whole project as the
+/// editor currently sees it. See [`FileOverlay`].
+#[must_use]
+pub fn diagnose_source_with_overlay(
+    path: &Path,
+    source: &str,
+    options: &Options,
+    overlay: &FileOverlay,
+) -> Diagnostics {
+    diagnose_impl(path, source, options, Some(overlay))
+}
+
+fn diagnose_impl(
+    path: &Path,
+    source: &str,
+    options: &Options,
+    overlay: Option<&FileOverlay>,
+) -> Diagnostics {
     let base = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let top_name = display_name(path);
 
-    let pre = match preprocess::preprocess(source, base, &top_name) {
+    let pre = match preprocess::preprocess_with(source, base, &top_name, overlay) {
         Ok(pre) => pre,
         Err(diag) => {
             return Diagnostics {
@@ -395,6 +419,65 @@ mod tests {
         assert!(d.errors.is_empty(), "errors: {:?}", d.errors);
         let names: Vec<&str> = d.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"start") && names.contains(&"count"));
+    }
+
+    #[test]
+    fn overlay_supplies_an_include_absent_from_disk() {
+        // main.asm `.include`s a file that is *not* on disk; the overlay
+        // provides it, so the symbol it defines resolves and there are no errors.
+        let dir = std::env::temp_dir().join(format!(
+            "nessemble-overlay-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("main.asm");
+        let source = ".include \"child.asm\"\n  lda #thing\n";
+        let overlay = |p: &Path| p.ends_with("child.asm").then(|| "thing = 5\n".to_string());
+
+        let with = diagnose_source_with_overlay(&main, source, &Options::default(), &overlay);
+        assert!(with.errors.is_empty(), "errors: {:?}", with.errors);
+        assert!(with.symbols.iter().any(|s| s.name == "thing"));
+
+        // Without the overlay the include can't be resolved (nothing on disk).
+        let without = diagnose_source_as(&main, source, &Options::default());
+        assert!(
+            !without.errors.is_empty(),
+            "expected a could-not-include error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overlay_takes_precedence_over_the_on_disk_file() {
+        // The on-disk child errors (unknown opcode); the overlay's version is
+        // clean. The overlay must win.
+        let dir = std::env::temp_dir().join(format!(
+            "nessemble-overlay-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("main.asm");
+        std::fs::write(dir.join("child.asm"), b"  notareal\n").unwrap();
+        let source = ".include \"child.asm\"\n  lda #thing\n";
+        let overlay = |p: &Path| p.ends_with("child.asm").then(|| "thing = 5\n".to_string());
+
+        let with = diagnose_source_with_overlay(&main, source, &Options::default(), &overlay);
+        assert!(
+            with.errors.is_empty(),
+            "overlay should win: {:?}",
+            with.errors
+        );
+
+        // The on-disk version (no overlay) surfaces the error.
+        let without = diagnose_source_as(&main, source, &Options::default());
+        assert!(!without.errors.is_empty(), "disk child should error");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
