@@ -232,7 +232,7 @@ pub struct Diagnostics {
 /// is clean the assembler runs in collect mode to gather every error/warning.
 #[must_use]
 pub fn diagnose_source_as(path: &Path, source: &str, options: &Options) -> Diagnostics {
-    diagnose_impl(path, source, options, None)
+    diagnose_impl(path, source, options, None, default_custom_resolver())
 }
 
 /// Like [`diagnose_source_as`], but resolving `.include` / `.inestrn` targets
@@ -246,7 +246,28 @@ pub fn diagnose_source_with_overlay(
     options: &Options,
     overlay: &FileOverlay,
 ) -> Diagnostics {
-    diagnose_impl(path, source, options, Some(overlay))
+    diagnose_impl(
+        path,
+        source,
+        options,
+        Some(overlay),
+        default_custom_resolver(),
+    )
+}
+
+/// Like [`diagnose_source_with_overlay`], but with a caller-supplied resolver
+/// for custom pseudo-ops (`.foo`). Tooling passes [`lenient_custom_resolver`] so
+/// project-defined pseudo-instructions aren't reported as unknown. `overlay` may
+/// be `None` for a plain (disk-only) scan.
+#[must_use]
+pub fn diagnose_source_with(
+    path: &Path,
+    source: &str,
+    options: &Options,
+    overlay: Option<&FileOverlay>,
+    custom: CustomResolver,
+) -> Diagnostics {
+    diagnose_impl(path, source, options, overlay, custom)
 }
 
 fn diagnose_impl(
@@ -254,6 +275,7 @@ fn diagnose_impl(
     source: &str,
     options: &Options,
     overlay: Option<&FileOverlay>,
+    custom: CustomResolver,
 ) -> Diagnostics {
     let base = path
         .parent()
@@ -297,7 +319,7 @@ fn diagnose_impl(
         options.empty_byte,
         pre.files,
         pre.dirs,
-        default_custom_resolver(),
+        custom,
     );
     let (errors, warnings) = asm.diagnostics(&lines);
     Diagnostics {
@@ -335,6 +357,20 @@ pub fn diagnose_project(
     source: &str,
     options: &Options,
     overlay: &FileOverlay,
+) -> ProjectDiagnostics {
+    diagnose_project_with(path, source, options, overlay, default_custom_resolver())
+}
+
+/// Like [`diagnose_project`], but with a caller-supplied resolver for custom
+/// pseudo-ops (`.foo`) — tooling passes [`lenient_custom_resolver`] so
+/// project-defined pseudo-instructions aren't flagged as unknown.
+#[must_use]
+pub fn diagnose_project_with(
+    path: &Path,
+    source: &str,
+    options: &Options,
+    overlay: &FileOverlay,
+    custom: CustomResolver,
 ) -> ProjectDiagnostics {
     let base = path
         .parent()
@@ -384,7 +420,7 @@ pub fn diagnose_project(
         options.empty_byte,
         pre.files,
         pre.dirs,
-        default_custom_resolver(),
+        custom,
     );
     let (errors, warnings) = asm.diagnostics(&lines);
     ProjectDiagnostics {
@@ -411,6 +447,30 @@ fn default_custom_resolver() -> CustomResolver {
             "unknown-custom",
             pseudo = format!(".{name}")
         ))
+    })
+}
+
+/// A resolver for tooling that recognizes a fixed set of custom pseudo-op names
+/// (e.g. those declared in a project's `--pseudo` mapping) without running their
+/// scripts: a known `.foo` resolves to **no bytes** (so it isn't reported as an
+/// unknown directive), while an unknown one still errors as usual.
+///
+/// The scripts are deliberately *not* executed — a language server must not run
+/// arbitrary code from a workspace just to analyze a buffer — so the bytes a
+/// custom pseudo-op would emit are not modeled, and addresses after it may be
+/// approximate.
+#[must_use]
+#[allow(clippy::implicit_hasher)] // callers use the standard HashSet.
+pub fn lenient_custom_resolver(known: std::collections::HashSet<String>) -> CustomResolver {
+    Box::new(move |name, _ints, _texts, _base| {
+        if known.contains(name) {
+            Ok(Vec::new())
+        } else {
+            Err(nessemble_i18n::t!(
+                "unknown-custom",
+                pseudo = format!(".{name}")
+            ))
+        }
     })
 }
 

@@ -283,6 +283,16 @@ undefined. The fix analyzes each open file *in the context of its project*.
   unit tests + an end-to-end stdio check of all three requests; **parity
   122/122**.)
 
+### Post-release follow-ups
+- **Custom pseudo-op awareness (2.5.1).** The server discovers `--pseudo`-style
+  mapping files (`.name = script`) in the workspace: declared custom
+  pseudo-instructions are no longer flagged as unknown directives, and
+  cmd/ctrl-click on one opens its script. Scripts are **not** executed during
+  analysis (a language server must not run arbitrary workspace code), so a known
+  `.foo` resolves to no bytes via `lenient_custom_resolver`. Core added
+  `diagnose_source_with` / `diagnose_project_with` (resolver-injecting variants)
+  and `lenient_custom_resolver`.
+
 ## 6. Editor integration (server + docs)
 
 Deliverable is the **server plus setup documentation**, not a bespoke extension:

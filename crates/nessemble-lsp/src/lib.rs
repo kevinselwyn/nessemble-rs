@@ -57,7 +57,8 @@ use lsp_types::{
 
 use nessemble_core::tooling::{self, LexKind};
 use nessemble_core::{
-    diagnose_project, diagnose_source_as, Diag, ListSymbol, Options, ProjectDiagnostics,
+    diagnose_project_with, diagnose_source_with, lenient_custom_resolver, Diag, ListSymbol,
+    Options, ProjectDiagnostics,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
@@ -204,8 +205,12 @@ impl Server {
         };
         let changed_path = normalize(&uri_to_path(changed));
 
+        // Custom pseudo-ops declared in the workspace's `--pseudo` mapping files,
+        // so they aren't reported as unknown directives.
+        let known_custom: HashSet<String> = self.custom_scripts().into_keys().collect();
+
         if self.workspace_roots.is_empty() {
-            return single_file(changed, &text);
+            return single_file(changed, &text, &known_custom);
         }
 
         // An overlay + reader backed by the open buffers, falling back to disk.
@@ -224,7 +229,7 @@ impl Server {
         let graph = build_include_graph(candidates, &read);
         let roots = graph.entry_roots_for(&changed_path);
         if roots.is_empty() {
-            return single_file(changed, &text);
+            return single_file(changed, &text, &known_custom);
         }
 
         // Assemble each entry root and normalize its file table once.
@@ -232,11 +237,12 @@ impl Server {
             .iter()
             .map(|root| {
                 let root_text = read(root).unwrap_or_default();
-                Run::from(diagnose_project(
+                Run::from(diagnose_project_with(
                     root,
                     &root_text,
                     &Options::default(),
                     &overlay,
+                    lenient_custom_resolver(known_custom.clone()),
                 ))
             })
             .collect();
@@ -273,6 +279,38 @@ impl Server {
             per_file,
             changed_symbols: symbols,
         }
+    }
+
+    /// Custom pseudo-op scripts declared in the workspace's `--pseudo`-style
+    /// mapping files: directive name (without the dot) → resolved script path.
+    ///
+    /// A mapping file is any `*.txt` whose `.name = path` entries point at files
+    /// that exist relative to the mapping file's own directory — matching how
+    /// the CLI's `--pseudo` mapping resolves. Both the workspace (scanned
+    /// recursively) and each open document's own directory are searched, so this
+    /// works with or without a workspace folder.
+    fn custom_scripts(&self) -> HashMap<String, PathBuf> {
+        let mut files = scan_mapping_files(&self.workspace_roots);
+        for uri in self.documents.keys() {
+            if let Some(dir) = uri_to_path(uri).parent() {
+                list_txt_files(dir, &mut files);
+            }
+        }
+
+        let mut map = HashMap::new();
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let base = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+            for (name, rel) in parse_mapping(&text) {
+                let script = base.join(&rel);
+                if script.is_file() {
+                    map.entry(name).or_insert(script);
+                }
+            }
+        }
+        map
     }
 
     /// Completion candidates for the document at `uri`: instruction mnemonics
@@ -323,14 +361,27 @@ impl Server {
         )
     }
 
-    /// Resolve go-to-definition for the symbol under `pos` in the document at
-    /// `uri`: the location of its defining label/constant/macro. Looks in the
-    /// current buffer first, then — when a workspace is open — across the files
-    /// of the `.include` project the buffer belongs to, so cmd/ctrl-click reaches
-    /// a symbol defined in a sibling or parent file.
+    /// Resolve go-to-definition for the token under `pos` in the document at
+    /// `uri`. A custom pseudo-op (`.foo`) jumps to its script file; a symbol
+    /// jumps to its defining label/constant/macro — found in the current buffer
+    /// first, then (with a workspace open) across the `.include` project, so
+    /// cmd/ctrl-click reaches a definition in a sibling or parent file.
     fn goto_definition(&self, uri: &Url, pos: Position) -> Option<Location> {
-        let name = word_at(&self.documents.get(uri)?.text, pos)?;
-        self.definition_location(uri, &name)
+        let token = token_at(&self.documents.get(uri)?.text, pos)?;
+        let name = token.text.to_string();
+        match token.kind {
+            LexKind::Directive => {
+                // A custom pseudo-op resolves to the script that implements it.
+                let script = self.custom_scripts().remove(name.trim_start_matches('.'))?;
+                let url = Url::from_file_path(&script).ok()?;
+                Some(Location::new(
+                    url,
+                    Range::new(Position::new(0, 0), Position::new(0, 0)),
+                ))
+            }
+            LexKind::Ident => self.definition_location(uri, &name),
+            _ => None,
+        }
     }
 
     /// The definition of `name` for the document at `uri`: the local definition
@@ -499,7 +550,7 @@ struct Analysis {
 /// Scan `text` (the buffer at `uri`) for *all* errors and warnings — with
 /// recovery, so several problems surface at once — and translate them into LSP
 /// diagnostics with token-accurate ranges.
-fn analyze(uri: &Url, text: &str) -> Analysis {
+fn analyze(uri: &Url, text: &str, known_custom: &HashSet<String>) -> Analysis {
     let path = uri_to_path(uri);
     let top_name = path
         .file_name()
@@ -507,7 +558,13 @@ fn analyze(uri: &Url, text: &str) -> Analysis {
         .unwrap_or("stdin")
         .to_string();
 
-    let found = diagnose_source_as(&path, text, &Options::default());
+    let found = diagnose_source_with(
+        &path,
+        text,
+        &Options::default(),
+        None,
+        lenient_custom_resolver(known_custom.clone()),
+    );
     let mut diagnostics = Vec::with_capacity(found.errors.len() + found.warnings.len());
     for d in &found.errors {
         diagnostics.push(to_diagnostic(d, DiagnosticSeverity::ERROR, &top_name, text));
@@ -536,8 +593,8 @@ struct DiagResults {
 
 /// Single-file fallback: analyze just the changed buffer (no project context),
 /// publishing only for that file.
-fn single_file(changed: &Url, text: &str) -> DiagResults {
-    let analysis = analyze(changed, text);
+fn single_file(changed: &Url, text: &str, known_custom: &HashSet<String>) -> DiagResults {
+    let analysis = analyze(changed, text, known_custom);
     let mut per_file = HashMap::new();
     per_file.insert(changed.clone(), analysis.diagnostics);
     DiagResults {
@@ -672,12 +729,37 @@ const MAX_SCAN_FILES: usize = 4000;
 fn scan_source_files(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
-        walk_sources(root, &mut out);
+        walk_files(root, &mut out, &is_source_file);
     }
     out
 }
 
-fn walk_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Enumerate `*.txt` mapping-file candidates under the workspace roots.
+fn scan_mapping_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in roots {
+        walk_files(root, &mut out, &is_mapping_file);
+    }
+    out
+}
+
+/// Append the `*.txt` files directly in `dir` (non-recursively) to `out`.
+fn list_txt_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && is_mapping_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
+/// Recursively collect files under `dir` matching `accept`, skipping hidden
+/// directories (including `.git`) and common build output, bounded by
+/// [`MAX_SCAN_FILES`].
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, accept: &dyn Fn(&Path) -> bool) {
     if out.len() >= MAX_SCAN_FILES {
         return;
     }
@@ -695,8 +777,8 @@ fn walk_sources(dir: &Path, out: &mut Vec<PathBuf>) {
             if name == "target" || name == "node_modules" {
                 continue;
             }
-            walk_sources(&path, out);
-        } else if is_source_file(&path) {
+            walk_files(&path, out, accept);
+        } else if accept(&path) {
             out.push(path);
         }
         if out.len() >= MAX_SCAN_FILES {
@@ -707,6 +789,24 @@ fn walk_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn is_source_file(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("asm" | "s"))
+}
+
+fn is_mapping_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("txt")
+}
+
+/// Parse a `--pseudo` mapping file's `.name = path` lines into `(name, path)`
+/// pairs (name without the leading dot). Mirrors the CLI's mapping reader.
+fn parse_mapping(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let name = key.trim().trim_start_matches('.');
+            let value = value.trim();
+            (is_identifier(name) && !value.is_empty())
+                .then(|| (name.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 /// A file's `.include` graph over normalized paths.
@@ -1640,7 +1740,7 @@ mod tests {
     #[test]
     fn analyze_flags_an_unknown_opcode() {
         let uri = Url::parse("file:///bad.asm").unwrap();
-        let diags = analyze(&uri, "  notareal\n").diagnostics;
+        let diags = analyze(&uri, "  notareal\n", &HashSet::new()).diagnostics;
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(diags[0].range.start.line, 0);
@@ -1651,7 +1751,7 @@ mod tests {
     fn analyze_reports_the_correct_line() {
         let uri = Url::parse("file:///multi.asm").unwrap();
         // Two valid lines, then an unknown opcode on line 3 (0-based line 2).
-        let diags = analyze(&uri, "  lda #$00\n  nop\n  notareal\n").diagnostics;
+        let diags = analyze(&uri, "  lda #$00\n  nop\n  notareal\n", &HashSet::new()).diagnostics;
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].range.start.line, 2);
     }
@@ -1659,7 +1759,7 @@ mod tests {
     #[test]
     fn analyze_collects_multiple_errors() {
         let uri = Url::parse("file:///m.asm").unwrap();
-        let diags = analyze(&uri, "  notareal\n  alsobad\n").diagnostics;
+        let diags = analyze(&uri, "  notareal\n  alsobad\n", &HashSet::new()).diagnostics;
         assert_eq!(diags.len(), 2);
         assert!(diags
             .iter()
@@ -1671,7 +1771,7 @@ mod tests {
         let uri = Url::parse("file:///r.asm").unwrap();
         // `foo` is undefined; the range should cover exactly `foo` (cols 6..9),
         // not the whole line.
-        let diags = analyze(&uri, "  lda foo\n").diagnostics;
+        let diags = analyze(&uri, "  lda foo\n", &HashSet::new()).diagnostics;
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].range.start.character, 6);
         assert_eq!(diags[0].range.end.character, 9);
@@ -1680,7 +1780,9 @@ mod tests {
     #[test]
     fn analyze_is_clean_for_valid_source() {
         let uri = Url::parse("file:///ok.asm").unwrap();
-        assert!(analyze(&uri, "  lda #$00\n  nop\n").diagnostics.is_empty());
+        assert!(analyze(&uri, "  lda #$00\n  nop\n", &HashSet::new())
+            .diagnostics
+            .is_empty());
     }
 
     #[test]
@@ -2240,5 +2342,57 @@ mod tests {
         let actions =
             server.code_actions(&uri, Range::new(Position::new(0, 2), Position::new(0, 2)));
         assert!(actions.is_empty());
+    }
+
+    // ---- custom pseudo-op awareness ---------------------------------------
+
+    #[test]
+    fn custom_pseudo_ops_are_not_flagged_and_resolve_to_scripts() {
+        // A `--pseudo` mapping declares `.double`; the directive must not be
+        // flagged, and cmd-click on it jumps to the script.
+        let w = workspace("custom");
+        write(&w, "pseudo.txt", ".double = double.rhai\n");
+        let script = w.join("double.rhai");
+        write(
+            &w,
+            "double.rhai",
+            "fn custom(ints, texts) { [ints[0] * 2] }\n",
+        );
+        let main = w.join("main.asm");
+        let text = "  .double 5\n";
+        write(&w, "main.asm", text);
+
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &main, text);
+        let d = diags_for(&pubs, &main).expect("main.asm published");
+        assert!(
+            d.is_empty(),
+            "custom pseudo-op should not be flagged: {d:?}"
+        );
+
+        // cmd-click on `.double` (cols 2..9) opens the script.
+        let main_uri = Url::from_file_path(&main).unwrap();
+        let loc = server
+            .goto_definition(&main_uri, Position::new(0, 4))
+            .expect("custom pseudo-op resolves to its script");
+        assert_eq!(loc.uri, Url::from_file_path(&script).unwrap());
+
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn unknown_custom_pseudo_op_is_still_flagged() {
+        // With no mapping declaring `.double`, it remains an unknown directive.
+        let w = workspace("nocustom");
+        let main = w.join("main.asm");
+        let text = "  .double 5\n";
+        write(&w, "main.asm", text);
+
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &main, text);
+        let d = diags_for(&pubs, &main).expect("main.asm published");
+        assert!(!d.is_empty(), "unknown custom pseudo-op should be flagged");
+
+        let _ = std::fs::remove_dir_all(&w);
     }
 }
