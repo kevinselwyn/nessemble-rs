@@ -228,9 +228,10 @@ Replace the recording with a live, interactive demo: edit → assemble → play.
 - **Bundled-script duplication.** The built-in scripts live in the CLI crate;
   decide whether the wasm crate shares them (move to a common location) or keeps a
   copy, to avoid drift.
-- **Versioning.** The wasm build tracks the workspace version. Phases can ride a
-  pre-release `-dev` suffix (as the LSP work did) and flip once complete, or ship
-  incrementally — decided at implementation time.
+- **Versioning.** The wasm build tracks the workspace version. **Decided:** the
+  phases ride the pre-release **`2.6.0-dev`** suffix (as the LSP work did) so the
+  release workflow's pre-release guard suppresses a release while they land; the
+  final phase drops the `-dev` suffix to **`2.6.0`** to cut the release.
 
 ## 8. Non-goals
 
