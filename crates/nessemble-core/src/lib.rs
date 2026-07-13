@@ -307,6 +307,95 @@ fn diagnose_impl(
     }
 }
 
+/// A project-wide diagnostic scan for tooling: like [`diagnose_source_with_overlay`],
+/// but also returning the flattened file table so callers can map each
+/// diagnostic (which names its file) back to a resolved path — and thus to the
+/// right editor buffer. The language server uses this to assemble a project from
+/// its entry file and distribute diagnostics across the open documents.
+pub struct ProjectDiagnostics {
+    /// All errors found (deduplicated), in source order.
+    pub errors: Vec<Diag>,
+    /// All warnings found (deduplicated).
+    pub warnings: Vec<Diag>,
+    /// Symbols defined by the (best-effort) assembly of the whole project.
+    pub symbols: Vec<ListSymbol>,
+    /// Display name of each flattened file, as referenced by [`Diag::file`],
+    /// parallel to `paths`.
+    pub files: Vec<String>,
+    /// Resolved path of each flattened file, parallel to `files`.
+    pub paths: Vec<PathBuf>,
+}
+
+/// Diagnose the project rooted at `path` (with in-memory `source` as its
+/// top-level text), resolving includes through `overlay`. See
+/// [`ProjectDiagnostics`] and [`diagnose_source_with_overlay`].
+#[must_use]
+pub fn diagnose_project(
+    path: &Path,
+    source: &str,
+    options: &Options,
+    overlay: &FileOverlay,
+) -> ProjectDiagnostics {
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let top_name = display_name(path);
+
+    let pre = match preprocess::preprocess_with(source, base, &top_name, Some(overlay)) {
+        Ok(pre) => pre,
+        Err(diag) => {
+            // Preprocessing failed (e.g. a missing include); report the single
+            // error against the top-level file.
+            return ProjectDiagnostics {
+                errors: vec![diag],
+                warnings: Vec::new(),
+                symbols: Vec::new(),
+                files: vec![top_name],
+                paths: vec![path.to_path_buf()],
+            };
+        }
+    };
+    let files = pre.files.clone();
+    let paths = pre.paths.clone();
+
+    let (lines, parse_errors) = parse::parse_recovering(pre.tokens);
+    if !parse_errors.is_empty() {
+        let errors = parse_errors
+            .into_iter()
+            .map(|e| Diag {
+                file: files.get(e.file as usize).cloned().unwrap_or_default(),
+                line: e.line,
+                message: e.message,
+            })
+            .collect();
+        return ProjectDiagnostics {
+            errors,
+            warnings: Vec::new(),
+            symbols: Vec::new(),
+            files,
+            paths,
+        };
+    }
+
+    let mut asm = assemble::Assembler::new(
+        options.nes,
+        options.undocumented,
+        options.empty_byte,
+        pre.files,
+        pre.dirs,
+        default_custom_resolver(),
+    );
+    let (errors, warnings) = asm.diagnostics(&lines);
+    ProjectDiagnostics {
+        errors,
+        warnings,
+        symbols: asm.list_symbols(),
+        files,
+        paths,
+    }
+}
+
 /// The basename used to refer to `path` in diagnostics.
 fn display_name(path: &Path) -> String {
     path.file_name()

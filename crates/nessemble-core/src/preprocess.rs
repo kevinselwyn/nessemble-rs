@@ -50,6 +50,10 @@ pub struct Preprocessed {
     pub files: Vec<String>,
     /// Directory each file resolves its filename-based directives against.
     pub dirs: Vec<PathBuf>,
+    /// Resolved path of each file, parallel to `files`. `paths[0]` is the
+    /// top-level file (`base_dir` joined with `top_name`); each include is the
+    /// path it resolved to. Lets tooling map a diagnostic's file back to a URI.
+    pub paths: Vec<PathBuf>,
 }
 
 /// Preprocess `source` (already read from `top_name`), resolving includes and
@@ -69,9 +73,11 @@ pub fn preprocess_with(
     top_name: &str,
     overlay: Option<&FileOverlay>,
 ) -> Result<Preprocessed, Diag> {
+    let top_path = base_dir.join(top_name);
     let mut pre = Pre {
         files: vec![top_name.to_string()],
         dirs: vec![base_dir],
+        paths: vec![top_path],
         macros: HashMap::new(),
         out: Vec::new(),
         unique: 0,
@@ -82,6 +88,7 @@ pub fn preprocess_with(
         tokens: pre.out,
         files: pre.files,
         dirs: pre.dirs,
+        paths: pre.paths,
     })
 }
 
@@ -90,6 +97,8 @@ struct Pre<'a> {
     /// Directory each file resolves relative includes against, parallel to
     /// `files`. `dirs[0]` is the top-level `base_dir`.
     dirs: Vec<PathBuf>,
+    /// Resolved path of each file, parallel to `files` (see `Preprocessed`).
+    paths: Vec<PathBuf>,
     macros: HashMap<String, Vec<Token>>,
     out: Vec<Token>,
     unique: u32,
@@ -247,6 +256,7 @@ impl Pre<'_> {
             .parent()
             .map_or_else(|| dir.clone(), std::path::Path::to_path_buf);
         self.dirs.push(child_dir);
+        self.paths.push(path);
         self.process_file(&text, child_id, depth + 1)
     }
 

@@ -22,6 +22,11 @@ Once connected, the server provides:
 - **Diagnostics** — errors and warnings as you type, each underlined at the
   offending token. Several problems are reported at once (the analyzer recovers
   past the first error), and includes are followed.
+- **Project-aware analysis** — when a workspace folder is open, a file that is
+  `.include`d into a larger program is analyzed *in the context of that program*,
+  so symbols defined in sibling or parent files are not reported as undefined.
+  The server discovers entry points from the workspace's `.include` graph (no
+  configuration needed) and reflects unsaved edits across files.
 - **Completion** — instruction mnemonics, assembler directives, and the
   labels, constants, and macros defined in the current buffer. Typing `.`
   triggers directive completion.
@@ -32,9 +37,17 @@ Once connected, the server provides:
   number, string, comment, identifier, operator) for richer coloring than a
   regex grammar can offer.
 - **Outline & navigation** — a document outline of labels, constants, and
-  macros; go-to-definition and find-all-references for symbols.
+  macros; go-to-definition (cmd/ctrl-click) and find-all-references for symbols.
+  With a workspace folder open, go-to-definition follows `.include`s across the
+  project, so it reaches a symbol defined in a sibling or parent file.
 - **Hover** — opcode and addressing-mode details for an instruction, the
   description of a directive, and the resolved value of a constant or label.
+- **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)
+  blocks, and runs of consecutive comments, can be collapsed.
+- **Rename** — renaming a symbol updates its definition and every use across the
+  open buffers.
+- **Code actions** — convert a numeric literal between hexadecimal, decimal, and
+  binary.
 
 ## Editor setup
 
@@ -165,5 +178,9 @@ works the same way.
   reports that language-server support was not included.
 - The server analyzes the in-editor buffer, so diagnostics reflect unsaved
   changes.
+- Project-aware analysis needs a **workspace folder** to be open (most editors
+  send one automatically). Opening a lone file with no folder still works, but
+  each file is then analyzed on its own, so cross-file symbols may be reported as
+  undefined.
 
 [lsp]: https://microsoft.github.io/language-server-protocol/
