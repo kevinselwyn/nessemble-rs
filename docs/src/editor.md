@@ -71,9 +71,85 @@ language-servers = ["nessemble"]
 
 ### VS Code / Cursor
 
-Use a generic LSP client extension (or a thin extension of your own) that
-launches `nessemble lsp` for `.asm` files. A dedicated extension is not yet
-published; any client that can spawn a stdio language server works.
+Cursor is a VS Code fork and uses the same extension model. There is no
+published Marketplace extension yet, but Cursor can't spawn a stdio language
+server on its own — it needs a small client extension. A minimal one is a few
+files; you can develop it locally and run it from Cursor without publishing.
+
+1. Make sure `nessemble` is on your `PATH` (`nessemble --version` should print
+   `2.5.0` or newer).
+
+2. Create a folder, e.g. `nessemble-vscode/`, with these two files:
+
+   `package.json`:
+
+   ```json
+   {
+     "name": "nessemble",
+     "displayName": "nessemble",
+     "version": "0.0.1",
+     "engines": { "vscode": "^1.75.0" },
+     "categories": ["Programming Languages"],
+     "activationEvents": ["onLanguage:nessemble"],
+     "main": "./extension.js",
+     "contributes": {
+       "languages": [
+         {
+           "id": "nessemble",
+           "aliases": ["nessemble", "NES assembly"],
+           "extensions": [".asm", ".s"]
+         }
+       ]
+     },
+     "dependencies": { "vscode-languageclient": "^9.0.0" }
+   }
+   ```
+
+   `extension.js`:
+
+   ```js
+   const { LanguageClient } = require("vscode-languageclient/node");
+
+   let client;
+
+   function activate() {
+     const serverOptions = {
+       command: "nessemble",
+       args: ["lsp"],
+     };
+     const clientOptions = {
+       documentSelector: [{ scheme: "file", language: "nessemble" }],
+     };
+     client = new LanguageClient(
+       "nessemble",
+       "nessemble",
+       serverOptions,
+       clientOptions
+     );
+     client.start();
+   }
+
+   function deactivate() {
+     return client ? client.stop() : undefined;
+   }
+
+   module.exports = { activate, deactivate };
+   ```
+
+3. From that folder, run `npm install` to fetch `vscode-languageclient`.
+
+4. Open the folder in Cursor and press <kbd>F5</kbd> ("Run Extension") to launch
+   an Extension Development Host with the extension loaded. Open a `.asm` file
+   in that window — diagnostics, completion, hover, formatting, outline, and
+   go-to-definition should all work.
+
+   To install it permanently instead of running the dev host, package it with
+   [`vsce`](https://github.com/microsoft/vscode-vsce) (`vsce package`) and
+   install the resulting `.vsix` via the Extensions view's *Install from
+   VSIX…* command.
+
+Any other client that can spawn a stdio language server for `.asm`/`.s` files
+works the same way.
 
 ### Emacs (`eglot`)
 
