@@ -17,7 +17,7 @@ edition = "2021"
 rust-version = "1.83"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/kevinselwyn/nessemble-rs"
-authors = ["nessemble-rs contributors"]
+authors = ["Kevin Selwyn <kevinselwyn@gmail.com>"]
 
 # The reference implementation whose behavior we target for parity.
 # See plans/000-reimplementation.md.
