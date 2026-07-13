@@ -1,5 +1,17 @@
 # Syntax
 
+The examples on this page are interactive: edit the source and click
+**Assemble** to build it in your browser (powered by the WebAssembly build of
+nessemble). Assembled bytes are shown as a hex dump and can be downloaded.
+
+<nessemble-assembler>
+    LDX #$08
+loop:
+    DEX
+    BNE loop
+    BRK
+</nessemble-assembler>
+
 ## Numbers
 
 Binary, decimal, octal, hexadecimal, and ASCII character are all valid numbers.
@@ -338,6 +350,12 @@ Output:
 00000020  6e 64 20 6d 65 6e 27 73  20 65 79 65 73           |nd men's eyes|
 0000002d
 ```
+
+Try it:
+
+<nessemble-assembler>
+.ascii "When, in disgrace with fortune and men's eyes"
+</nessemble-assembler>
 
 The `+/-` operators may also be used to increase/decrease the output.
 
@@ -1379,6 +1397,13 @@ Output:
 00000040
 ```
 
+
+Try it — the `.ease` script runs in your browser (custom pseudo-op scripting,
+compiled to WebAssembly):
+
+<nessemble-assembler data-opts='{"pseudo":{"ease":true}}'>
+.ease "easeOutBounce", 0, $20, $40
+</nessemble-assembler>
 
 ## Macros
 

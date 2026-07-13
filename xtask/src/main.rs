@@ -119,14 +119,24 @@ fn wasm() -> Result<(), String> {
 /// the mdBook documentation under `site/docs/`. Requires `mdbook` on `PATH`.
 fn dist() -> Result<(), String> {
     let root = repo_root();
+
+    // Build the wasm bundle and stage it (with the assembler component) where
+    // the docs and the marketing site can each serve it.
+    wasm()?;
+    stage_web_assets(&root.join("docs/src/nessemble"))?;
+    stage_web_assets(&root.join("website/static/nessemble"))?;
+
     let site = root.join("site");
     let _ = std::fs::remove_dir_all(&site);
     std::fs::create_dir_all(&site).map_err(|e| e.to_string())?;
 
-    // Marketing website (index.html + static/) at the site root.
+    // Marketing website (index.html + static/, including the staged assembler)
+    // at the site root.
     copy_dir(&root.join("website"), &site)?;
 
-    // Documentation under /docs.
+    // Documentation under /docs. mdBook copies the staged `src/nessemble/`
+    // assets into the book, and `theme/head.hbs` loads the component on every
+    // page.
     run_tool(
         "mdbook",
         &["build", &root.join("docs").to_string_lossy()],
@@ -135,6 +145,25 @@ fn dist() -> Result<(), String> {
     copy_dir(&root.join("docs/book"), &site.join("docs"))?;
 
     println!("Built site at {}", site.display());
+    Ok(())
+}
+
+/// Copy the assembler component + the wasm bundle into `dest` (recreating it),
+/// for a docs or website asset directory. Requires [`wasm`] to have run first.
+fn stage_web_assets(dest: &Path) -> Result<(), String> {
+    let root = repo_root();
+    let _ = std::fs::remove_dir_all(dest);
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let assets = [
+        root.join("web/nessemble-assembler.js"),
+        root.join("web/nessemble-assembler.css"),
+        root.join("crates/nessemble-wasm/pkg/nessemble.js"),
+        root.join("crates/nessemble-wasm/pkg/nessemble_bg.wasm"),
+    ];
+    for src in assets {
+        let name = src.file_name().ok_or("bad asset path")?;
+        std::fs::copy(&src, dest.join(name)).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    }
     Ok(())
 }
 

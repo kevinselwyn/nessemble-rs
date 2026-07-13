@@ -22,10 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install mdBook
         run: cargo install mdbook --version "^0.4"
-      - name: Build site (website + docs)
+      - name: Install wasm-bindgen-cli
+        # Must match the `wasm-bindgen` version in Cargo.lock, or the generated
+        # bindings are rejected with a schema-version mismatch.
+        run: cargo install wasm-bindgen-cli --version 0.2.126
+      - name: Build site (website + docs + wasm assembler)
         run: cargo run -p xtask -- dist
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
