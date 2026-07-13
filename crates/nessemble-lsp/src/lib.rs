@@ -16,8 +16,11 @@
 //!   buffer (via `nessemble_core::tooling::format`), and
 //!   `textDocument/semanticTokens/full` classifies tokens for highlighting, both
 //!   built on the lossless tooling lexer.
-//!
-//! Navigation (go-to-definition, hover) arrives in a later phase.
+//! - **Navigation, symbols & hover** (Phase 5): `textDocument/documentSymbol`
+//!   (an outline of labels/constants/macros), `textDocument/definition` and
+//!   `textDocument/references` (jump to / list a symbol's occurrences), and
+//!   `textDocument/hover` (opcode/addressing details, directive descriptions,
+//!   symbol values), all driven by the lossless tooling lexer over the buffer.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -27,19 +30,24 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, Formatting, Request as _, SemanticTokensFullRequest};
+use lsp_types::request::{
+    Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, References,
+    Request as _, SemanticTokensFullRequest,
+};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, OneOf, Position, PublishDiagnosticsParams,
-    Range, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, Location, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams,
+    Range, ReferenceParams, SemanticToken, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
 };
 
 use nessemble_core::tooling::{self, LexKind};
-use nessemble_core::{diagnose_source_as, Diag, Options};
+use nessemble_core::{diagnose_source_as, Diag, ListSymbol, Options};
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
 /// Semantic-token type legend. The index of each entry is the `token_type`
@@ -65,13 +73,13 @@ const TT_OPERATOR: u32 = 6;
 type LspError = Box<dyn std::error::Error + Sync + Send>;
 type LspResult<T> = Result<T, LspError>;
 
-/// Per-document state: the current buffer text plus the user-defined symbol
-/// names (labels/constants) from the last successful assembly, used for
-/// completion.
+/// Per-document state: the current buffer text plus the user-defined symbols
+/// (labels/constants, with their resolved values) from the last successful
+/// assembly, used for completion and hover.
 #[derive(Default)]
 struct Document {
     text: String,
-    symbols: Vec<String>,
+    symbols: Vec<ListSymbol>,
 }
 
 /// In-memory server state: every open document, keyed by URI, kept in sync with
@@ -138,7 +146,7 @@ impl Server {
         let mut items = mnemonic_items();
         items.extend(directive_items());
         if let Some(doc) = self.documents.get(uri) {
-            items.extend(doc.symbols.iter().map(|name| symbol_item(name)));
+            items.extend(doc.symbols.iter().map(|s| symbol_item(&s.name)));
             items.extend(macro_names(&doc.text).iter().map(|name| macro_item(name)));
         }
         items
@@ -167,6 +175,70 @@ impl Server {
         }))
     }
 
+    /// An outline of the document at `uri`: every label, constant, and macro
+    /// defined in the buffer, with its name range. `None` if `uri` is unknown.
+    fn document_symbols(&self, uri: &Url) -> Option<Vec<DocumentSymbol>> {
+        let text = &self.documents.get(uri)?.text;
+        Some(
+            definitions(text)
+                .into_iter()
+                .map(|d| document_symbol(&d))
+                .collect(),
+        )
+    }
+
+    /// Resolve go-to-definition for the symbol under `pos` in the document at
+    /// `uri`: the location of its defining label/constant/macro, if any.
+    fn goto_definition(&self, uri: &Url, pos: Position) -> Option<Location> {
+        let text = &self.documents.get(uri)?.text;
+        let name = word_at(text, pos)?;
+        let def = definitions(text).into_iter().find(|d| d.name == name)?;
+        Some(Location::new(uri.clone(), def.range))
+    }
+
+    /// All references to the symbol under `pos` in the document at `uri`: every
+    /// identifier occurrence with the same name. The definition itself is
+    /// included when `include_declaration` is set.
+    fn references(
+        &self,
+        uri: &Url,
+        pos: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let text = &self.documents.get(uri)?.text;
+        let name = word_at(text, pos)?;
+        let defs = definitions(text);
+        let locations = located_lexemes(text)
+            .into_iter()
+            .filter(|t| t.kind == LexKind::Ident && t.text == name)
+            .filter(|t| {
+                include_declaration || !defs.iter().any(|d| d.name == name && d.range == t.range)
+            })
+            .map(|t| Location::new(uri.clone(), t.range))
+            .collect();
+        Some(locations)
+    }
+
+    /// Hover information for the token under `pos` in the document at `uri`:
+    /// opcode/addressing details for a mnemonic, the description for a directive,
+    /// or the resolved value for a defined symbol.
+    fn hover(&self, uri: &Url, pos: Position) -> Option<Hover> {
+        let doc = self.documents.get(uri)?;
+        let token = token_at(&doc.text, pos)?;
+        let markdown = match token.kind {
+            LexKind::Directive => directive_hover(token.text)?,
+            LexKind::Ident => ident_hover(token.text, &doc.text, &doc.symbols)?,
+            _ => return None,
+        };
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: markdown,
+            }),
+            range: Some(token.range),
+        })
+    }
+
     /// Number of documents currently open.
     #[must_use]
     pub fn document_count(&self) -> usize {
@@ -183,9 +255,10 @@ impl Server {
 /// The outcome of a diagnostic scan of a buffer for the language server.
 struct Analysis {
     diagnostics: Vec<Diagnostic>,
-    /// Symbol names (labels/constants) from the best-effort assembly, for
-    /// completion. Empty when a syntax error blocked semantic analysis.
-    symbols: Vec<String>,
+    /// Symbols (labels/constants, with values) from the best-effort assembly,
+    /// for completion and hover. Empty when a syntax error blocked semantic
+    /// analysis.
+    symbols: Vec<ListSymbol>,
 }
 
 /// Scan `text` (the buffer at `uri`) for *all* errors and warnings — with
@@ -216,7 +289,7 @@ fn analyze(uri: &Url, text: &str) -> Analysis {
     }
     Analysis {
         diagnostics,
-        symbols: found.symbols.iter().map(|s| s.name.clone()).collect(),
+        symbols: found.symbols,
     }
 }
 
@@ -371,6 +444,224 @@ fn token_type(kind: LexKind, piece: &str, mnemonics: &HashSet<String>) -> u32 {
     }
 }
 
+/// A significant lexeme paired with its source [`Range`] (line + UTF-16
+/// columns). Whitespace and newlines are consumed for positioning but not
+/// emitted, so consecutive entries are the meaningful tokens in source order.
+struct Located<'a> {
+    kind: LexKind,
+    text: &'a str,
+    range: Range,
+}
+
+/// Walk the lossless lexeme stream, attaching an LSP [`Range`] to every
+/// significant (non-trivia) lexeme. Tokens never span a line break, so a single
+/// start/end column pair suffices.
+fn located_lexemes(source: &str) -> Vec<Located<'_>> {
+    let mut out = Vec::new();
+    let (mut line, mut col) = (0u32, 0u32);
+    for lx in tooling::lex(source) {
+        let piece = &source[lx.start..lx.end];
+        match lx.kind {
+            LexKind::Newline => {
+                line += 1;
+                col = 0;
+            }
+            LexKind::Whitespace => col += utf16_len(piece),
+            kind => {
+                let len = utf16_len(piece);
+                out.push(Located {
+                    kind,
+                    text: piece,
+                    range: Range::new(Position::new(line, col), Position::new(line, col + len)),
+                });
+                col += len;
+            }
+        }
+    }
+    out
+}
+
+/// The kind of a symbol definition found by scanning a buffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefKind {
+    Label,
+    Constant,
+    Macro,
+}
+
+/// A symbol definition located in the buffer: its name and the [`Range`] of the
+/// defining identifier.
+struct Definition {
+    name: String,
+    kind: DefKind,
+    range: Range,
+}
+
+/// Scan `text` for symbol definitions: a line-initial identifier followed by
+/// `:` is a label, one followed by `=` is a constant, and the identifier after
+/// `.macrodef` is a macro.
+fn definitions(text: &str) -> Vec<Definition> {
+    let toks = located_lexemes(text);
+    let mut defs = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let first_on_line = i == 0 || toks[i - 1].range.end.line != t.range.start.line;
+        let next_same_line = toks
+            .get(i + 1)
+            .filter(|n| n.range.start.line == t.range.start.line);
+        match t.kind {
+            LexKind::Directive if t.text.eq_ignore_ascii_case(".macrodef") => {
+                if let Some(name) = next_same_line.filter(|n| n.kind == LexKind::Ident) {
+                    defs.push(Definition {
+                        name: name.text.to_string(),
+                        kind: DefKind::Macro,
+                        range: name.range,
+                    });
+                }
+            }
+            LexKind::Ident if first_on_line => {
+                if let Some(next) = next_same_line.filter(|n| n.kind == LexKind::Punct) {
+                    let kind = match next.text {
+                        ":" => Some(DefKind::Label),
+                        "=" => Some(DefKind::Constant),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind {
+                        defs.push(Definition {
+                            name: t.text.to_string(),
+                            kind,
+                            range: t.range,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    defs
+}
+
+/// Build a document-outline entry for a definition.
+fn document_symbol(def: &Definition) -> DocumentSymbol {
+    let (kind, detail) = match def.kind {
+        DefKind::Label => (SymbolKind::FUNCTION, "label"),
+        DefKind::Constant => (SymbolKind::CONSTANT, "constant"),
+        DefKind::Macro => (SymbolKind::FUNCTION, "macro"),
+    };
+    #[allow(deprecated)] // `deprecated` field is required but unused.
+    DocumentSymbol {
+        name: def.name.clone(),
+        detail: Some(detail.to_string()),
+        kind,
+        tags: None,
+        deprecated: None,
+        range: def.range,
+        selection_range: def.range,
+        children: None,
+    }
+}
+
+/// The identifier text under `pos`, if the token there is an identifier.
+fn word_at(text: &str, pos: Position) -> Option<String> {
+    let token = token_at(text, pos)?;
+    (token.kind == LexKind::Ident).then(|| token.text.to_string())
+}
+
+/// The significant token whose range contains `pos` (inclusive of both ends, so
+/// a cursor at a token boundary still resolves).
+fn token_at(text: &str, pos: Position) -> Option<Located<'_>> {
+    located_lexemes(text).into_iter().find(|t| {
+        t.range.start.line == pos.line
+            && pos.character >= t.range.start.character
+            && pos.character <= t.range.end.character
+    })
+}
+
+/// Hover markdown for a directive: its spelling and the shared catalog
+/// description of the group it belongs to.
+fn directive_hover(name: &str) -> Option<String> {
+    for (group, desc) in DIRECTIVES {
+        let listed = group
+            .split(['/', ' '])
+            .map(str::trim)
+            .any(|n| n.eq_ignore_ascii_case(name));
+        if listed {
+            return Some(format!("**{name}** (directive)\n\n{desc}"));
+        }
+    }
+    None
+}
+
+/// Hover markdown for an identifier: opcode/addressing details if it is a
+/// mnemonic, the resolved value if it is a defined symbol, or a macro note.
+fn ident_hover(name: &str, text: &str, symbols: &[ListSymbol]) -> Option<String> {
+    if let Some(md) = mnemonic_hover(name) {
+        return Some(md);
+    }
+    if let Some(sym) = symbols.iter().find(|s| s.name == name) {
+        let kind = if sym.label { "label" } else { "constant" };
+        return Some(format!(
+            "**{}** ({}) = {} (`{}`)",
+            sym.name,
+            kind,
+            sym.value,
+            format_hex(sym.value),
+        ));
+    }
+    if macro_names(text).iter().any(|m| m == name) {
+        return Some(format!("**{name}** (macro)"));
+    }
+    None
+}
+
+/// Hover markdown for an instruction mnemonic: a table of its addressing modes
+/// with opcode byte, length, and cycle count. `None` if `name` is not a
+/// mnemonic.
+fn mnemonic_hover(name: &str) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let rows: Vec<&nessemble_isa::Opcode> = OPCODES
+        .iter()
+        .filter(|o| o.mnemonic.eq_ignore_ascii_case(name))
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let mnemonic = rows[0].mnemonic;
+    let mut md = format!("**{mnemonic}** (instruction)\n\n");
+    md.push_str("| mode | opcode | bytes | cycles |\n");
+    md.push_str("| --- | --- | --- | --- |\n");
+    for op in rows {
+        let cycles = if op.is_boundary() {
+            format!("{}+", op.timing)
+        } else {
+            op.timing.to_string()
+        };
+        let note = if op.is_undocumented() { " ⚠︎" } else { "" };
+        // Writing to a String is infallible.
+        let _ = writeln!(
+            md,
+            "| {}{} | ${:02X} | {} | {} |",
+            op.mode.label(),
+            note,
+            op.opcode,
+            op.length,
+            cycles,
+        );
+    }
+    Some(md)
+}
+
+/// Format a symbol value as `$`-prefixed hex, sized to a byte or word.
+fn format_hex(value: i64) -> String {
+    if (0..=0xFF).contains(&value) {
+        format!("${value:02X}")
+    } else if (0..=0xFFFF).contains(&value) {
+        format!("${value:04X}")
+    } else {
+        format!("${value:X}")
+    }
+}
+
 /// Completion items for every documented instruction mnemonic (lower-cased to
 /// match the usual nessemble style), detailing its addressing modes.
 fn mnemonic_items() -> Vec<CompletionItem> {
@@ -467,6 +758,10 @@ fn server_capabilities() -> ServerCapabilities {
                 full: Some(SemanticTokensFullOptions::Bool(true)),
             },
         )),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         ..Default::default()
     }
 }
@@ -523,6 +818,45 @@ fn main_loop(connection: &Connection) -> LspResult<Server> {
                         let result = serde_json::from_value::<SemanticTokensParams>(req.params)
                             .ok()
                             .and_then(|p| server.semantic_tokens(&p.text_document.uri));
+                        Response::new_ok(req.id, result)
+                    }
+                    DocumentSymbolRequest::METHOD => {
+                        let result = serde_json::from_value::<DocumentSymbolParams>(req.params)
+                            .ok()
+                            .and_then(|p| server.document_symbols(&p.text_document.uri))
+                            .map(DocumentSymbolResponse::Nested);
+                        Response::new_ok(req.id, result)
+                    }
+                    GotoDefinition::METHOD => {
+                        let result = serde_json::from_value::<GotoDefinitionParams>(req.params)
+                            .ok()
+                            .and_then(|p| {
+                                let tdp = p.text_document_position_params;
+                                server.goto_definition(&tdp.text_document.uri, tdp.position)
+                            })
+                            .map(GotoDefinitionResponse::Scalar);
+                        Response::new_ok(req.id, result)
+                    }
+                    References::METHOD => {
+                        let result = serde_json::from_value::<ReferenceParams>(req.params)
+                            .ok()
+                            .and_then(|p| {
+                                let tdp = p.text_document_position;
+                                server.references(
+                                    &tdp.text_document.uri,
+                                    tdp.position,
+                                    p.context.include_declaration,
+                                )
+                            });
+                        Response::new_ok(req.id, result)
+                    }
+                    HoverRequest::METHOD => {
+                        let result = serde_json::from_value::<HoverParams>(req.params)
+                            .ok()
+                            .and_then(|p| {
+                                let tdp = p.text_document_position_params;
+                                server.hover(&tdp.text_document.uri, tdp.position)
+                            });
                         Response::new_ok(req.id, result)
                     }
                     other => Response::new_err(
@@ -737,11 +1071,30 @@ mod tests {
         };
         assert!(labels(items).iter().any(|l| l == "lda"));
 
-        // shutdown → response → exit
+        // hover request → markup describing the `lda` mnemonic. Exercises the
+        // Phase 5 routing and response serialization over the transport.
         client
             .sender
             .send(Message::Request(Request {
                 id: RequestId::from(3),
+                method: "textDocument/hover".into(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": "file:///a.asm" },
+                    "position": { "line": 0, "character": 2 }
+                }),
+            }))
+            .unwrap();
+        // `notareal` isn't a mnemonic, so this hover is null — but the request
+        // must still round-trip as a successful (null) response.
+        let hover = recv_response(&client);
+        assert!(hover.result.is_some());
+        assert!(hover.error.is_none());
+
+        // shutdown → response → exit
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: RequestId::from(4),
                 method: "shutdown".into(),
                 params: serde_json::Value::Null,
             }))
@@ -757,6 +1110,118 @@ mod tests {
 
         let server = server.join().unwrap().expect("server ran cleanly");
         assert_eq!(server.document_count(), 1);
+    }
+
+    fn open(server: &mut Server, uri: &str, text: &str) {
+        server.apply_notification(DidOpenTextDocument::METHOD, open_params(uri, text));
+    }
+
+    #[test]
+    fn document_symbols_outline_labels_constants_and_macros() {
+        let mut server = Server::default();
+        let text = ".macrodef greet\n  nop\n.endm\nstart:\n  lda #$00\ncount = 5\n";
+        open(&mut server, "file:///o.asm", text);
+        let uri = Url::parse("file:///o.asm").unwrap();
+        let syms = server.document_symbols(&uri).expect("known document");
+        let by_name: Vec<(&str, SymbolKind)> =
+            syms.iter().map(|s| (s.name.as_str(), s.kind)).collect();
+        assert!(by_name.contains(&("greet", SymbolKind::FUNCTION)));
+        assert!(by_name.contains(&("start", SymbolKind::FUNCTION)));
+        assert!(by_name.contains(&("count", SymbolKind::CONSTANT)));
+        // `start` is a label defined on line 3 (0-based).
+        let start = syms.iter().find(|s| s.name == "start").unwrap();
+        assert_eq!(start.selection_range.start.line, 3);
+        assert_eq!(start.detail.as_deref(), Some("label"));
+    }
+
+    #[test]
+    fn goto_definition_jumps_to_the_label() {
+        let mut server = Server::default();
+        // A label defined on line 0, referenced by `jmp` on line 1.
+        let text = "start:\n  jmp start\n";
+        open(&mut server, "file:///d.asm", text);
+        let uri = Url::parse("file:///d.asm").unwrap();
+        // Cursor on `start` in the `jmp` operand (line 1, within cols 6..11).
+        let loc = server
+            .goto_definition(&uri, Position::new(1, 7))
+            .expect("definition found");
+        assert_eq!(loc.uri, uri);
+        assert_eq!(loc.range.start, Position::new(0, 0));
+        assert_eq!(loc.range.end, Position::new(0, 5));
+    }
+
+    #[test]
+    fn references_lists_every_occurrence() {
+        let mut server = Server::default();
+        let text = "start:\n  jmp start\n  jmp start\n";
+        open(&mut server, "file:///e.asm", text);
+        let uri = Url::parse("file:///e.asm").unwrap();
+        // Including the declaration: the label plus two uses.
+        let all = server
+            .references(&uri, Position::new(1, 7), true)
+            .expect("references found");
+        assert_eq!(all.len(), 3);
+        // Excluding the declaration: only the two uses.
+        let uses = server
+            .references(&uri, Position::new(1, 7), false)
+            .expect("references found");
+        assert_eq!(uses.len(), 2);
+        assert!(uses.iter().all(|l| l.range.start.line != 0));
+    }
+
+    #[test]
+    fn hover_shows_opcode_details_for_a_mnemonic() {
+        let mut server = Server::default();
+        open(&mut server, "file:///h.asm", "  lda #$00\n");
+        let uri = Url::parse("file:///h.asm").unwrap();
+        let hover = server
+            .hover(&uri, Position::new(0, 3))
+            .expect("hover on lda");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(md.value.contains("**LDA**"));
+        assert!(md.value.contains("immediate"));
+        assert!(md.value.contains("$A9"));
+    }
+
+    #[test]
+    fn hover_shows_a_directive_description() {
+        let mut server = Server::default();
+        open(&mut server, "file:///hd.asm", "  .db $00\n");
+        let uri = Url::parse("file:///hd.asm").unwrap();
+        let hover = server
+            .hover(&uri, Position::new(0, 3))
+            .expect("hover on .db");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(md.value.contains("(directive)"));
+    }
+
+    #[test]
+    fn hover_shows_a_symbol_value() {
+        let mut server = Server::default();
+        open(&mut server, "file:///hs.asm", "count = 5\n  lda #count\n");
+        let uri = Url::parse("file:///hs.asm").unwrap();
+        // Cursor on `count` in the operand (line 1).
+        let hover = server
+            .hover(&uri, Position::new(1, 8))
+            .expect("hover on count");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(md.value.contains("count"));
+        assert!(md.value.contains("(constant)"));
+        assert!(md.value.contains("$05"));
+    }
+
+    #[test]
+    fn hover_on_whitespace_is_none() {
+        let mut server = Server::default();
+        open(&mut server, "file:///hw.asm", "  lda #$00\n");
+        let uri = Url::parse("file:///hw.asm").unwrap();
+        assert!(server.hover(&uri, Position::new(5, 0)).is_none());
     }
 
     /// Closing a document removes it from the store and clears its diagnostics.

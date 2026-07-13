@@ -1,8 +1,11 @@
 # nessemble-rs: A Plan for a Language Server
 
-> Status: **Ready to implement.** All planning decisions are settled (see
-> [§9 Decisions](#9-decisions)); implementation proceeds phase by phase starting
-> at Phase 0.
+> Status: **Phases 0–5 complete** (implemented and merged); the server ships
+> behind the default-on `lsp` feature and is run with `nessemble lsp`.
+> **Phases 6–7 are planned** — workspace-aware analysis, to fix cross-file
+> "symbol not defined" false positives. Phase 8 (advanced) remains
+> optional/future. All planning decisions are settled (see
+> [§9 Decisions](#9-decisions)).
 
 ---
 
@@ -65,7 +68,8 @@ Grounded in the current code (not aspirational):
 - **Batch, disk-oriented.** The assembler reads the file (and its `.include` /
   `.inc*` targets) from disk. Editors hold **unsaved, in-memory** buffers, so the
   server analyzes the editor's current text, resolving includes relative to the
-  document's directory (from disk for now; an open-buffer overlay can come later).
+  document's directory (from disk for now; an open-buffer overlay arrives in
+  Phase 6, used by Phase 7's project analysis).
 
 ## 4. Proposed architecture
 
@@ -100,9 +104,9 @@ shippable to `main`.
 
 > **Versioning across phases.** To avoid cutting a release per phase, the
 > workspace version stays at the pre-release **`2.5.0-dev`** while phases land;
-> the release workflow skips pre-release versions. The final phase drops the
-> `-dev` suffix to **`2.5.0`**, which cuts a single release containing all the
-> language-server work.
+> the release workflow skips pre-release versions. Only once **all** phases are
+> complete does the final phase drop the `-dev` suffix to **`2.5.0`**, cutting a
+> single release containing all the language-server work.
 
 ### Phase 0 — Scaffold & transport — ✅ done
 - New `nessemble-lsp` crate; `nessemble lsp` subcommand (stdio, `lsp-server`,
@@ -192,16 +196,68 @@ shippable to `main`.
 > plus *range narrowing in the LSP* (reusing Phase-3's tooling lexer/text). Full
 > span threading remains a possible future refinement.
 
-### Phase 5 — Navigation, symbols & hover (deferred)
-- Track symbol **definition** (and ideally reference) positions; implement
+### Phase 5 — Navigation, symbols & hover — ✅ done
+- Track symbol **definition** (and reference) positions; implement
   `documentSymbol` (outline), `definition`, `references`, and `hover`
-  (symbol value/kind; opcode/addressing details; directive descriptions).
+  (symbol value/kind; opcode/addressing details; directive descriptions). ✅
+  Positions come from a positioned pass over the lossless tooling lexer
+  (`located_lexemes`), keeping the parity path untouched.
 - **Done when:** outline lists labels/constants/macros; go-to-definition jumps to
-  a label; hover shows opcode and symbol info.
+  a label; hover shows opcode and symbol info. ✅ (documentSymbol/definition/
+  references/hover unit tests + a hover round-trip in the lifecycle protocol
+  test; the `editor.md` docs page documents setup.)
 
-### Phase 6 — Advanced (optional / later)
-- Folding ranges, rename, code actions (quick-fixes), open-buffer include overlay.
-  Scope TBD after Phase 5.
+### Phase 6 — File-content overlay (core seam) — *planned*
+
+Foundational for Phase 7; no LSP behavior change on its own.
+
+- **Problem it unblocks.** `preprocess::do_include` reads each `.include`d file
+  straight from disk (`std::fs::read_to_string`). To analyze the *project* while
+  honoring the editor's unsaved edits, the preprocessor must be able to read an
+  open buffer's current text instead of the on-disk copy.
+- Add an **opt-in file-content provider** — an overlay `map<canonical path →
+  text>` consulted before disk; on a miss it falls back to `read_to_string`
+  exactly as today. Threaded through `preprocess` → `assemble_impl` →
+  `diagnose_source_as` as a new optional argument.
+- The CLI passes **no** overlay, so its path is byte-for-byte unchanged.
+- **Done when:** an overlay entry substitutes buffer text for an included file
+  during preprocessing; the default (no-overlay) path is unchanged; unit tests
+  cover overlay hit/miss; **parity 122/122 stays green.**
+
+### Phase 7 — Workspace-aware analysis (project diagnostics) — *planned*
+
+Fixes cross-file **"symbol `xxx` was not defined"** false positives: nessemble
+symbols are global across the whole `.include` graph, but the server analyzes one
+buffer in isolation, so a symbol defined in a sibling/parent file looks
+undefined. The fix is to analyze each open file *in the context of its project*.
+
+- **Entry-point discovery — auto include-graph scan (zero config).** Capture
+  `rootUri` / `workspaceFolders` at `initialize`. Enumerate `*.asm` / `*.s` under
+  the workspace (skipping `target/`, `.git/`, hidden dirs; bounded + cached),
+  extract each file's `.include` targets (resolved **file-relative**, matching
+  the assembler) to build a `file → included files` graph, and take **roots** =
+  files nobody includes. For the open file, assemble the root(s) whose closure
+  contains it, via the Phase-6 overlay so unsaved edits are reflected.
+- **Multi-root handling — intersect undefined sets.** When a fragment is
+  reachable from several roots, a symbol is only flagged if it is undefined under
+  **every** such root, so a symbol defined under *any* root is never a false
+  positive.
+- **Multi-file diagnostics.** A project assembly yields diagnostics across many
+  files; group by file, resolve to `Url`s, and publish a `PublishDiagnostics`
+  per file. Track previously-published URIs to explicitly **clear** a file when
+  its errors are fixed (LSP has no "clear all").
+- **Fallback.** If the open file is itself a root, an orphan included by nothing,
+  or the workspace can't be determined, assemble it directly — today's
+  single-file behavior.
+- **Config override** (auto + explicit) is a later addition layered on this: an
+  explicit entry list simply overrides discovery. Not built in this phase.
+- **Done when:** opening a fragment no longer flags symbols defined in a
+  sibling/parent file; single-file behavior is preserved when no root is found;
+  fixing an error clears it in every affected file; **parity 122/122 stays
+  green.**
+
+### Phase 8 — Advanced (optional / later)
+- Folding ranges, rename, code actions (quick-fixes). Scope TBD.
 
 ## 6. Editor integration (server + docs)
 
@@ -240,7 +296,7 @@ Deliverable is the **server plus setup documentation**, not a bespoke extension:
 - **Dependency weight.** Addressed by choosing `lsp-server` (no async runtime)
   and feature-gating the `lsp` feature.
 - **In-memory vs. disk includes.** Start disk-resolved; add an open-buffer overlay
-  only if needed (Phase 6).
+  (Phase 6) so project analysis (Phase 7) reflects unsaved edits.
 - **Scope creep.** Phase boundaries are the throttle; ship Phase 1 before 3+.
 
 ## 9. Decisions
@@ -265,6 +321,16 @@ Deliverable is the **server plus setup documentation**, not a bespoke extension:
    formatter re-emits from that full token stream. Chosen over a line-based
    normalizer for robustness and because its position-tracking foundation is
    reused by highlighting and the Phase-4 span refactor.
+9. **Entry-point discovery (Phase 7)** — **auto include-graph scan, zero
+   config**: derive entry roots from the workspace's `.include` graph rather than
+   a project file. Structured so an explicit-config override can be layered on
+   later.
+10. **Multi-root reporting (Phase 7)** — **intersect the undefined-symbol sets**
+    across every root that includes a fragment, so a symbol defined under any
+    root is never flagged.
+11. **Overlay is opt-in (Phase 6)** — the file-content provider defaults to disk;
+    only the LSP passes an overlay, keeping the CLI/assembler path (and ROM
+    parity) byte-for-byte unchanged.
 
 All planning decisions are settled; remaining choices are implementation details
 within each phase.

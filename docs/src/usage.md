@@ -22,7 +22,11 @@ Commands:
   scripts                          install scripts
   reference [<category>] [<term>]  get reference info about assembly terms
   config [<key>] [<val>]           list/get/set config info
+  lsp                              run the language server (stdio)
 ```
+
+The `lsp` command starts the built-in [Language Server](editor.md) for use with
+LSP-capable editors.
 
 ## Options
 
