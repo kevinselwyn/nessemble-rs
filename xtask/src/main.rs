@@ -9,7 +9,7 @@
 //!   fetch-oracle [--i386]   Download & extract the v1.1.1 release binary.
 //!   verify-goldens          Confirm the oracle reproduces every committed golden.
 //!   parity [--release]      Run nessemble-rs over the corpus and report parity.
-//!   wasm                    Build the WebAssembly assembler bundle (wasm-pack).
+//!   wasm                    Build the WebAssembly assembler bundle (wasm-bindgen).
 //!   help                    Show this help.
 //!
 //! It is intentionally dependency-free (std only), shelling out to `curl`,
@@ -58,7 +58,7 @@ fn print_help() {
          \x20 fetch-oracle [--i386]   Download & extract the v{REFERENCE_VERSION} release binary\n\
          \x20 verify-goldens          Confirm the oracle reproduces every committed golden\n\
          \x20 parity [--release]      Run nessemble-rs over the corpus and report parity\n\
-         \x20 wasm                    Build the WebAssembly assembler bundle (needs wasm-pack)\n\
+         \x20 wasm                    Build the WebAssembly assembler bundle (needs the wasm32 target + wasm-bindgen)\n\
          \x20 dist                    Build the GitHub Pages site (website + mdBook docs)\n\
          \x20 help                    Show this help"
     );
@@ -68,24 +68,47 @@ fn print_help() {
 // wasm — build the WebAssembly assembler bundle
 // ---------------------------------------------------------------------------
 
-/// Build the `nessemble-wasm` crate to a browser-ready bundle with `wasm-pack`
-/// (into `crates/nessemble-wasm/pkg/`). Requires `wasm-pack` and the
-/// `wasm32-unknown-unknown` target; the `web` target emits an ES module.
+/// Build the `nessemble-wasm` crate to a browser-ready ES-module bundle in
+/// `crates/nessemble-wasm/pkg/` (`nessemble.js` + `nessemble_bg.wasm`).
+///
+/// Compiles the cdylib to `wasm32-unknown-unknown` and runs `wasm-bindgen`
+/// directly (the pieces `wasm-pack` orchestrates) — no extra tool to install,
+/// and it matches the `wasm-bindgen` version pinned by the crate. Requires the
+/// `wasm32-unknown-unknown` target and `wasm-bindgen` on `PATH`.
 fn wasm() -> Result<(), String> {
-    let crate_dir = repo_root().join("crates/nessemble-wasm");
+    let root = repo_root();
     run_tool(
-        "wasm-pack",
+        "cargo",
         &[
             "build",
-            &crate_dir.to_string_lossy(),
+            "-p",
+            "nessemble-wasm",
             "--release",
             "--target",
+            "wasm32-unknown-unknown",
+        ],
+        Some(&root),
+    )?;
+
+    let wasm_in = root.join("target/wasm32-unknown-unknown/release/nessemble_wasm.wasm");
+    let out_dir = root.join("crates/nessemble-wasm/pkg");
+    run_tool(
+        "wasm-bindgen",
+        &[
+            "--target",
             "web",
+            "--no-typescript",
+            "--out-dir",
+            &out_dir.to_string_lossy(),
             "--out-name",
             "nessemble",
+            &wasm_in.to_string_lossy(),
         ],
         None,
-    )
+    )?;
+
+    println!("Built wasm bundle at {}", out_dir.display());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
