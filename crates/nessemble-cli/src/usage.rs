@@ -10,7 +10,7 @@ const PROGRAM_NAME: &str = "nessemble";
 /// The displayed version is the workspace (crate) version — the single source
 /// of truth that also drives the release pipeline.
 const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
-const PROGRAM_COPYRIGHT: &str = "2017";
+const PROGRAM_COPYRIGHT: &str = "2017-2026";
 const PROGRAM_AUTHOR: &str = "Kevin Selwyn";
 
 /// The GPL notice printed by `--license` (the body after the version header).
@@ -112,7 +112,7 @@ mod tests {
         // the version number rather than the number itself.
         let banner = version();
         assert!(banner.starts_with("nessemble v"));
-        assert!(banner.ends_with("\n\nCopyright 2017 Kevin Selwyn\n"));
+        assert!(banner.ends_with("\n\nCopyright 2017-2026 Kevin Selwyn\n"));
     }
 
     #[test]

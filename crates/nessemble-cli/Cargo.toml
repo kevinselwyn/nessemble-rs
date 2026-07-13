@@ -36,7 +36,7 @@ workspace = true
 [package.metadata.deb]
 name = "nessemble"
 maintainer = "Kevin Selwyn <kevinselwyn@gmail.com>"
-copyright = "2017 Kevin Selwyn"
+copyright = "2017-2026 Kevin Selwyn"
 license-file = ["../../COPYING", "0"]
 extended-description = "A 6502 assembler for the Nintendo Entertainment System."
 section = "devel"
