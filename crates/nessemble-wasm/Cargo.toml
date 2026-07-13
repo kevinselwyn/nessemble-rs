@@ -1,0 +1,30 @@
+[package]
+name = "nessemble-wasm"
+description = "WebAssembly build of the nessemble-rs 6502/NES assembler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# `cdylib` is the WebAssembly artifact; `rlib` lets the crate build/test on the
+# host toolchain too.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nessemble-core.workspace = true
+# The scripting host, without its `fs` feature: the browser has no filesystem,
+# so scripts calling the file API get a clear "function not found" error. Declared
+# as a direct path dep (not `workspace = true`) so `default-features = false`
+# actually takes effect — Cargo ignores it on a workspace-inherited dependency
+# whose `[workspace.dependencies]` entry doesn't set `default-features`.
+nessemble-script = { path = "../nessemble-script", default-features = false }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"
+
+[lints]
+workspace = true

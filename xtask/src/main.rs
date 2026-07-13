@@ -9,6 +9,7 @@
 //!   fetch-oracle [--i386]   Download & extract the v1.1.1 release binary.
 //!   verify-goldens          Confirm the oracle reproduces every committed golden.
 //!   parity [--release]      Run nessemble-rs over the corpus and report parity.
+//!   wasm                    Build the WebAssembly assembler bundle (wasm-pack).
 //!   help                    Show this help.
 //!
 //! It is intentionally dependency-free (std only), shelling out to `curl`,
@@ -30,6 +31,7 @@ fn main() -> std::process::ExitCode {
         "fetch-oracle" => fetch_oracle(rest),
         "verify-goldens" => verify_goldens(),
         "parity" => parity(rest),
+        "wasm" => wasm(),
         "dist" => dist(),
         "help" | "-h" | "--help" => {
             print_help();
@@ -56,9 +58,34 @@ fn print_help() {
          \x20 fetch-oracle [--i386]   Download & extract the v{REFERENCE_VERSION} release binary\n\
          \x20 verify-goldens          Confirm the oracle reproduces every committed golden\n\
          \x20 parity [--release]      Run nessemble-rs over the corpus and report parity\n\
+         \x20 wasm                    Build the WebAssembly assembler bundle (needs wasm-pack)\n\
          \x20 dist                    Build the GitHub Pages site (website + mdBook docs)\n\
          \x20 help                    Show this help"
     );
+}
+
+// ---------------------------------------------------------------------------
+// wasm — build the WebAssembly assembler bundle
+// ---------------------------------------------------------------------------
+
+/// Build the `nessemble-wasm` crate to a browser-ready bundle with `wasm-pack`
+/// (into `crates/nessemble-wasm/pkg/`). Requires `wasm-pack` and the
+/// `wasm32-unknown-unknown` target; the `web` target emits an ES module.
+fn wasm() -> Result<(), String> {
+    let crate_dir = repo_root().join("crates/nessemble-wasm");
+    run_tool(
+        "wasm-pack",
+        &[
+            "build",
+            &crate_dir.to_string_lossy(),
+            "--release",
+            "--target",
+            "web",
+            "--out-name",
+            "nessemble",
+        ],
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
