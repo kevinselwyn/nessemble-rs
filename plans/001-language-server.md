@@ -256,6 +256,10 @@ undefined. The fix analyzes each open file *in the context of its project*.
   **cleared** when fixed.
 - **Fallback.** ✅ If the workspace is unknown or the file isn't in any scanned
   root's closure, it falls back to single-file analysis — today's behavior.
+- **Cross-file navigation.** ✅ The same include closure makes
+  go-to-definition (Phase 5) project-aware: local buffer first, then the project
+  files, so cmd/ctrl-click reaches a symbol defined in a sibling/parent file
+  (even one not open).
 - **Config override** (auto + explicit) remains a later addition layered on this.
 - **Done when:** opening a fragment no longer flags symbols defined in a
   sibling/parent file; single-file behavior is preserved when no root is found;

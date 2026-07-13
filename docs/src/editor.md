@@ -37,7 +37,9 @@ Once connected, the server provides:
   number, string, comment, identifier, operator) for richer coloring than a
   regex grammar can offer.
 - **Outline & navigation** — a document outline of labels, constants, and
-  macros; go-to-definition and find-all-references for symbols.
+  macros; go-to-definition (cmd/ctrl-click) and find-all-references for symbols.
+  With a workspace folder open, go-to-definition follows `.include`s across the
+  project, so it reaches a symbol defined in a sibling or parent file.
 - **Hover** — opcode and addressing-mode details for an instruction, the
   description of a directive, and the resolved value of a constant or label.
 - **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)

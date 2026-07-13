@@ -324,12 +324,61 @@ impl Server {
     }
 
     /// Resolve go-to-definition for the symbol under `pos` in the document at
-    /// `uri`: the location of its defining label/constant/macro, if any.
+    /// `uri`: the location of its defining label/constant/macro. Looks in the
+    /// current buffer first, then — when a workspace is open — across the files
+    /// of the `.include` project the buffer belongs to, so cmd/ctrl-click reaches
+    /// a symbol defined in a sibling or parent file.
     fn goto_definition(&self, uri: &Url, pos: Position) -> Option<Location> {
-        let text = &self.documents.get(uri)?.text;
-        let name = word_at(text, pos)?;
-        let def = definitions(text).into_iter().find(|d| d.name == name)?;
-        Some(Location::new(uri.clone(), def.range))
+        let name = word_at(&self.documents.get(uri)?.text, pos)?;
+        self.definition_location(uri, &name)
+    }
+
+    /// The definition of `name` for the document at `uri`: the local definition
+    /// if present, else the first one found in the project's include closure.
+    fn definition_location(&self, uri: &Url, name: &str) -> Option<Location> {
+        if let Some(doc) = self.documents.get(uri) {
+            if let Some(def) = definitions(&doc.text).into_iter().find(|d| d.name == name) {
+                return Some(Location::new(uri.clone(), def.range));
+            }
+        }
+        if self.workspace_roots.is_empty() {
+            return None;
+        }
+
+        // Search the include closure of the roots that contain this file.
+        let overlay_map: HashMap<PathBuf, String> = self
+            .documents
+            .iter()
+            .map(|(u, d)| (normalize(&uri_to_path(u)), d.text.clone()))
+            .collect();
+        let read = |p: &Path| {
+            overlay_map
+                .get(&normalize(p))
+                .cloned()
+                .or_else(|| std::fs::read_to_string(p).ok())
+        };
+        let candidates = scan_source_files(&self.workspace_roots)
+            .into_iter()
+            .chain(self.documents.keys().map(uri_to_path));
+        let graph = build_include_graph(candidates, &read);
+        let here = normalize(&uri_to_path(uri));
+        let mut project: HashSet<PathBuf> = HashSet::new();
+        for root in graph.entry_roots_for(&here) {
+            project.extend(graph.closure(&root));
+        }
+        project.remove(&here); // already searched as the local buffer
+
+        for path in project {
+            let Some(text) = read(&path) else {
+                continue;
+            };
+            if let Some(def) = definitions(&text).into_iter().find(|d| d.name == name) {
+                if let Ok(url) = Url::from_file_path(&path) {
+                    return Some(Location::new(url, def.range));
+                }
+            }
+        }
+        None
     }
 
     /// All references to the symbol under `pos` in the document at `uri`: every
@@ -2036,6 +2085,35 @@ mod tests {
         let pubs = did_open(&mut server, &shared, "  lda #thing\n");
         let d = diags_for(&pubs, &shared).expect("shared.asm published");
         assert!(d.is_empty(), "thing should resolve under r1: {d:?}");
+
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn goto_definition_crosses_files_in_a_project() {
+        // `palette` is defined in consts.asm and used in code.asm. cmd-click on
+        // the use should jump to consts.asm.
+        let w = workspace("gotodef");
+        write(
+            &w,
+            "main.asm",
+            ".include \"consts.asm\"\n.include \"code.asm\"\n",
+        );
+        let consts = w.join("consts.asm");
+        write(&w, "consts.asm", "palette = $3F00\n");
+        let code = w.join("code.asm");
+        let code_text = "  lda palette\n";
+        write(&w, "code.asm", code_text);
+
+        let mut server = server_for(&w);
+        did_open(&mut server, &code, code_text);
+        let code_uri = Url::from_file_path(&code).unwrap();
+        // `palette` sits at cols 6..13 on line 0.
+        let loc = server
+            .goto_definition(&code_uri, Position::new(0, 8))
+            .expect("cross-file definition found");
+        assert_eq!(loc.uri, Url::from_file_path(&consts).unwrap());
+        assert_eq!(loc.range.start, Position::new(0, 0)); // `palette` at consts:0
 
         let _ = std::fs::remove_dir_all(&w);
     }
