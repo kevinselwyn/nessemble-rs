@@ -23,7 +23,7 @@
 //!   symbol values), all driven by the lossless tooling lexer over the buffer.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::notification::{
@@ -47,7 +47,9 @@ use lsp_types::{
 };
 
 use nessemble_core::tooling::{self, LexKind};
-use nessemble_core::{diagnose_source_as, Diag, ListSymbol, Options};
+use nessemble_core::{
+    diagnose_project, diagnose_source_as, Diag, ListSymbol, Options, ProjectDiagnostics,
+};
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
 /// Semantic-token type legend. The index of each entry is the `token_type`
@@ -87,55 +89,180 @@ struct Document {
 #[derive(Default)]
 pub struct Server {
     documents: HashMap<Url, Document>,
+    /// Workspace folder roots (from `initialize`), scanned to discover the
+    /// `.include` entry points a file belongs to. Empty ⇒ single-file analysis.
+    workspace_roots: Vec<PathBuf>,
+    /// URIs we last published *non-empty* diagnostics to, so a file can be
+    /// explicitly cleared when its problems are fixed or it leaves the project.
+    published: HashSet<Url>,
 }
 
 impl Server {
     /// Apply a `textDocument/*` notification to the document store, returning the
-    /// diagnostics to publish for the affected document (recomputed on
-    /// open/change, cleared on close). Unknown notifications and malformed params
-    /// are ignored, as LSP servers should, and yield `None`.
+    /// diagnostics to publish — potentially for **several** files, since a
+    /// project assembly spreads diagnostics across the include graph. Unknown
+    /// notifications and malformed params are ignored and yield no publishes.
     fn apply_notification(
         &mut self,
         method: &str,
         params: serde_json::Value,
-    ) -> Option<PublishDiagnosticsParams> {
+    ) -> Vec<PublishDiagnosticsParams> {
         match method {
             DidOpenTextDocument::METHOD => {
-                let p: DidOpenTextDocumentParams = serde_json::from_value(params).ok()?;
+                let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(params) else {
+                    return Vec::new();
+                };
                 let uri = p.text_document.uri;
-                let analysis = analyze(&uri, &p.text_document.text);
                 self.documents.insert(
                     uri.clone(),
                     Document {
                         text: p.text_document.text,
-                        symbols: analysis.symbols,
+                        symbols: Vec::new(),
                     },
                 );
-                Some(publish(uri, analysis.diagnostics))
+                self.analyze_and_publish(&uri)
             }
             DidChangeTextDocument::METHOD => {
-                let p: DidChangeTextDocumentParams = serde_json::from_value(params).ok()?;
+                let Ok(p) = serde_json::from_value::<DidChangeTextDocumentParams>(params) else {
+                    return Vec::new();
+                };
                 // Full-sync: the final content change carries the whole document.
-                let change = p.content_changes.into_iter().next_back()?;
+                let Some(change) = p.content_changes.into_iter().next_back() else {
+                    return Vec::new();
+                };
                 let uri = p.text_document.uri;
-                let analysis = analyze(&uri, &change.text);
-                let doc = self.documents.entry(uri.clone()).or_default();
-                doc.text = change.text;
-                // Keep the previous symbols when the new scan found none (e.g. a
-                // transient syntax error), so completion doesn't blank out.
-                if !analysis.symbols.is_empty() {
-                    doc.symbols = analysis.symbols;
-                }
-                Some(publish(uri, analysis.diagnostics))
+                self.documents.entry(uri.clone()).or_default().text = change.text;
+                self.analyze_and_publish(&uri)
             }
             DidCloseTextDocument::METHOD => {
-                let p: DidCloseTextDocumentParams = serde_json::from_value(params).ok()?;
+                let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(params) else {
+                    return Vec::new();
+                };
                 let uri = p.text_document.uri;
                 self.documents.remove(&uri);
+                self.published.remove(&uri);
                 // Publish an empty set to clear the editor's squiggles.
-                Some(publish(uri, Vec::new()))
+                vec![publish(uri, Vec::new())]
             }
-            _ => None,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Recompute diagnostics for the project the changed document belongs to,
+    /// refresh its symbol table, and produce the publishes to send — including
+    /// empty sets that clear files whose problems are now gone.
+    fn analyze_and_publish(&mut self, changed: &Url) -> Vec<PublishDiagnosticsParams> {
+        let results = self.compute_diagnostics(changed);
+
+        // Project-wide symbols enable cross-file completion/hover; keep the
+        // previous set when a transient error yielded none, so they don't blink.
+        if !results.changed_symbols.is_empty() {
+            if let Some(doc) = self.documents.get_mut(changed) {
+                doc.symbols = results.changed_symbols;
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut now = HashSet::new();
+        for (uri, diags) in results.per_file {
+            if !diags.is_empty() {
+                now.insert(uri.clone());
+            }
+            out.push(publish(uri, diags));
+        }
+        // Clear any file that had diagnostics last time but isn't in this result.
+        for uri in &self.published {
+            if !out.iter().any(|p| &p.uri == uri) {
+                out.push(publish(uri.clone(), Vec::new()));
+            }
+        }
+        self.published = now;
+        out
+    }
+
+    /// Compute diagnostics for the project the changed document belongs to.
+    ///
+    /// If the workspace's `.include` graph places the changed file inside one or
+    /// more entry roots, each root is assembled (with unsaved buffers overlaid)
+    /// and the resulting diagnostics are distributed to every open document that
+    /// participates. When a file is reached from several roots, only the
+    /// diagnostics common to *all* of them are kept, so a symbol defined under
+    /// any root is never flagged. Otherwise it falls back to single-file
+    /// analysis of the changed buffer.
+    fn compute_diagnostics(&self, changed: &Url) -> DiagResults {
+        let Some(text) = self.documents.get(changed).map(|d| d.text.clone()) else {
+            return DiagResults::default();
+        };
+        let changed_path = normalize(&uri_to_path(changed));
+
+        if self.workspace_roots.is_empty() {
+            return single_file(changed, &text);
+        }
+
+        // An overlay + reader backed by the open buffers, falling back to disk.
+        let overlay_map: HashMap<PathBuf, String> = self
+            .documents
+            .iter()
+            .map(|(u, d)| (normalize(&uri_to_path(u)), d.text.clone()))
+            .collect();
+        let overlay = |p: &Path| overlay_map.get(&normalize(p)).cloned();
+        let read = |p: &Path| overlay(p).or_else(|| std::fs::read_to_string(p).ok());
+
+        // Discover the entry roots whose include-closure contains the file.
+        let candidates = scan_source_files(&self.workspace_roots)
+            .into_iter()
+            .chain(self.documents.keys().map(uri_to_path));
+        let graph = build_include_graph(candidates, &read);
+        let roots = graph.entry_roots_for(&changed_path);
+        if roots.is_empty() {
+            return single_file(changed, &text);
+        }
+
+        // Assemble each entry root and normalize its file table once.
+        let runs: Vec<Run> = roots
+            .iter()
+            .map(|root| {
+                let root_text = read(root).unwrap_or_default();
+                Run::from(diagnose_project(
+                    root,
+                    &root_text,
+                    &Options::default(),
+                    &overlay,
+                ))
+            })
+            .collect();
+
+        // Distribute diagnostics to every open document that participates.
+        let mut per_file: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+        for (uri, doc) in &self.documents {
+            let dpath = normalize(&uri_to_path(uri));
+            let sets: Vec<Vec<(DiagnosticSeverity, Diag)>> = runs
+                .iter()
+                .filter(|r| r.norm_paths.contains(&dpath))
+                .map(|r| r.diags_for(&dpath))
+                .collect();
+            if sets.is_empty() {
+                continue;
+            }
+            let merged = intersect_diag_sets(&sets);
+            let lsp = merged
+                .into_iter()
+                .map(|(sev, d)| project_diag_to_lsp(&d, sev, &doc.text))
+                .collect();
+            per_file.insert(uri.clone(), lsp);
+        }
+        // The changed doc always gets an entry so its stale diagnostics clear
+        // even if it dropped out of every closure this round.
+        per_file.entry(changed.clone()).or_default();
+
+        // Project-wide symbols (deduped by name) for the changed document.
+        let mut symbols: Vec<ListSymbol> = runs.iter().flat_map(|r| r.symbols.clone()).collect();
+        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        symbols.dedup_by(|a, b| a.name == b.name);
+
+        DiagResults {
+            per_file,
+            changed_symbols: symbols,
         }
     }
 
@@ -265,9 +392,7 @@ struct Analysis {
 /// recovery, so several problems surface at once — and translate them into LSP
 /// diagnostics with token-accurate ranges.
 fn analyze(uri: &Url, text: &str) -> Analysis {
-    let path = uri
-        .to_file_path()
-        .unwrap_or_else(|()| PathBuf::from(uri.path()));
+    let path = uri_to_path(uri);
     let top_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -291,6 +416,279 @@ fn analyze(uri: &Url, text: &str) -> Analysis {
         diagnostics,
         symbols: found.symbols,
     }
+}
+
+/// The result of a project-aware diagnostic pass: LSP diagnostics keyed by the
+/// document to publish them to, plus project-wide symbols for the changed file.
+#[derive(Default)]
+struct DiagResults {
+    per_file: HashMap<Url, Vec<Diagnostic>>,
+    changed_symbols: Vec<ListSymbol>,
+}
+
+/// Single-file fallback: analyze just the changed buffer (no project context),
+/// publishing only for that file.
+fn single_file(changed: &Url, text: &str) -> DiagResults {
+    let analysis = analyze(changed, text);
+    let mut per_file = HashMap::new();
+    per_file.insert(changed.clone(), analysis.diagnostics);
+    DiagResults {
+        per_file,
+        changed_symbols: analysis.symbols,
+    }
+}
+
+/// One assembled entry root: its diagnostics, and its flattened file table with
+/// paths pre-normalized for matching against open documents.
+struct Run {
+    errors: Vec<Diag>,
+    warnings: Vec<Diag>,
+    files: Vec<String>,
+    norm_paths: Vec<PathBuf>,
+    symbols: Vec<ListSymbol>,
+}
+
+impl From<ProjectDiagnostics> for Run {
+    fn from(pd: ProjectDiagnostics) -> Self {
+        let norm_paths = pd.paths.iter().map(|p| normalize(p)).collect();
+        Run {
+            errors: pd.errors,
+            warnings: pd.warnings,
+            files: pd.files,
+            norm_paths,
+            symbols: pd.symbols,
+        }
+    }
+}
+
+impl Run {
+    /// This run's diagnostics for the file at normalized path `dpath`, tagged
+    /// with severity. A diagnostic belongs to `dpath` when its file name matches
+    /// one whose resolved path is `dpath`.
+    fn diags_for(&self, dpath: &Path) -> Vec<(DiagnosticSeverity, Diag)> {
+        let names: HashSet<&str> = self
+            .files
+            .iter()
+            .zip(&self.norm_paths)
+            .filter(|(_, p)| p.as_path() == dpath)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let errs = self
+            .errors
+            .iter()
+            .filter(|d| names.contains(d.file.as_str()))
+            .map(|d| (DiagnosticSeverity::ERROR, d.clone()));
+        let warns = self
+            .warnings
+            .iter()
+            .filter(|d| names.contains(d.file.as_str()))
+            .map(|d| (DiagnosticSeverity::WARNING, d.clone()));
+        errs.chain(warns).collect()
+    }
+}
+
+/// Keep only the diagnostics common to *every* set (compared by severity, line,
+/// and message). With a single set the input is returned unchanged. This is how
+/// a symbol defined under *any* entry root escapes being flagged: its "not
+/// defined" diagnostic is absent from that root's set, so the intersection drops
+/// it.
+fn intersect_diag_sets(
+    sets: &[Vec<(DiagnosticSeverity, Diag)>],
+) -> Vec<(DiagnosticSeverity, Diag)> {
+    let Some((first, rest)) = sets.split_first() else {
+        return Vec::new();
+    };
+    if rest.is_empty() {
+        return first.clone();
+    }
+    first
+        .iter()
+        .filter(|item| rest.iter().all(|s| s.iter().any(|o| same_diag(o, item))))
+        .cloned()
+        .collect()
+}
+
+fn same_diag(a: &(DiagnosticSeverity, Diag), b: &(DiagnosticSeverity, Diag)) -> bool {
+    a.0 == b.0 && a.1.line == b.1.line && a.1.message == b.1.message
+}
+
+/// Convert a project [`Diag`] (already attributed to a specific file) into an
+/// LSP diagnostic on its own line, with a token-accurate range within `text`.
+fn project_diag_to_lsp(d: &Diag, severity: DiagnosticSeverity, text: &str) -> Diagnostic {
+    let line = d.line.saturating_sub(1);
+    Diagnostic {
+        range: diagnostic_range(text, line, &d.message),
+        severity: Some(severity),
+        source: Some("nessemble".to_string()),
+        message: d.message.clone(),
+        ..Default::default()
+    }
+}
+
+/// The filesystem path a `file://` URI refers to (falling back to its raw path
+/// for non-file URIs, matching how the assembler names buffers).
+fn uri_to_path(uri: &Url) -> PathBuf {
+    uri.to_file_path()
+        .unwrap_or_else(|()| PathBuf::from(uri.path()))
+}
+
+/// Normalize a path for identity comparison: canonicalize when it exists on
+/// disk (resolving symlinks and `..`), else clean it lexically so unsaved
+/// buffers still compare equal.
+fn normalize(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path))
+}
+
+/// Lexically remove `.` and `..` components without touching the filesystem.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Cap on how many source files a workspace scan will enumerate, so a huge or
+/// misconfigured workspace can't stall analysis.
+const MAX_SCAN_FILES: usize = 4000;
+
+/// Enumerate `*.asm` / `*.s` files under the workspace roots, skipping hidden
+/// directories (including `.git`) and common build output.
+fn scan_source_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in roots {
+        walk_sources(root, &mut out);
+    }
+    out
+}
+
+fn walk_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    if out.len() >= MAX_SCAN_FILES {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue; // hidden files/dirs, including `.git`
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            if name == "target" || name == "node_modules" {
+                continue;
+            }
+            walk_sources(&path, out);
+        } else if is_source_file(&path) {
+            out.push(path);
+        }
+        if out.len() >= MAX_SCAN_FILES {
+            return;
+        }
+    }
+}
+
+fn is_source_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|e| e.to_str()), Some("asm" | "s"))
+}
+
+/// A file's `.include` graph over normalized paths.
+struct IncludeGraph {
+    /// Each known file → the files it directly includes.
+    includes: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl IncludeGraph {
+    /// Files nothing else includes — the entry points to assemble from.
+    fn roots(&self) -> Vec<PathBuf> {
+        let included: HashSet<&PathBuf> = self.includes.values().flatten().collect();
+        self.includes
+            .keys()
+            .filter(|p| !included.contains(p))
+            .cloned()
+            .collect()
+    }
+
+    /// Every file reachable from `root` by following includes (including it).
+    fn closure(&self, root: &Path) -> HashSet<PathBuf> {
+        let mut seen = HashSet::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(p) = stack.pop() {
+            if seen.insert(p.clone()) {
+                if let Some(children) = self.includes.get(&p) {
+                    stack.extend(children.iter().cloned());
+                }
+            }
+        }
+        seen
+    }
+
+    /// The entry roots whose closure contains `target`.
+    fn entry_roots_for(&self, target: &Path) -> Vec<PathBuf> {
+        self.roots()
+            .into_iter()
+            .filter(|r| self.closure(r).contains(target))
+            .collect()
+    }
+}
+
+/// Build the `.include` graph for `candidates`, reading each file's text through
+/// `read` (open buffer or disk) and resolving include targets file-relative,
+/// matching the assembler.
+fn build_include_graph(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    read: &impl Fn(&Path) -> Option<String>,
+) -> IncludeGraph {
+    let mut includes: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for file in candidates {
+        let norm = normalize(&file);
+        if includes.contains_key(&norm) {
+            continue;
+        }
+        let text = read(&file).unwrap_or_default();
+        let dir = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        let targets = include_targets(&text)
+            .into_iter()
+            .map(|t| normalize(&dir.join(t)))
+            .collect();
+        includes.insert(norm, targets);
+    }
+    IncludeGraph { includes }
+}
+
+/// The `.include` / `.inestrn` targets in a source file, as written (the raw
+/// double-quoted string), for resolving against the file's own directory.
+fn include_targets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed
+            .strip_prefix(".include")
+            .or_else(|| trimmed.strip_prefix(".inestrn"))
+        else {
+            continue;
+        };
+        // Guard against `.includes`-style prefixes: a real directive is followed
+        // by whitespace before its argument.
+        if !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        if let Some(q1) = rest.find('"') {
+            if let Some(len) = rest[q1 + 1..].find('"') {
+                out.push(rest[q1 + 1..q1 + 1 + len].to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Package diagnostics for a URI (version-less; full-document publish).
@@ -786,14 +1184,44 @@ pub fn run() -> LspResult<()> {
 /// tests inspect it.
 fn serve(connection: &Connection) -> LspResult<Server> {
     let capabilities = serde_json::to_value(server_capabilities())?;
-    let _client_params = connection.initialize(capabilities)?;
-    main_loop(connection)
+    let init_params = connection.initialize(capabilities)?;
+    let workspace_roots = workspace_roots_from_init(&init_params);
+    main_loop(connection, workspace_roots)
+}
+
+/// Extract workspace folder roots from the `initialize` params, preferring
+/// `workspaceFolders`, then the legacy `rootUri` / `rootPath`. An empty result
+/// means single-file analysis (no project scanning).
+fn workspace_roots_from_init(params: &serde_json::Value) -> Vec<PathBuf> {
+    if let Some(folders) = params.get("workspaceFolders").and_then(|f| f.as_array()) {
+        let roots: Vec<PathBuf> = folders
+            .iter()
+            .filter_map(|f| f.get("uri").and_then(serde_json::Value::as_str))
+            .filter_map(|u| Url::parse(u).ok())
+            .filter_map(|u| u.to_file_path().ok())
+            .collect();
+        if !roots.is_empty() {
+            return roots;
+        }
+    }
+    if let Some(uri) = params.get("rootUri").and_then(serde_json::Value::as_str) {
+        if let Some(path) = Url::parse(uri).ok().and_then(|u| u.to_file_path().ok()) {
+            return vec![path];
+        }
+    }
+    if let Some(path) = params.get("rootPath").and_then(serde_json::Value::as_str) {
+        return vec![PathBuf::from(path)];
+    }
+    Vec::new()
 }
 
 /// The message loop: answer requests (shutdown, completion) and, for each
 /// document notification, update the store and push refreshed diagnostics.
-fn main_loop(connection: &Connection) -> LspResult<Server> {
-    let mut server = Server::default();
+fn main_loop(connection: &Connection, workspace_roots: Vec<PathBuf>) -> LspResult<Server> {
+    let mut server = Server {
+        workspace_roots,
+        ..Server::default()
+    };
     for msg in &connection.receiver {
         match msg {
             Message::Request(req) => {
@@ -868,7 +1296,7 @@ fn main_loop(connection: &Connection) -> LspResult<Server> {
                 connection.sender.send(Message::Response(resp))?;
             }
             Message::Notification(note) => {
-                if let Some(params) = server.apply_notification(&note.method, note.params) {
+                for params in server.apply_notification(&note.method, note.params) {
                     connection.sender.send(Message::Notification(Notification {
                         method: PublishDiagnostics::METHOD.to_string(),
                         params: serde_json::to_value(params)?,
@@ -1233,13 +1661,158 @@ mod tests {
             open_params("file:///b.asm", "nop\n"),
         );
         assert_eq!(server.document_count(), 1);
-        let cleared = server
-            .apply_notification(
-                DidCloseTextDocument::METHOD,
-                serde_json::json!({ "textDocument": { "uri": "file:///b.asm" } }),
-            )
-            .expect("close yields a clear");
-        assert!(cleared.diagnostics.is_empty());
+        let cleared = server.apply_notification(
+            DidCloseTextDocument::METHOD,
+            serde_json::json!({ "textDocument": { "uri": "file:///b.asm" } }),
+        );
+        assert_eq!(cleared.len(), 1);
+        assert!(cleared[0].diagnostics.is_empty());
         assert_eq!(server.document_count(), 0);
+    }
+
+    // ---- Phase 7: workspace-aware analysis --------------------------------
+
+    /// A fresh, unique temp workspace directory.
+    fn workspace(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nessemble-lsp-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, name: &str, text: &str) {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+
+    fn server_for(root: &Path) -> Server {
+        Server {
+            workspace_roots: vec![root.to_path_buf()],
+            ..Default::default()
+        }
+    }
+
+    fn did_open(server: &mut Server, path: &Path, text: &str) -> Vec<PublishDiagnosticsParams> {
+        let uri = Url::from_file_path(path).unwrap();
+        server.apply_notification(DidOpenTextDocument::METHOD, open_params(uri.as_str(), text))
+    }
+
+    fn diags_for<'a>(
+        pubs: &'a [PublishDiagnosticsParams],
+        path: &Path,
+    ) -> Option<&'a Vec<Diagnostic>> {
+        let uri = Url::from_file_path(path).unwrap();
+        pubs.iter().find(|p| p.uri == uri).map(|p| &p.diagnostics)
+    }
+
+    #[test]
+    fn fragment_symbols_resolve_via_the_entry_root() {
+        // main.asm includes consts.asm (defines `palette`) then code.asm (uses
+        // it). Opening code.asm alone would flag `palette` as undefined; with
+        // project context it resolves.
+        let w = workspace("frag");
+        write(
+            &w,
+            "main.asm",
+            ".include \"consts.asm\"\n.include \"code.asm\"\n",
+        );
+        write(&w, "consts.asm", "palette = $3F00\n");
+        let code = w.join("code.asm");
+        write(&w, "code.asm", "  lda palette\n");
+
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &code, "  lda palette\n");
+        let d = diags_for(&pubs, &code).expect("code.asm published");
+        assert!(d.is_empty(), "unexpected diagnostics: {d:?}");
+
+        // Control: with no workspace, single-file analysis flags `palette`.
+        let mut lonely = Server::default();
+        let pubs = did_open(&mut lonely, &code, "  lda palette\n");
+        let d = diags_for(&pubs, &code).expect("code.asm published");
+        assert_eq!(d.len(), 1, "expected the cross-file false positive: {d:?}");
+        assert!(d[0].message.contains("palette"));
+
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn fragment_still_reports_its_own_real_errors() {
+        // A genuine error in the fragment survives project analysis; the
+        // cross-file symbol does not get flagged.
+        let w = workspace("real");
+        write(
+            &w,
+            "main.asm",
+            ".include \"consts.asm\"\n.include \"code.asm\"\n",
+        );
+        write(&w, "consts.asm", "palette = $3F00\n");
+        let code = w.join("code.asm");
+        let text = "  lda palette\n  notareal\n";
+        write(&w, "code.asm", text);
+
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &code, text);
+        let d = diags_for(&pubs, &code).expect("code.asm published");
+        assert_eq!(d.len(), 1, "diagnostics: {d:?}");
+        assert!(d[0].message.contains("notareal"), "{:?}", d[0].message);
+        assert_eq!(d[0].range.start.line, 1);
+
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn symbol_defined_under_any_root_is_not_flagged() {
+        // shared.asm is included by two roots; only r1 defines `thing`. The
+        // intersection rule means `thing` is not flagged.
+        let w = workspace("multiroot");
+        write(
+            &w,
+            "r1.asm",
+            ".include \"defs.asm\"\n.include \"shared.asm\"\n",
+        );
+        write(&w, "r2.asm", ".include \"shared.asm\"\n");
+        write(&w, "defs.asm", "thing = 1\n");
+        let shared = w.join("shared.asm");
+        write(&w, "shared.asm", "  lda #thing\n");
+
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &shared, "  lda #thing\n");
+        let d = diags_for(&pubs, &shared).expect("shared.asm published");
+        assert!(d.is_empty(), "thing should resolve under r1: {d:?}");
+
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn fixing_a_fragment_error_clears_it() {
+        let w = workspace("clear");
+        write(&w, "main.asm", ".include \"code.asm\"\n");
+        let code = w.join("code.asm");
+        write(&w, "code.asm", "  notareal\n");
+
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &code, "  notareal\n");
+        assert_eq!(diags_for(&pubs, &code).unwrap().len(), 1);
+
+        // Fix it via didChange → the error clears (empty publish for code.asm).
+        let uri = Url::from_file_path(&code).unwrap();
+        let changed = server.apply_notification(
+            DidChangeTextDocument::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri.as_str(), "version": 2 },
+                "contentChanges": [{ "text": "  nop\n" }]
+            }),
+        );
+        assert!(
+            diags_for(&changed, &code).unwrap().is_empty(),
+            "error should clear: {changed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&w);
     }
 }

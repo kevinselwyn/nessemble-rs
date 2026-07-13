@@ -1,12 +1,12 @@
 # nessemble-rs: A Plan for a Language Server
 
-> Status: **Phases 0–6 complete** (implemented and merged); the server ships
-> behind the default-on `lsp` feature and is run with `nessemble lsp`, and the
-> core now has an opt-in file-content overlay (Phase 6). **Phase 7 is planned** —
-> workspace-aware analysis wiring the overlay + include-graph discovery into the
-> server, to fix cross-file "symbol not defined" false positives. Phase 8
-> (advanced) remains optional/future. All planning decisions are settled (see
-> [§9 Decisions](#9-decisions)).
+> Status: **Phases 0–7 complete** (0–6 merged; 7 in review); the server ships
+> behind the default-on `lsp` feature and is run with `nessemble lsp`. Phase 7
+> adds **workspace-aware analysis** (auto include-graph discovery + the Phase-6
+> overlay), fixing cross-file "symbol not defined" false positives. Only the
+> optional **Phase 8** (folding/rename/code actions) remains; once it's done (or
+> declared out of scope), the `-dev` suffix drops to `2.5.0` for the release.
+> All planning decisions are settled (see [§9 Decisions](#9-decisions)).
 
 ---
 
@@ -231,37 +231,38 @@ Foundational for Phase 7; no LSP behavior change on its own.
   `overlay_supplies_an_include_absent_from_disk` and
   `overlay_takes_precedence_over_the_on_disk_file`; **parity 122/122**.)
 
-### Phase 7 — Workspace-aware analysis (project diagnostics) — *planned*
+### Phase 7 — Workspace-aware analysis (project diagnostics) — ✅ done
 
 Fixes cross-file **"symbol `xxx` was not defined"** false positives: nessemble
-symbols are global across the whole `.include` graph, but the server analyzes one
-buffer in isolation, so a symbol defined in a sibling/parent file looks
-undefined. The fix is to analyze each open file *in the context of its project*.
+symbols are global across the whole `.include` graph, but the server analyzed one
+buffer in isolation, so a symbol defined in a sibling/parent file looked
+undefined. The fix analyzes each open file *in the context of its project*.
 
-- **Entry-point discovery — auto include-graph scan (zero config).** Capture
-  `rootUri` / `workspaceFolders` at `initialize`. Enumerate `*.asm` / `*.s` under
-  the workspace (skipping `target/`, `.git/`, hidden dirs; bounded + cached),
-  extract each file's `.include` targets (resolved **file-relative**, matching
-  the assembler) to build a `file → included files` graph, and take **roots** =
-  files nobody includes. For the open file, assemble the root(s) whose closure
-  contains it, via the Phase-6 overlay so unsaved edits are reflected.
-- **Multi-root handling — intersect undefined sets.** When a fragment is
-  reachable from several roots, a symbol is only flagged if it is undefined under
-  **every** such root, so a symbol defined under *any* root is never a false
-  positive.
-- **Multi-file diagnostics.** A project assembly yields diagnostics across many
-  files; group by file, resolve to `Url`s, and publish a `PublishDiagnostics`
-  per file. Track previously-published URIs to explicitly **clear** a file when
-  its errors are fixed (LSP has no "clear all").
-- **Fallback.** If the open file is itself a root, an orphan included by nothing,
-  or the workspace can't be determined, assemble it directly — today's
-  single-file behavior.
-- **Config override** (auto + explicit) is a later addition layered on this: an
-  explicit entry list simply overrides discovery. Not built in this phase.
+- **Entry-point discovery — auto include-graph scan (zero config).** ✅ Captures
+  `workspaceFolders` (then legacy `rootUri`/`rootPath`) at `initialize`.
+  Enumerates `*.asm` / `*.s` under the workspace (skipping hidden dirs incl.
+  `.git`, plus `target/` / `node_modules`; bounded by `MAX_SCAN_FILES`),
+  extracts each file's `.include` / `.inestrn` targets (resolved
+  **file-relative**, matching the assembler) into an `IncludeGraph`, and takes
+  **roots** = files nobody includes. For the open file it assembles the root(s)
+  whose closure contains it, over the Phase-6 overlay (built from all open
+  buffers) so unsaved edits are reflected.
+- **Multi-root handling — intersect undefined sets.** ✅ `intersect_diag_sets`
+  keeps only the diagnostics common to *every* root that includes a file, so a
+  symbol defined under *any* root is never flagged.
+- **Multi-file diagnostics.** ✅ Core gained `Preprocessed.paths` + a
+  `diagnose_project` returning the flattened file table (name ↔ resolved path),
+  so each diagnostic maps back to a `Url`. Diagnostics are published per open
+  document; a `published` set tracks non-empty files so they are explicitly
+  **cleared** when fixed.
+- **Fallback.** ✅ If the workspace is unknown or the file isn't in any scanned
+  root's closure, it falls back to single-file analysis — today's behavior.
+- **Config override** (auto + explicit) remains a later addition layered on this.
 - **Done when:** opening a fragment no longer flags symbols defined in a
   sibling/parent file; single-file behavior is preserved when no root is found;
-  fixing an error clears it in every affected file; **parity 122/122 stays
-  green.**
+  fixing an error clears it. ✅ (four LSP unit tests over temp workspaces +
+  an end-to-end stdio check through a real `workspaceFolders` handshake; core
+  `overlay`/paths tests; **parity 122/122**.)
 
 ### Phase 8 — Advanced (optional / later)
 - Folding ranges, rename, code actions (quick-fixes). Scope TBD.
