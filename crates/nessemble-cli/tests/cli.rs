@@ -34,7 +34,7 @@ fn version_exits_129() {
     // around the version number rather than the number itself.
     let banner = String::from_utf8(out.stdout).unwrap();
     assert!(banner.starts_with("nessemble v"));
-    assert!(banner.ends_with("\n\nCopyright 2017 Kevin Selwyn\n"));
+    assert!(banner.ends_with("\n\nCopyright 2017-2026 Kevin Selwyn\n"));
 }
 
 #[test]

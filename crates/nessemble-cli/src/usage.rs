@@ -10,8 +10,18 @@ const PROGRAM_NAME: &str = "nessemble";
 /// The displayed version is the workspace (crate) version — the single source
 /// of truth that also drives the release pipeline.
 const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
-const PROGRAM_COPYRIGHT: &str = "2017";
-const PROGRAM_AUTHOR: &str = "Kevin Selwyn";
+const PROGRAM_COPYRIGHT: &str = "2017-2026";
+
+/// The author name shown in the banner, taken from the workspace `authors`
+/// metadata (`CARGO_PKG_AUTHORS`) so it lives in one place — the root
+/// `Cargo.toml`. The first author is used, with any ` <email>` suffix stripped.
+fn program_author() -> &'static str {
+    let first = env!("CARGO_PKG_AUTHORS").split(':').next().unwrap_or("");
+    first
+        .split_once(" <")
+        .map_or(first, |(name, _)| name)
+        .trim()
+}
 
 /// The GPL notice printed by `--license` (the body after the version header).
 const LICENSE_TEXT: &str = include_str!("../../../LICENSE.txt");
@@ -92,8 +102,9 @@ pub fn usage(exec: &str) -> String {
 /// The version banner (`nessemble v<version>` + copyright line).
 pub fn version() -> String {
     format!(
-        "{PROGRAM_NAME} v{PROGRAM_VERSION}\n\n{} {PROGRAM_COPYRIGHT} {PROGRAM_AUTHOR}\n",
-        t!("label-copyright")
+        "{PROGRAM_NAME} v{PROGRAM_VERSION}\n\n{} {PROGRAM_COPYRIGHT} {}\n",
+        t!("label-copyright"),
+        program_author()
     )
 }
 
@@ -112,7 +123,7 @@ mod tests {
         // the version number rather than the number itself.
         let banner = version();
         assert!(banner.starts_with("nessemble v"));
-        assert!(banner.ends_with("\n\nCopyright 2017 Kevin Selwyn\n"));
+        assert!(banner.ends_with("\n\nCopyright 2017-2026 Kevin Selwyn\n"));
     }
 
     #[test]
