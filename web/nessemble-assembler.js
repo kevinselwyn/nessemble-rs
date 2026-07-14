@@ -88,6 +88,10 @@
 
       this._source = trimBlankLines(this.textContent || "");
       this._opts = this.getAttribute("data-opts") || "";
+      // `collapsed` starts the byte output hidden (a toggle button expands it).
+      // The output of a full NES ROM is large, so the marketing demo sets this;
+      // the docs snippets leave it off so the bytes show next to the source.
+      this._collapsed = this.hasAttribute("collapsed");
       this.textContent = "";
       this._build();
     }
@@ -107,11 +111,15 @@
       reset.type = "button";
       var clear = el("button", "na-btn", "Clear");
       clear.type = "button";
+      // Collapses/expands the byte output; only shown once there are bytes.
+      this._toggle = el("button", "na-btn na-toggle", "Hide bytes");
+      this._toggle.type = "button";
+      this._toggle.hidden = true;
       this._download = el("a", "na-btn na-download", "Download");
       this._download.setAttribute("download", "assemble.rom");
       this._download.hidden = true;
 
-      bar.append(this._assembleBtn, reset, clear, this._download);
+      bar.append(this._assembleBtn, reset, clear, this._toggle, this._download);
 
       this._output = el("pre", "na-output");
       this._output.hidden = true;
@@ -127,12 +135,24 @@
         this._editor.value = "";
         this._clearOutput();
       });
+      this._toggle.addEventListener("click", () => {
+        this._output.hidden = !this._output.hidden;
+        this._updateToggle();
+      });
+    }
+
+    // Reflect the current output visibility on the toggle button's label.
+    _updateToggle() {
+      var hidden = this._output.hidden;
+      this._toggle.textContent = hidden ? "Show bytes" : "Hide bytes";
+      this._toggle.setAttribute("aria-expanded", hidden ? "false" : "true");
     }
 
     _clearOutput() {
       this._output.hidden = true;
       this._output.textContent = "";
       this._output.classList.remove("na-error");
+      this._toggle.hidden = true;
       this._download.hidden = true;
       if (this._url) {
         URL.revokeObjectURL(this._url);
@@ -170,7 +190,11 @@
         var text = hexdump(rom) + "\n\n" + rom.length + " bytes";
         if (warnings.length) text = warnings.join("\n") + "\n\n" + text;
         this._output.textContent = text;
-        this._output.hidden = false;
+        // Start expanded unless this element opted into collapsed output; the
+        // toggle button lets the reader flip it either way.
+        this._output.hidden = this._collapsed;
+        this._toggle.hidden = false;
+        this._updateToggle();
 
         this._url = URL.createObjectURL(
           new Blob([rom], { type: "application/octet-stream" })
@@ -210,6 +234,9 @@
       var replacement = document.createElement("nessemble-assembler");
       if (div.hasAttribute("data-opts")) {
         replacement.setAttribute("data-opts", div.getAttribute("data-opts"));
+      }
+      if (div.hasAttribute("collapsed")) {
+        replacement.setAttribute("collapsed", "");
       }
       replacement.textContent = div.textContent;
       div.replaceWith(replacement);

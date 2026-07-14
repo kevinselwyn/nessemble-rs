@@ -78,7 +78,7 @@
                 <p>Try it live: edit the program, click <strong>Assemble</strong>, and play the
                     result below &mdash; assembled in your browser with WebAssembly and emulated
                     with <a href="//github.com/bfirsh/jsnes">JSNES</a>.</p>
-                <nessemble-assembler id="demo" data-opts='{"format":"nes"}'>
+                <nessemble-assembler id="demo" data-opts='{"format":"nes"}' collapsed>
 .inesprg 1
 .ineschr 1
 .inesmap 0
@@ -348,6 +348,24 @@ palette:
             var running = false;
             function loop() { if (running) { nes.frame(); requestAnimationFrame(loop); } }
 
+            // TV static: fill the screen with grayscale noise until a ROM plays,
+            // so the "TV" isn't just black before the demo is assembled. Driven
+            // by a light interval (~15fps) rather than requestAnimationFrame so
+            // it doesn't spin the CPU while the page sits idle.
+            function drawStatic() {
+                for (var i = 0; i < 256 * 240; i++) {
+                    var v = (Math.random() * 256) | 0;
+                    buffer32[i] = 0xff000000 | (v << 16) | (v << 8) | v;
+                }
+                image.data.set(buffer8);
+                ctx.putImageData(image, 0, 0);
+            }
+            drawStatic();
+            var staticTimer = setInterval(drawStatic, 66);
+            function stopStatic() {
+                if (staticTimer !== null) { clearInterval(staticTimer); staticTimer = null; }
+            }
+
             // Keyboard → controller 1 (Z/X = B/A, arrows, Enter/Ctrl = Start/Select).
             var KEYS = {
                 88: jsnes.Controller.BUTTON_A,
@@ -372,6 +390,7 @@ palette:
                 var rom = e.detail.rom, bin = "";
                 for (var i = 0; i < rom.length; i++) { bin += String.fromCharCode(rom[i]); }
                 try { nes.loadROM(bin); } catch (err) { return; }
+                stopStatic();
                 if (!running) { running = true; requestAnimationFrame(loop); }
             });
         })();
