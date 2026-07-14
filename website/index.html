@@ -6,11 +6,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Nessemble | NES Assembler</title>
     <link rel="shortcut icon" href="static/favicon.ico">
-    <link rel="stylesheet" type="text/css" href="static/css/website.css" />
+    <!-- Bootstrap 3.3.7 and Font Awesome 4.6.3 from CDN; theme + custom styles are local. -->
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.3.7/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/font-awesome/4.6.3/css/font-awesome.min.css" />
+    <link rel="stylesheet" type="text/css" href="static/css/grayscale.css" />
+    <link rel="stylesheet" type="text/css" href="static/css/style.css" />
+    <link rel="stylesheet" type="text/css" href="static/nessemble/nessemble-assembler.css" />
     <link rel="stylesheet" type="text/css" href="//fonts.googleapis.com/css?family=Lora:400,700,400italic,700italic" />
     <link rel="stylesheet" type="text/css" href="//fonts.googleapis.com/css?family=Montserrat:400,700" />
 </head>
-<body id="page-top" data-spy="scroll" data-target=".navbar-fixed-top">
+<body id="page-top">
     <nav class="navbar navbar-custom navbar-fixed-top" role="navigation">
         <div class="container">
             <div class="navbar-header">
@@ -70,9 +75,166 @@
             <div class="col-lg-8 col-lg-offset-2">
                 <h2>About Nessemble</h2>
                 <p>Nessemble is a 6502 assembler targeting the Nintendo Entertainment System</p>
-                <p>See it in action:<br />(recorded with <a href="//asciinema.org/" target="_blank">asciinema</a>)</p>
-                <asciinema-player src="static/data/recording/example.json" id="asciinema"></asciinema-player>
-                <p>Actual assembled ROM:<br />(emulated with <a href="//github.com/bfirsh/jsnes">JSNES</a>)</p>
+                <p>Try it live: edit the program, click <strong>Assemble</strong>, and play the
+                    result below &mdash; assembled in your browser with WebAssembly and emulated
+                    with <a href="//github.com/bfirsh/jsnes">JSNES</a>.</p>
+                <nessemble-assembler id="demo" data-opts='{"format":"nes"}'>
+.inesprg 1
+.ineschr 1
+.inesmap 0
+.inesmir 1
+
+;;;;;;;;;;;;;;;;
+
+.rsset $0000
+
+scroll_y .rs 1
+
+;;;;;;;;;;;;;;;;
+
+.prg 0
+
+vblankwait:
+    BIT $2002
+    BPL vblankwait
+    RTS
+
+;;;;;;;;
+
+RESET:
+    SEI
+    CLD
+    LDX #$40
+    STX $4017
+    LDX #$FF
+    TXS
+    INX
+    STX $2000
+    STX $2001
+    STX $4010
+
+;;;;;;;;
+
+    JSR vblankwait
+
+;;;;;;;;
+
+clrmem:
+    LDA #$00
+    STA $0000, X
+    STA $0100, X
+    STA $0300, X
+    STA $0400, X
+    STA $0500, X
+    STA $0600, X
+    STA $0700, X
+    LDA #$FE
+    STA $0200, X
+    INX
+    BNE clrmem
+
+;;;;;;;;
+
+    JSR vblankwait
+
+;;;;;;;;
+
+LoadBackground:
+    LDA $2002
+    LDA #$20
+    STA $2006
+    LDA #$09
+    STA $2006
+    LDX #$00
+LoadBackgroundLoop:
+    LDA text, X
+    STA $2007
+    INX
+    CPX #$0D
+    BNE LoadBackgroundLoop
+
+;;;;;;;;
+
+LoadPalette:
+    LDA $2002
+    LDA #$3F
+    STA $2006
+    LDA #$00
+    STA $2006
+    LDX #$00
+LoadPaletteLoop:
+    LDA palette, X
+    STA $2007
+    INX
+    CPX #$20
+    BNE LoadPaletteLoop
+
+;;;;;;;;
+
+    LDA #%10000000
+    STA $2000
+
+    LDA #%00011110
+    STA $2001
+
+;;;;;;;;
+
+    LDA #$00
+    STA &lt;scroll_y
+
+;;;;;;;;
+
+Forever:
+    JMP Forever
+
+;;;;;;;;
+
+NMI:
+    LDA #$00
+    STA $2005
+
+    INC &lt;scroll_y
+    LDA &lt;scroll_y
+    CMP #$F0
+    BNE ScrollYDone
+    LDA #$00
+    STA &lt;scroll_y
+ScrollYDone:
+    STA $2005
+
+    RTI
+
+;;;;;;;;
+
+.org $E000
+
+text:
+    .ascii "Hello, World!"
+
+palette:
+    .color $000000, $000000, $000000, $000000
+    .color $000000, $000000, $000000, $000000
+    .color $000000, $000000, $000000, $000000
+    .color $000000, $000000, $000000, $000000
+    .color $FFFFFF, $FFFFFF, $FFFFFF, $FFFFFF
+    .color $FFFFFF, $FFFFFF, $FFFFFF, $FFFFFF
+    .color $FFFFFF, $FFFFFF, $FFFFFF, $FFFFFF
+    .color $FFFFFF, $FFFFFF, $FFFFFF, $FFFFFF
+
+;;;;;;;;
+
+.org $FFFA
+
+    .dw NMI
+    .dw RESET
+    .dw 0
+
+;;;;;;;;;;;;;;;;
+
+.chr 0
+
+    .font 0, 127
+</nessemble-assembler>
                 <div id="emulator-frame">
                     <div id="emulator"></div>
                     <div id="emulator-tv"></div>
@@ -125,11 +287,94 @@
         </div>
     </footer>
 
-    <script src="static/js/website.js"></script>
+    <!-- jsnes (jQuery-free) from CDN; the assembler component is local. -->
+    <script src="//cdn.jsdelivr.net/npm/jsnes@2.1.0/dist/jsnes.min.js"></script>
+    <script src="static/nessemble/nessemble-assembler.js"></script>
     <script type="text/javascript">
-        var nes = new JSNES({
-            ui: $('#emulator').JSNESUI('static/data/roms/example.nes')
-        });
+        (function () {
+            "use strict";
+
+            // --- Navbar (replaces Bootstrap collapse + the grayscale theme JS) ---
+            var toggle = document.querySelector(".navbar-toggle");
+            var menu = document.querySelector(".navbar-main-collapse");
+            if (toggle && menu) {
+                toggle.addEventListener("click", function () { menu.classList.toggle("in"); });
+                menu.querySelectorAll("a").forEach(function (link) {
+                    link.addEventListener("click", function () { menu.classList.remove("in"); });
+                });
+            }
+            // Shrink the fixed navbar once the page is scrolled.
+            var fixed = document.querySelector(".navbar-fixed-top");
+            function onScroll() {
+                if (fixed) { fixed.classList.toggle("top-nav-collapse", window.pageYOffset > 50); }
+            }
+            window.addEventListener("scroll", onScroll);
+            onScroll();
+            // Smooth-scroll for in-page anchors.
+            document.querySelectorAll("a.page-scroll").forEach(function (link) {
+                link.addEventListener("click", function (event) {
+                    var href = link.getAttribute("href");
+                    if (href && href.charAt(0) === "#") {
+                        var target = document.querySelector(href);
+                        if (target) {
+                            event.preventDefault();
+                            target.scrollIntoView({ behavior: "smooth" });
+                        }
+                    }
+                });
+            });
+
+            // --- Emulator (modern jsnes, no jQuery) ---
+            var screen = document.getElementById("emulator");
+            var canvas = document.createElement("canvas");
+            canvas.width = 256;
+            canvas.height = 240;
+            screen.appendChild(canvas);
+            var ctx = canvas.getContext("2d");
+            var image = ctx.getImageData(0, 0, 256, 240);
+            var buffer = new ArrayBuffer(image.data.length);
+            var buffer8 = new Uint8ClampedArray(buffer);
+            var buffer32 = new Uint32Array(buffer);
+
+            var nes = new jsnes.NES({
+                onFrame: function (frame) {
+                    for (var i = 0; i < 256 * 240; i++) { buffer32[i] = 0xff000000 | frame[i]; }
+                    image.data.set(buffer8);
+                    ctx.putImageData(image, 0, 0);
+                },
+                onStatusUpdate: function () {}
+            });
+
+            var running = false;
+            function loop() { if (running) { nes.frame(); requestAnimationFrame(loop); } }
+
+            // Keyboard → controller 1 (Z/X = B/A, arrows, Enter/Ctrl = Start/Select).
+            var KEYS = {
+                88: jsnes.Controller.BUTTON_A,
+                90: jsnes.Controller.BUTTON_B,
+                17: jsnes.Controller.BUTTON_SELECT,
+                13: jsnes.Controller.BUTTON_START,
+                38: jsnes.Controller.BUTTON_UP,
+                40: jsnes.Controller.BUTTON_DOWN,
+                37: jsnes.Controller.BUTTON_LEFT,
+                39: jsnes.Controller.BUTTON_RIGHT
+            };
+            document.addEventListener("keydown", function (e) {
+                if (KEYS[e.keyCode] !== undefined) { nes.buttonDown(1, KEYS[e.keyCode]); e.preventDefault(); }
+            });
+            document.addEventListener("keyup", function (e) {
+                if (KEYS[e.keyCode] !== undefined) { nes.buttonUp(1, KEYS[e.keyCode]); e.preventDefault(); }
+            });
+
+            // Play whatever the assembler builds.
+            document.getElementById("demo").addEventListener("nessemble:assembled", function (e) {
+                if (!e.detail.ok || !e.detail.rom.length) { return; }
+                var rom = e.detail.rom, bin = "";
+                for (var i = 0; i < rom.length; i++) { bin += String.fromCharCode(rom[i]); }
+                try { nes.loadROM(bin); } catch (err) { return; }
+                if (!running) { running = true; requestAnimationFrame(loop); }
+            });
+        })();
     </script>
 </body>
 </html>

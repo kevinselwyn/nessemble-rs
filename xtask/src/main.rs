@@ -9,7 +9,7 @@
 //!   fetch-oracle [--i386]   Download & extract the v1.1.1 release binary.
 //!   verify-goldens          Confirm the oracle reproduces every committed golden.
 //!   parity [--release]      Run nessemble-rs over the corpus and report parity.
-//!   wasm                    Build the WebAssembly assembler bundle (wasm-pack).
+//!   wasm                    Build the WebAssembly assembler bundle (wasm-bindgen).
 //!   help                    Show this help.
 //!
 //! It is intentionally dependency-free (std only), shelling out to `curl`,
@@ -58,7 +58,7 @@ fn print_help() {
          \x20 fetch-oracle [--i386]   Download & extract the v{REFERENCE_VERSION} release binary\n\
          \x20 verify-goldens          Confirm the oracle reproduces every committed golden\n\
          \x20 parity [--release]      Run nessemble-rs over the corpus and report parity\n\
-         \x20 wasm                    Build the WebAssembly assembler bundle (needs wasm-pack)\n\
+         \x20 wasm                    Build the WebAssembly assembler bundle (needs the wasm32 target + wasm-bindgen)\n\
          \x20 dist                    Build the GitHub Pages site (website + mdBook docs)\n\
          \x20 help                    Show this help"
     );
@@ -68,24 +68,47 @@ fn print_help() {
 // wasm — build the WebAssembly assembler bundle
 // ---------------------------------------------------------------------------
 
-/// Build the `nessemble-wasm` crate to a browser-ready bundle with `wasm-pack`
-/// (into `crates/nessemble-wasm/pkg/`). Requires `wasm-pack` and the
-/// `wasm32-unknown-unknown` target; the `web` target emits an ES module.
+/// Build the `nessemble-wasm` crate to a browser-ready ES-module bundle in
+/// `crates/nessemble-wasm/pkg/` (`nessemble.js` + `nessemble_bg.wasm`).
+///
+/// Compiles the cdylib to `wasm32-unknown-unknown` and runs `wasm-bindgen`
+/// directly (the pieces `wasm-pack` orchestrates) — no extra tool to install,
+/// and it matches the `wasm-bindgen` version pinned by the crate. Requires the
+/// `wasm32-unknown-unknown` target and `wasm-bindgen` on `PATH`.
 fn wasm() -> Result<(), String> {
-    let crate_dir = repo_root().join("crates/nessemble-wasm");
+    let root = repo_root();
     run_tool(
-        "wasm-pack",
+        "cargo",
         &[
             "build",
-            &crate_dir.to_string_lossy(),
+            "-p",
+            "nessemble-wasm",
             "--release",
             "--target",
+            "wasm32-unknown-unknown",
+        ],
+        Some(&root),
+    )?;
+
+    let wasm_in = root.join("target/wasm32-unknown-unknown/release/nessemble_wasm.wasm");
+    let out_dir = root.join("crates/nessemble-wasm/pkg");
+    run_tool(
+        "wasm-bindgen",
+        &[
+            "--target",
             "web",
+            "--no-typescript",
+            "--out-dir",
+            &out_dir.to_string_lossy(),
             "--out-name",
             "nessemble",
+            &wasm_in.to_string_lossy(),
         ],
         None,
-    )
+    )?;
+
+    println!("Built wasm bundle at {}", out_dir.display());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -96,14 +119,24 @@ fn wasm() -> Result<(), String> {
 /// the mdBook documentation under `site/docs/`. Requires `mdbook` on `PATH`.
 fn dist() -> Result<(), String> {
     let root = repo_root();
+
+    // Build the wasm bundle and stage it (with the assembler component) where
+    // the docs and the marketing site can each serve it.
+    wasm()?;
+    stage_web_assets(&root.join("docs/src/nessemble"))?;
+    stage_web_assets(&root.join("website/static/nessemble"))?;
+
     let site = root.join("site");
     let _ = std::fs::remove_dir_all(&site);
     std::fs::create_dir_all(&site).map_err(|e| e.to_string())?;
 
-    // Marketing website (index.html + static/) at the site root.
+    // Marketing website (index.html + static/, including the staged assembler)
+    // at the site root.
     copy_dir(&root.join("website"), &site)?;
 
-    // Documentation under /docs.
+    // Documentation under /docs. mdBook copies the staged `src/nessemble/`
+    // assets into the book, and `theme/head.hbs` loads the component on every
+    // page.
     run_tool(
         "mdbook",
         &["build", &root.join("docs").to_string_lossy()],
@@ -112,6 +145,25 @@ fn dist() -> Result<(), String> {
     copy_dir(&root.join("docs/book"), &site.join("docs"))?;
 
     println!("Built site at {}", site.display());
+    Ok(())
+}
+
+/// Copy the assembler component + the wasm bundle into `dest` (recreating it),
+/// for a docs or website asset directory. Requires [`wasm`] to have run first.
+fn stage_web_assets(dest: &Path) -> Result<(), String> {
+    let root = repo_root();
+    let _ = std::fs::remove_dir_all(dest);
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let assets = [
+        root.join("web/nessemble-assembler.js"),
+        root.join("web/nessemble-assembler.css"),
+        root.join("crates/nessemble-wasm/pkg/nessemble.js"),
+        root.join("crates/nessemble-wasm/pkg/nessemble_bg.wasm"),
+    ];
+    for src in assets {
+        let name = src.file_name().ok_or("bad asset path")?;
+        std::fs::copy(&src, dest.join(name)).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    }
     Ok(())
 }
 
