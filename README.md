@@ -22,9 +22,16 @@ custom pseudo-instructions written in [Rhai](https://rhai.rs).
 - **Media importers** — PNG/CHR graphics, palettes, RLE, and WAV/DPCM audio.
 - **Custom pseudo-instructions** — a sandboxed [Rhai](https://rhai.rs) scripting
   host for user-defined directives.
+- **Editor support** — a built-in [Language Server](docs/src/editor.md)
+  (`nessemble lsp`) speaking LSP over stdio, for VS Code, Neovim, Helix, Emacs,
+  and other LSP-capable editors.
+- **Runs in the browser** — a WebAssembly build assembles entirely client-side,
+  powering the framework-free `<nessemble-assembler>` web component on the
+  [project site](https://kevinselwyn.github.io/nessemble-rs/).
 - **Internationalization** — messages via [Project Fluent](https://projectfluent.org).
 - **Release packaging** — `.deb`, `.msi`, and `.pkg` artifacts for all supported
-  platforms, plus a generated documentation site.
+  platforms, plus a marketing site, the mdBook manual, and the in-browser
+  assembler deployed to GitHub Pages.
 
 ## Installation
 
@@ -43,6 +50,19 @@ nessemble project.asm --output project.nes --format nes    # assemble
 
 Run `project.nes` in any NES emulator to see the result.
 
+### In the browser
+
+`nessemble` also compiles to WebAssembly and assembles entirely client-side — try
+it live in the [in-browser assembler](https://kevinselwyn.github.io/nessemble-rs/),
+or embed the framework-free `<nessemble-assembler>` web component (see
+[`web/`](web/)).
+
+### Editor support
+
+Run `nessemble lsp` to start the built-in Language Server (LSP over stdio) for
+diagnostics in any LSP-capable editor. See
+[`docs/src/editor.md`](docs/src/editor.md).
+
 ## Workspace layout
 
 ```text
@@ -52,8 +72,12 @@ crates/
   nessemble-media/   # asset importers: PNG/CHR, palette, RLE, WAV/DPCM
   nessemble-script/  # Rhai custom pseudo-op host (feature-gated)
   nessemble-i18n/    # Project Fluent i18n
+  nessemble-lsp/     # Language Server Protocol implementation
+  nessemble-wasm/    # WebAssembly build — in-browser assembler
   nessemble-cli/     # the `nessemble` binary
-xtask/               # developer tasks (parity harness, oracle fetch)
+web/                 # <nessemble-assembler> web component (wraps the wasm build)
+website/             # marketing site (deployed with the manual to GitHub Pages)
+xtask/               # developer tasks (parity harness, oracle fetch, `dist` site build)
 tests/corpus/        # assemble fixtures (.asm + golden .rom)
 ```
 
@@ -90,6 +114,15 @@ The manual lives under [`docs/`](docs/) and builds with
 
 ```bash
 mdbook build docs
+```
+
+To build the full site published to GitHub Pages — the marketing site, the
+manual, and the WebAssembly in-browser assembler — into `site/`:
+
+```bash
+rustup target add wasm32-unknown-unknown                 # once
+cargo install wasm-bindgen-cli --version <Cargo.lock>    # once, matching Cargo.lock
+cargo run -p xtask -- dist
 ```
 
 ## License
