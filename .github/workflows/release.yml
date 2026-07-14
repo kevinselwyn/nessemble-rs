@@ -13,6 +13,7 @@ name: Release
 #   Linux i386     nessemble_<v>_i386.deb
 #   Windows 32-bit nessemble_<v>_win32.exe  nessemble_<v>_win32.msi
 #   Windows 64-bit nessemble_<v>_win64.exe  nessemble_<v>_win64.msi
+#   WebAssembly    nessemble_<v>_wasm.tar.gz  (the in-browser assembler bundle)
 #
 # The macOS .pkg is unsigned, so Gatekeeper blocks it after download; the plain
 # binary tarball is provided as a signing-free alternative (see the release
@@ -154,14 +155,73 @@ jobs:
             *.pkg
             *.tar.gz
 
+  # --------------------------------------------------------------- WASM bundle
+  #
+  # The browser build of the assembler: the `nessemble-wasm` glue + `.wasm`, the
+  # `<nessemble-assembler>` Web Component (JS + CSS), and a short usage README,
+  # packaged as a tarball so the interactive assembler can be dropped into any
+  # site without building it.
+  wasm:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen-cli
+        # Must match the wasm-bindgen version in Cargo.lock, or the generated
+        # bindings are rejected with a schema-version mismatch.
+        run: cargo install wasm-bindgen-cli --version 0.2.126
+      - name: Build wasm bundle
+        run: cargo run -p xtask -- wasm
+      - name: Package
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          dir="nessemble-wasm-$v"
+          mkdir -p "$dir"
+          cp crates/nessemble-wasm/pkg/nessemble.js crates/nessemble-wasm/pkg/nessemble_bg.wasm "$dir/"
+          cp web/nessemble-assembler.js web/nessemble-assembler.css "$dir/"
+          cat > "$dir/README.md" <<'README'
+          # nessemble — in-browser assembler
+
+          A WebAssembly build of the nessemble 6502/NES assembler plus the
+          `<nessemble-assembler>` Web Component.
+
+          ## Use
+
+          Serve these files over HTTP (the component `import()`s the wasm glue and
+          `fetch()`es the `.wasm`, which browsers block on `file://`), then:
+
+          ```html
+          <link rel="stylesheet" href="nessemble-assembler.css">
+          <script src="nessemble-assembler.js"></script>
+
+          <nessemble-assembler>
+            lda #$00
+            nop
+          </nessemble-assembler>
+          ```
+
+          The element assembles its source in the browser and shows a hex dump
+          with a download link. Options (iNES output, custom pseudo-op scripts)
+          go in a `data-opts` JSON attribute; see the documentation.
+          README
+          tar -czf "nessemble_${v}_wasm.tar.gz" "$dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: "*.tar.gz"
+
   # ----------------------------------------------------------------- Release
   #
   # Creates the `v<version>` tag (at this commit) and its GitHub Release,
-  # uploads all eight artifacts, and auto-generates release notes listing every
+  # uploads all artifacts, and auto-generates release notes listing every
   # pull request merged since the previous release (GitHub's "What's Changed"
   # changelog; grouping is configured in .github/release.yml).
   release:
-    needs: [version, linux, windows, macos]
+    needs: [version, linux, windows, macos, wasm]
     if: needs.version.outputs.exists == 'false'
     runs-on: ubuntu-latest
     permissions:
@@ -193,6 +253,7 @@ jobs:
             | Linux i386     | `nessemble_*_i386.deb`                     |
             | Windows 32-bit | `nessemble_*_win32.exe`, `…_win32.msi`     |
             | Windows 64-bit | `nessemble_*_win64.exe`, `…_win64.msi`     |
+            | WebAssembly    | `nessemble_*_wasm.tar.gz` (in-browser assembler) |
 
             #### macOS: "Apple could not verify…" on the `.pkg`
 
