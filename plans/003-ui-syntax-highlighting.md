@@ -4,9 +4,10 @@
 > assembler's own lexer, exposed to the browser via the existing `nessemble-wasm`
 > bundle, and render a highlight overlay behind the `<nessemble-assembler>`
 > editor **and** the docs' static code blocks (both reuse the one lexer). No
-> language server runs in the browser. Surfaces were confirmed per request to
-> include static blocks; the remaining scoping choices in §6 (granularity, theming,
-> version) are **default answers open to review** — redirect any before Phase 0.
+> language server runs in the browser. All scoping choices in §6 are **settled**:
+> 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
+> fence tag + re-tag sweep), one shared light/dark palette, shipped as patch
+> `2.7.1`. Ready to start at Phase 0.
 
 ---
 
@@ -156,12 +157,18 @@ get the same highlighting, baked at build time — sharing the classifier and th
 CSS with the editor, not a separate grammar.
 
 - **An mdBook preprocessor** that reads the book JSON on stdin, walks each
-  chapter's Markdown, and for every fenced code block tagged as nessemble assembly
-  (info string TBD — e.g. ` ```asm `; a small decision, §7) runs
+  chapter's Markdown, and for every code fence tagged **` ```nessemble `** runs
   `nessemble_core::tooling::highlight` and replaces the fence with raw HTML:
   `<pre class="na-code"><code>` + HTML-escaped `<span class="na-tok-…">`s. Emitting
   HTML (rather than a fenced block) means mdBook's stock highlight.js leaves it
   alone — no double-highlighting, no per-language JS grammar.
+- **Opt-in re-tag sweep.** The docs currently fence assembly as ` ```text ` (~135
+  fences, mixed with non-asm like directory trees, tables, and command output), so
+  the dedicated ` ```nessemble ` tag is an explicit opt-in: a one-time docs pass
+  reclassifies the genuinely-assembly ` ```text ` blocks to ` ```nessemble `. Only
+  re-tagged blocks are highlighted; everything else is untouched. (This also lets
+  the preprocessor be strict — an unlexable ` ```nessemble ` block is an authoring
+  error worth surfacing, rather than a silent guess.)
 - **Where it lives:** a build-time-only tool that reuses the workspace lexer. Add
   it as an `xtask` subcommand (`xtask mdbook-highlight`) wired into `docs/book.toml`
   as `[preprocessor.nessemble-highlight] command = "cargo run -q -p xtask --
@@ -213,12 +220,15 @@ only on the shared classifier from Phase 0 and are otherwise independent.
   still work.
 
 ### Phase 3 — Static docs code blocks (mdBook preprocessor)
-- Add the `xtask mdbook-highlight` preprocessor (§4.6): lex nessemble code fences
-  with `tooling::highlight`, emit HTML-escaped `na-tok-*` spans, register it in
-  `docs/book.toml`. Depends only on Phase 0 (independent of the wasm track).
-- **Done when:** `xtask dist` produces docs whose static nessemble code fences are
+- Add the `xtask mdbook-highlight` preprocessor (§4.6): lex ` ```nessemble ` code
+  fences with `tooling::highlight`, emit HTML-escaped `na-tok-*` spans, register it
+  in `docs/book.toml`. Depends only on Phase 0 (independent of the wasm track).
+- **Re-tag sweep:** reclassify the genuinely-assembly ` ```text ` fences in
+  `docs/src/*.md` to ` ```nessemble ` (the opt-in signal); leave non-asm ` ```text `
+  (trees, tables, output) and other languages alone.
+- **Done when:** `xtask dist` produces docs whose ` ```nessemble ` fences are
   highlighted with the shared classes (verified in headless Chromium), stock
-  highlight.js no longer touches them, and non-nessemble fences are unchanged.
+  highlight.js no longer touches them, and all other fences are unchanged.
 
 ### Phase 4 — Theming across both surfaces + site
 - One overridable `--na-tok-*` light/dark palette (§4.4) applied to the editor
@@ -244,23 +254,24 @@ Architectural (settled):
    wasm build, so highlighting stays identical across the CLI's LSP and the
    browser.
 
-Scoping (default answers to the open questions — flagged here so a reviewer can
-redirect any of them before Phase 0):
+Scoping (confirmed):
 
 4. **Granularity — the LSP's current 7 classes** (directive, instruction,
    identifier, number, string, comment, operator), exposed to JS as a flat
    `Uint32Array` of `[start, len, class]` triples in UTF-16 units. Kept a superset
    later if a richer look (registers, label-vs-constant, opcode-vs-pseudo) is
    wanted — the LSP would then collapse the extras back to its 7.
-5. **Surfaces — the interactive editor *and* the docs' static code blocks**
-   (updated per request). The editor uses the wasm `tokenize` at runtime; the
-   static blocks use the same `tooling::highlight` in a build-time mdBook
-   preprocessor (§4.6) — one classifier, one stylesheet, no grammar. **GitHub
-   Linguist** highlighting stays out of scope (§8) — it needs a TextMate grammar.
+5. **Surfaces — the interactive editor *and* the docs' static code blocks.** The
+   editor uses the wasm `tokenize` at runtime; the static blocks use the same
+   `tooling::highlight` in a build-time mdBook preprocessor (§4.6) — one
+   classifier, one stylesheet, no grammar. Static blocks opt in via a dedicated
+   **` ```nessemble `** fence tag, applied by a one-time re-tag sweep of the docs'
+   assembly ` ```text ` fences (§4.6, Phase 3). **GitHub Linguist** highlighting
+   stays out of scope (§8) — it needs a TextMate grammar.
 6. **Theming — one dedicated, overridable palette** with light/dark variants
    (§4.4), not a per-theme match, for a consistent look; `--na-tok-*` variables
    leave per-surface overrides open.
-7. **Version — minor feature: `2.8.0-dev` while landing, `2.8.0` to ship**
+7. **Version — patch release: `2.7.1-dev` while landing, `2.7.1` to ship**
    (main is `2.7.0`).
 
 ## 7. Risks & open constraints
@@ -277,14 +288,14 @@ redirect any of them before Phase 0):
 - **UTF-16 vs byte offsets** — emit UTF-16 units from `highlight` so JS slicing is
   correct on non-ASCII (reuse the LSP's `utf16_len`).
 - **Wasm size** — negligible; `tokenize` reuses the lexer already in the bundle.
-- **Preprocessor info string** — decide which fenced-code tag marks nessemble
-  assembly (` ```asm `, ` ```6502 `, or a dedicated tag) and confirm existing docs
-  fences use it consistently, so the preprocessor highlights the right blocks and
-  leaves the rest to stock highlight.js.
+- **Re-tag accuracy** — the ` ```nessemble ` sweep must catch the assembly
+  ` ```text ` fences without sweeping in look-alikes (register dumps, memory maps,
+  command output). A block that doesn't lex cleanly as assembly should be caught in
+  review (the preprocessor can warn), not silently mis-highlighted.
 - **Versioning** — land the feature under a pre-release `-dev` version (as the LSP
   and wasm work did) so intermediate merges don't cut a release; drop the suffix in
-  Phase 5. Main is currently `2.7.0`; a minor feature → `2.8.0-dev` while landing,
-  `2.8.0` to ship.
+  Phase 5. Main is currently `2.7.0`; shipped as a patch → `2.7.1-dev` while
+  landing, `2.7.1` to ship.
 
 ## 8. Non-goals
 
