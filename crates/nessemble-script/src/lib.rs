@@ -18,6 +18,19 @@
 //!   package (`open_file`, `File#read_string`, `File#read_blob`, `File#write`,
 //!   …), so a directive can pull bytes from disk. Because of this, pseudo-op
 //!   scripts are **not** sandboxed from the filesystem — run only ones you trust.
+//!
+//! # Built-in helpers
+//!
+//! Beyond the Rhai standard library (arrays with `+=`/`append`/`extract`, string
+//! indexing, `abs`, …), the host registers:
+//!
+//! - `read_blob(path)` / `decode_png_file(path)` — read (and decode) a file in
+//!   one call, resolving relative paths like `open_file` (feature `fs`).
+//! - `decode_png(blob)` → `#{ width, height, pixels }` and pixel accessors over
+//!   that map: `img.r(x, y)`, `img.pixel(x, y)`, `img.tile(col, row, tw, th)`.
+//! - `quantize(value, thresholds)` (also over an array of values) and
+//!   `nes_shade(value)` (the NES 4-shade case; also over an array) to snap a
+//!   grayscale value to a palette index.
 
 use std::path::Path;
 #[cfg(feature = "fs")]
@@ -90,12 +103,32 @@ fn engine(base_dir: &Path) -> Engine {
         // rhai-fs turns a path string into a `PathBuf` via this `path` function,
         // so redefining it reroutes every relative `open_file`/`open_dir`.
         let base = base_dir.to_path_buf();
-        engine.register_fn("path", move |p: &str| -> PathBuf {
-            let path = PathBuf::from(p);
-            if path.is_relative() {
-                base.join(path)
-            } else {
-                path
+        engine.register_fn("path", {
+            let base = base.clone();
+            move |p: &str| -> PathBuf { resolve(&base, p) }
+        });
+        // `read_blob(path)` — read a whole file as a blob, resolving relative
+        // paths against the source directory (same rooting as `open_file`). Saves
+        // the `open_file(path, "r").read_blob()` handle/mode ceremony.
+        engine.register_fn("read_blob", {
+            let base = base.clone();
+            move |p: &str| -> Result<Blob, Box<EvalAltResult>> {
+                let full = resolve(&base, p);
+                std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
+                    format!("read_blob: cannot read {}: {e}", full.display()).into()
+                })
+            }
+        });
+        // `decode_png_file(path)` — read and decode a PNG in one call
+        // (`decode_png(read_blob(path))`).
+        engine.register_fn("decode_png_file", {
+            let base = base.clone();
+            move |p: &str| -> Result<Map, Box<EvalAltResult>> {
+                let full = resolve(&base, p);
+                let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
+                    format!("decode_png_file: cannot read {}: {e}", full.display()).into()
+                })?;
+                decode_png(bytes)
             }
         });
     }
@@ -105,7 +138,37 @@ fn engine(base_dir: &Path) -> Engine {
     // PNG decoding for scripts: `decode_png(blob)` → a map of width/height and
     // interleaved RGBA pixels (typically fed an `open_file(...).read_blob()`).
     engine.register_fn("decode_png", decode_png);
+
+    // Pixel/tile accessors over a `decode_png` map, so scripts don't recompute
+    // `(y * width + x) * 4` offsets by hand:
+    //   `img.r(x, y)`            → the pixel's red channel (grayscale value)
+    //   `img.pixel(x, y)`        → `[r, g, b, a]`
+    //   `img.tile(col, row, w, h)` → the w×h block's red channels, row-major
+    engine.register_fn("r", img_channel_r);
+    engine.register_fn("pixel", img_pixel);
+    engine.register_fn("tile", img_tile);
+
+    // Palette quantization. `quantize(value, thresholds)` counts how many
+    // ascending `thresholds` `value` reaches (also accepts an array of values);
+    // `nes_shade(value)` is the NES 4-shade case with thresholds [43, 128, 213]
+    // (also accepts an array).
+    engine.register_fn("quantize", quantize_int);
+    engine.register_fn("quantize", quantize_arr);
+    engine.register_fn("nes_shade", nes_shade_scalar);
+    engine.register_fn("nes_shade", nes_shade_arr);
     engine
+}
+
+/// Resolve a script-supplied path against the directive's source directory:
+/// relative paths join `base`, absolute paths are used as-is.
+#[cfg(feature = "fs")]
+fn resolve(base: &Path, p: &str) -> PathBuf {
+    let path = PathBuf::from(p);
+    if path.is_relative() {
+        base.join(path)
+    } else {
+        path
+    }
 }
 
 /// `decode_png(blob)` — decode PNG bytes (e.g. from `open_file(path).read_blob()`)
@@ -128,6 +191,159 @@ fn decode_png(blob: Blob) -> Result<Map, Box<EvalAltResult>> {
     map.insert("height".into(), Dynamic::from(i64::from(img.height)));
     map.insert("pixels".into(), Dynamic::from(pixels));
     Ok(map)
+}
+
+/// Read the `width`/`height` integer fields of a `decode_png`-style map.
+fn img_dims(img: &Map) -> Result<(i64, i64), Box<EvalAltResult>> {
+    let field = |k: &str| -> Result<i64, Box<EvalAltResult>> {
+        img.get(k)
+            .and_then(|d| d.as_int().ok())
+            .ok_or_else(|| -> Box<EvalAltResult> {
+                format!("image map is missing integer field `{k}`").into()
+            })
+    };
+    Ok((field("width")?, field("height")?))
+}
+
+/// Borrow a map's `pixels` array (without cloning it) and run `f` over it. The
+/// closure form lets callers hold the read-lock guard without naming its type.
+fn with_pixels<T>(
+    img: &Map,
+    f: impl FnOnce(&Array) -> Result<T, Box<EvalAltResult>>,
+) -> Result<T, Box<EvalAltResult>> {
+    let pixels = img
+        .get("pixels")
+        .and_then(rhai::Dynamic::read_lock::<Array>)
+        .ok_or_else(|| -> Box<EvalAltResult> {
+            "image map is missing an array `pixels` field".into()
+        })?;
+    f(&pixels)
+}
+
+/// Read one RGBA byte from a pixel array, mapping a short array to a clear error.
+fn pixel_byte(pixels: &Array, idx: usize) -> Result<i64, Box<EvalAltResult>> {
+    pixels
+        .get(idx)
+        .and_then(|d| d.as_int().ok())
+        .ok_or_else(|| -> Box<EvalAltResult> { "image `pixels` array is truncated".into() })
+}
+
+/// `img.r(x, y)` — the red channel of pixel `(x, y)`. Images used by these
+/// scripts are grayscale (R == G == B), so this is the shade value.
+fn img_channel_r(img: &mut Map, x: i64, y: i64) -> Result<i64, Box<EvalAltResult>> {
+    let (w, h) = img_dims(img)?;
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return Err(format!("pixel ({x}, {y}) is out of bounds for {w}x{h} image").into());
+    }
+    with_pixels(img, |pixels| pixel_byte(pixels, ((y * w + x) * 4) as usize))
+}
+
+/// `img.pixel(x, y)` — the pixel as a `[r, g, b, a]` array.
+fn img_pixel(img: &mut Map, x: i64, y: i64) -> Result<Array, Box<EvalAltResult>> {
+    let (w, h) = img_dims(img)?;
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return Err(format!("pixel ({x}, {y}) is out of bounds for {w}x{h} image").into());
+    }
+    let base = ((y * w + x) * 4) as usize;
+    with_pixels(img, |pixels| {
+        let mut out = Array::with_capacity(4);
+        for k in 0..4 {
+            out.push(Dynamic::from(pixel_byte(pixels, base + k)?));
+        }
+        Ok(out)
+    })
+}
+
+/// `img.tile(col, row, tw, th)` — the `tw`×`th` block at tile coordinate
+/// `(col, row)` as a flat, row-major array of red-channel (shade) values. Pairs
+/// with `nes_shade`/`quantize` to turn a block into palette indices in one line.
+fn img_tile(
+    img: &mut Map,
+    col: i64,
+    row: i64,
+    tw: i64,
+    th: i64,
+) -> Result<Array, Box<EvalAltResult>> {
+    if tw <= 0 || th <= 0 {
+        return Err(format!("tile size must be positive, got {tw}x{th}").into());
+    }
+    let (w, h) = img_dims(img)?;
+    let (x0, y0) = (col * tw, row * th);
+    if col < 0 || row < 0 || x0 + tw > w || y0 + th > h {
+        return Err(format!(
+            "tile ({col}, {row}) of size {tw}x{th} is out of bounds for {w}x{h} image"
+        )
+        .into());
+    }
+    with_pixels(img, |pixels| {
+        let mut out = Array::with_capacity((tw * th) as usize);
+        for py in 0..th {
+            for px in 0..tw {
+                let idx = (((y0 + py) * w + (x0 + px)) * 4) as usize;
+                out.push(Dynamic::from(pixel_byte(pixels, idx)?));
+            }
+        }
+        Ok(out)
+    })
+}
+
+/// Count how many ascending `thresholds` `value` reaches — the palette index for
+/// a value snapped to bands delimited by `thresholds`.
+fn quantize_scalar(value: i64, thresholds: &Array) -> Result<i64, Box<EvalAltResult>> {
+    let mut idx = 0;
+    for t in thresholds {
+        let tv = t.as_int().map_err(|ty| -> Box<EvalAltResult> {
+            format!("quantize: threshold must be an integer, got {ty}").into()
+        })?;
+        if value >= tv {
+            idx += 1;
+        }
+    }
+    Ok(idx)
+}
+
+/// `quantize(value, thresholds)` — palette index for a single value.
+#[allow(clippy::needless_pass_by_value)]
+fn quantize_int(value: i64, thresholds: Array) -> Result<i64, Box<EvalAltResult>> {
+    quantize_scalar(value, &thresholds)
+}
+
+/// `quantize(values, thresholds)` — palette index for each value in an array.
+#[allow(clippy::needless_pass_by_value)]
+fn quantize_arr(values: Array, thresholds: Array) -> Result<Array, Box<EvalAltResult>> {
+    let mut out = Array::with_capacity(values.len());
+    for v in &values {
+        let vi = v.as_int().map_err(|ty| -> Box<EvalAltResult> {
+            format!("quantize: value must be an integer, got {ty}").into()
+        })?;
+        out.push(Dynamic::from(quantize_scalar(vi, &thresholds)?));
+    }
+    Ok(out)
+}
+
+/// Midpoint thresholds between the four NES shades (0, 85, 170, 255).
+const NES_SHADE_THRESHOLDS: [i64; 3] = [43, 128, 213];
+
+fn nes_shade_of(value: i64) -> i64 {
+    NES_SHADE_THRESHOLDS.iter().filter(|&&t| value >= t).count() as i64
+}
+
+/// `nes_shade(value)` — snap a grayscale value to NES palette index 0–3.
+fn nes_shade_scalar(value: i64) -> i64 {
+    nes_shade_of(value)
+}
+
+/// `nes_shade(values)` — snap each value in an array to NES palette index 0–3.
+#[allow(clippy::needless_pass_by_value)]
+fn nes_shade_arr(values: Array) -> Result<Array, Box<EvalAltResult>> {
+    let mut out = Array::with_capacity(values.len());
+    for v in &values {
+        let vi = v.as_int().map_err(|ty| -> Box<EvalAltResult> {
+            format!("nes_shade: value must be an integer, got {ty}").into()
+        })?;
+        out.push(Dynamic::from(nes_shade_of(vi)));
+    }
+    Ok(out)
 }
 
 /// Convert a script's return value into emitted bytes.
@@ -324,5 +540,100 @@ mod tests {
         let src = r#"fn custom(ints, texts) { decode_png(open_file("bad.png", "r").read_blob()) }"#;
         let err = run(src, &[], &[], &dir.0).unwrap_err();
         assert!(err.contains("not a valid PNG"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn read_blob_and_decode_png_file_are_one_call_conveniences() {
+        let dir = TempDir::new("read-blob");
+        std::fs::write(dir.0.join("asset.bin"), b"\x01\x02\x03").unwrap();
+        let png = png_bytes(1, 1, &[9, 8, 7, 255]);
+        std::fs::write(dir.0.join("img.png"), &png).unwrap();
+
+        // read_blob(path) == open_file(path, "r").read_blob()
+        let src = r#"fn custom(ints, texts) { read_blob("asset.bin") }"#;
+        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), b"\x01\x02\x03");
+
+        // decode_png_file(path) == decode_png(read_blob(path))
+        let src = r#"
+            fn custom(ints, texts) {
+                let img = decode_png_file("img.png");
+                [img.width, img.height, img.r(0, 0)]
+            }
+        "#;
+        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![1, 1, 9]);
+    }
+
+    #[test]
+    fn image_pixel_accessors_read_channels_and_tiles() {
+        let dir = TempDir::new("img-accessors");
+        // 2x2 image, one distinct grayscale value per pixel so offsets are visible.
+        #[rustfmt::skip]
+        let rgba = [
+            10, 10, 10, 255,   20, 20, 20, 255,
+            30, 30, 30, 255,   40, 40, 40, 255,
+        ];
+        std::fs::write(dir.0.join("g.png"), png_bytes(2, 2, &rgba)).unwrap();
+        let src = r#"
+            fn custom(ints, texts) {
+                let img = decode_png_file("g.png");
+                let out = [];
+                out += img.pixel(1, 0);      // [20,20,20,255]
+                out.push(img.r(0, 1));       // 30
+                out += img.tile(0, 0, 2, 2); // whole image: [10,20,30,40]
+                out
+            }
+        "#;
+        assert_eq!(
+            run(src, &[], &[], &dir.0).unwrap(),
+            vec![20, 20, 20, 255, 30, 10, 20, 30, 40]
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_pixel_access_is_an_error() {
+        let dir = TempDir::new("img-oob");
+        std::fs::write(dir.0.join("g.png"), png_bytes(1, 1, &[0, 0, 0, 255])).unwrap();
+        let src = r#"fn custom(ints, texts) { [decode_png_file("g.png").r(5, 0)] }"#;
+        let err = run(src, &[], &[], &dir.0).unwrap_err();
+        assert!(err.contains("out of bounds"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn quantize_and_nes_shade_snap_to_palette_indices() {
+        // nes_shade uses thresholds [43, 128, 213]; scalar and array forms.
+        let src = r"
+            fn custom(ints, texts) {
+                [
+                    nes_shade(0), nes_shade(100), nes_shade(200), nes_shade(255),
+                    quantize(100, [43, 128, 213]),
+                ] + nes_shade([0, 50, 130, 220])
+            }
+        ";
+        assert_eq!(
+            run(src, &[], &[], cwd()).unwrap(),
+            vec![0, 1, 2, 3, 1, 0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn rhai_stdlib_supports_the_refactor_helpers() {
+        // The thrilla refactor leans on stock Rhai (no host builtin needed) for
+        // abs(), array `+=` / `extract`, and string indexing. Guard those here so
+        // a feature-flag change that drops them is caught in this crate.
+        let src = r#"
+            fn custom(ints, texts) {
+                let out = [];
+                out += [1, 2, 3];                 // array extend via +=
+                out += [9, 8, 7].extract(1, 2);   // sub-array [8, 7]
+                out.push(abs(-4));                 // abs
+                let s = "AB";
+                out.push(s[1].to_int());           // string indexing -> 'B' = 66
+                out
+            }
+        "#;
+        assert_eq!(
+            run(src, &[], &[], cwd()).unwrap(),
+            vec![1, 2, 3, 8, 7, 4, 66]
+        );
     }
 }
