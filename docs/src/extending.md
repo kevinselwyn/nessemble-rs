@@ -110,6 +110,8 @@ disk instead of only computing them. The main entry point is `open_file`:
 - On the returned file handle: `read_blob()` / `read_string()` return the whole
   file, `read_blob(n)` / `read_string(n)` read `n` bytes, `write(blob_or_string)`
   writes bytes and returns the count, and `seek(pos)` moves the cursor.
+- `read_blob(path)` is a one-call shorthand for reading a whole file — it returns
+  the file's bytes as a blob, equivalent to `open_file(path, "r").read_blob()`.
 
 Relative paths resolve against the **source file's directory** — the same base
 as `.include` and the `.inc*` importers — while absolute paths are used as-is.
@@ -139,6 +141,13 @@ into a map of the image's dimensions and its pixels:
 let img = decode_png(open_file("sprite.png", "r").read_blob());
 ```
 
+`decode_png_file(path)` is a one-call shorthand for the common case, equivalent
+to `decode_png(read_blob(path))`:
+
+```rust,ignore
+let img = decode_png_file("sprite.png");
+```
+
 The returned map has:
 
 - `width` — the image width in pixels (integer).
@@ -147,20 +156,47 @@ The returned map has:
   **`R, G, B, A`** order, row-major. Pixel `(x, y)` starts at index
   `(y * width + x) * 4`.
 
-`decode_png` throws if the blob is not a valid PNG. For example, a directive that
-emits a single tile's worth of a PNG's red channel:
+`decode_png` (and `decode_png_file`) throws if the blob is not a valid PNG.
+
+#### Pixel accessors
+
+Rather than compute `(y * width + x) * 4` offsets by hand, the image map exposes
+accessor methods:
+
+- `img.r(x, y)` — the **red** channel of pixel `(x, y)`. The images these scripts
+  work with are grayscale (`R == G == B`), so this is the pixel's shade value.
+- `img.pixel(x, y)` — the whole pixel as a `[r, g, b, a]` array.
+- `img.tile(col, row, tw, th)` — the `tw`×`th` block at tile coordinate
+  `(col, row)` (i.e. pixels `[col*tw, (col+1)*tw)` × `[row*th, (row+1)*th)`) as a
+  flat, row-major array of red-channel (shade) values.
+
+All three throw if the coordinates fall outside the image. Using them, the
+red-channel-of-a-tile example above becomes a single call:
 
 ```rust,ignore
 fn custom(ints, texts) {
-    let img = decode_png(open_file(texts[0], "r").read_blob());
-    let out = [];
-    for y in 0..8 {
-        for x in 0..8 {
-            out.push(img.pixels[(y * img.width + x) * 4]);   // red channel
-        }
-    }
-    out
+    decode_png_file(texts[0]).tile(0, 0, 8, 8)   // top-left 8x8 tile's shades
 }
+```
+
+### Palette quantization
+
+`quantize(value, thresholds)` snaps a value to a palette index by counting how
+many of the ascending `thresholds` it reaches — useful for turning a grayscale
+shade into a fixed-palette index. It also accepts an **array** of values and
+returns an array of indices, so it pairs directly with `img.tile`:
+
+```rust,ignore
+// [43, 128, 213] are the midpoints between the four NES shades (0, 85, 170, 255).
+let shades = quantize(img.tile(0, 0, 8, 8), [43, 128, 213]);
+```
+
+`nes_shade(value)` is that NES four-shade case with the thresholds built in
+(equivalent to `quantize(value, [43, 128, 213])`), returning `0`–`3`. It also
+accepts an array:
+
+```rust,ignore
+let shades = nes_shade(img.tile(0, 0, 8, 8));
 ```
 
 ## Bundled scripts
