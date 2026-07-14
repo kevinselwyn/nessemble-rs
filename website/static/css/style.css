@@ -82,7 +82,7 @@
     width: 256px;
     height: 240px;
     left: 26px;
-    top: -2px;
+    top: 2px;
     position: absolute;
     z-index: 1;
 }
