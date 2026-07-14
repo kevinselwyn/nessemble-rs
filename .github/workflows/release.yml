@@ -205,8 +205,10 @@ jobs:
           ```
 
           The element assembles its source in the browser and shows a hex dump
-          with a download link. Options (iNES output, custom pseudo-op scripts)
-          go in a `data-opts` JSON attribute; see the documentation.
+          with a download link; a toggle button collapses/expands the bytes (add
+          the `collapsed` attribute to start collapsed). Options (iNES output,
+          custom pseudo-op scripts) go in a `data-opts` JSON attribute; see the
+          documentation.
           README
           tar -czf "nessemble_${v}_wasm.tar.gz" "$dir"
       - uses: actions/upload-artifact@v4

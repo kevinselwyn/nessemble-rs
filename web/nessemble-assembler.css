@@ -1,9 +1,16 @@
 /* Styles for the <nessemble-assembler> Web Component. Scoped to `.na-*` classes
-   to avoid clashing with host page CSS (mdBook docs, the marketing site). */
+   to avoid clashing with host page CSS (mdBook docs, the marketing site).
+
+   Sizing is `em`-based (never `rem`) so the component scales with the host
+   page's body text. mdBook sets the root font-size to 62.5% (1rem = 10px), so
+   `rem` units would render the editor/output far smaller than the surrounding
+   prose; `em` inherits the 16px body size instead. The monospace editor and
+   byte output are sized at 0.875em to match a documentation code block (mdBook's
+   `code` is 0.875em), so the assembled bytes line up with an adjacent snippet. */
 
 .na-host {
   display: block;
-  margin: 1rem 0;
+  margin: 1em 0;
   border: 1px solid rgba(127, 127, 127, 0.35);
   border-radius: 6px;
   overflow: hidden;
@@ -15,12 +22,13 @@
   width: 100%;
   box-sizing: border-box;
   margin: 0;
-  padding: 0.75rem;
+  padding: 0.75em;
   border: 0;
   border-bottom: 1px solid rgba(127, 127, 127, 0.35);
   resize: vertical;
-  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.85rem;
+  font-family: "Source Code Pro", "SFMono-Regular", ui-monospace, Menlo, Consolas,
+    monospace;
+  font-size: 0.875em;
   line-height: 1.45;
   tab-size: 4;
   color: inherit;
@@ -34,21 +42,22 @@
 
 .na-toolbar {
   display: flex;
-  gap: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.4em;
   align-items: center;
-  padding: 0.5rem 0.75rem;
+  padding: 0.5em 0.75em;
   background: rgba(127, 127, 127, 0.08);
 }
 
 .na-btn {
   appearance: none;
   cursor: pointer;
-  padding: 0.3rem 0.75rem;
+  padding: 0.3em 0.75em;
   border: 1px solid rgba(127, 127, 127, 0.45);
   border-radius: 4px;
   background: transparent;
   color: inherit;
-  font-size: 0.8rem;
+  font-size: 0.85em;
   line-height: 1.2;
   text-decoration: none;
 }
@@ -78,11 +87,12 @@
 
 .na-output {
   margin: 0;
-  padding: 0.75rem;
+  padding: 0.75em;
   overflow-x: auto;
-  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.8rem;
-  line-height: 1.4;
+  font-family: "Source Code Pro", "SFMono-Regular", ui-monospace, Menlo, Consolas,
+    monospace;
+  font-size: 0.875em;
+  line-height: 1.45;
   white-space: pre;
   color: inherit;
 }
