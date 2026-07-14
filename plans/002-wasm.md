@@ -1,10 +1,11 @@
 # nessemble-rs: A Plan for a WASM Build & Assembler Web Component
 
-> Status: **Phases 0–3 done; Phase 4 (release asset) planned.** Decisions in
+> Status: **Complete — all phases (0–4) done.** Decisions in
 > [§6](#6-decisions) are settled. The `nessemble-wasm` crate compiles to `wasm32`
 > and the `<nessemble-assembler>` Web Component is embedded in the mdBook docs and
 > powers the marketing homepage's live assemble-and-play demo (all verified in
-> headless Chromium). Only the release-asset step remains.
+> headless Chromium). The release pipeline packages the wasm bundle as a GitHub
+> release asset, and the workspace version is now `2.6.0`.
 
 ---
 
@@ -208,9 +209,14 @@ non-blank frame. One caveat: the Asciinema *code* is bundled inside
   **Assemble** produces the ROM and the JSNES emulator plays it; edits reassemble
   and replay; assembly errors surface in the component without breaking the page.
 
-### Phase 4 — Release artifact
+### Phase 4 — Release artifact ✅
 - Build the wasm bundle in `release.yml` and attach it to the GitHub release.
 - **Done when:** cutting a release attaches a downloadable wasm bundle.
+- **Done:** a `wasm` job builds the bundle (`cargo run -p xtask -- wasm`) and
+  packages the glue + `.wasm`, the Web Component (JS + CSS), and a usage README
+  into `nessemble_<v>_wasm.tar.gz`; `release` depends on it and uploads the
+  tarball (covered by the existing `artifacts/**/*.tar.gz` glob). The workspace
+  version dropped its `-dev` suffix to `2.6.0` to cut the release.
 
 ## 6. Decisions
 
@@ -246,10 +252,10 @@ non-blank frame. One caveat: the Asciinema *code* is bundled inside
 - **Bundled-script duplication.** The built-in scripts live in the CLI crate;
   decide whether the wasm crate shares them (move to a common location) or keeps a
   copy, to avoid drift.
-- **Versioning.** The wasm build tracks the workspace version. **Decided:** the
-  phases ride the pre-release **`2.6.0-dev`** suffix (as the LSP work did) so the
-  release workflow's pre-release guard suppresses a release while they land; the
-  final phase drops the `-dev` suffix to **`2.6.0`** to cut the release.
+- **Versioning.** The wasm build tracks the workspace version. **Done:** the
+  phases rode the pre-release **`2.6.0-dev`** suffix (as the LSP work did) so the
+  release workflow's pre-release guard suppressed a release while they landed;
+  Phase 4 dropped the `-dev` suffix to **`2.6.0`** to cut the release.
 
 ## 8. Non-goals
 
