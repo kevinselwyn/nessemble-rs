@@ -1,9 +1,11 @@
 # nessemble-rs: A Plan for Syntax Highlighting in the Web Component
 
-> Status: **Proposed — not started.** Scope decided (Option B below): reuse the
+> Status: **Proposed — not started.** Approach decided (Option B below): reuse the
 > assembler's own lexer, exposed to the browser via the existing `nessemble-wasm`
 > bundle, and render a highlight overlay behind the `<nessemble-assembler>`
-> editor. No language server runs in the browser.
+> editor. No language server runs in the browser. The scoping choices in §6 (4–7:
+> granularity, surfaces, theming, version) are **default answers open to review** —
+> redirect any before Phase 0.
 
 ---
 
@@ -122,12 +124,15 @@ a layer *behind* it (the CodeJar / "highlight-within-textarea" technique):
 ### 4.4 Colors / theming
 
 - Add `.na-tok-directive|instruction|identifier|number|string|comment|operator`
-  classes in `web/nessemble-assembler.css`, driven by CSS custom properties with
-  sensible defaults.
-- **Theme-aware:** the component appears in mdBook (themes: light/rust/coal/navy/
-  ayu) and on the marketing site. Define the palette via variables that can be
-  overridden per theme (respect `prefers-color-scheme` and mdBook's theme class),
-  so highlighting reads well in light and dark.
+  classes in `web/nessemble-assembler.css`, driven by CSS custom properties
+  (`--na-tok-*`).
+- **One dedicated, overridable palette** (decision §6) — a single deliberate set
+  of token colors used on every surface, with **light and dark variants** selected
+  by `prefers-color-scheme` and mdBook's theme class, so the editor looks
+  consistent across the docs (themes: light/rust/coal/navy/ayu) and the marketing
+  site while staying legible in both modes. Because the colors are CSS variables, a
+  surface that wants to match its own theme can still override `--na-tok-*` without
+  a code change.
 
 ### 4.5 Delivery
 
@@ -182,6 +187,8 @@ refactor of the LSP's semantic-tokens *source*, guarded by its existing tests.
 
 ## 6. Decisions
 
+Architectural (settled):
+
 1. **Reuse the assembler's lexer** (`tooling::highlight`) as the single source of
    truth — no TextMate/Prism/highlight.js grammar for the editor.
 2. **Overlay a transparent `<textarea>`** rather than switch to a
@@ -190,8 +197,23 @@ refactor of the LSP's semantic-tokens *source*, guarded by its existing tests.
 3. **Hoist the classifier down into `nessemble-core`**, shared by the LSP and the
    wasm build, so highlighting stays identical across the CLI's LSP and the
    browser.
-4. **Class taxonomy = the LSP's current 7 classes**, exposed to JS as a flat
-   `Uint32Array` of `[start, len, class]` triples in UTF-16 units.
+
+Scoping (default answers to the open questions — flagged here so a reviewer can
+redirect any of them before Phase 0):
+
+4. **Granularity — the LSP's current 7 classes** (directive, instruction,
+   identifier, number, string, comment, operator), exposed to JS as a flat
+   `Uint32Array` of `[start, len, class]` triples in UTF-16 units. Kept a superset
+   later if a richer look (registers, label-vs-constant, opcode-vs-pseudo) is
+   wanted — the LSP would then collapse the extras back to its 7.
+5. **Surfaces — the interactive `<nessemble-assembler>` editor only.** Static
+   mdBook code fences and GitHub highlighting stay out of scope (§8); if desired
+   later they reuse the same `tooling::lex` at build time / as a generated grammar.
+6. **Theming — one dedicated, overridable palette** with light/dark variants
+   (§4.4), not a per-theme match, for a consistent look; `--na-tok-*` variables
+   leave per-surface overrides open.
+7. **Version — minor feature: `2.8.0-dev` while landing, `2.8.0` to ship**
+   (main is `2.7.0`).
 
 ## 7. Risks & open constraints
 
