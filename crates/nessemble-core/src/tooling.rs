@@ -7,6 +7,9 @@
 //! trivia can be classified for highlighting. It is intentionally separate from
 //! the parity lexer, which stays byte-for-byte untouched.
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 /// The kind of a lexeme. Every byte of the input belongs to exactly one lexeme,
 /// so the stream is gap-free and reversible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +161,103 @@ fn utf8_char_len(b: u8) -> usize {
         0xC0..=0xDF => 2,
         _ => 1,
     }
+}
+
+/// Lower-cased 6502 mnemonics (documented + undocumented), for telling an
+/// instruction identifier apart from a label/constant/register during
+/// classification.
+static MNEMONICS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    nessemble_isa::OPCODES
+        .iter()
+        .map(|o| o.mnemonic.to_ascii_lowercase())
+        .collect()
+});
+
+/// The highlight class of a lexeme. This is the language-aware classification
+/// shared by the language server's semantic tokens and the wasm/editor
+/// highlighter, so every surface colors tokens identically (the single source of
+/// truth for *what* a token is; each consumer supplies its own position
+/// encoding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenClass {
+    /// A `.`-prefixed directive.
+    Directive,
+    /// An identifier that names a 6502 mnemonic.
+    Instruction,
+    /// Any other identifier: label, constant, or register.
+    Identifier,
+    /// A numeric literal.
+    Number,
+    /// A string or character literal.
+    String,
+    /// A comment.
+    Comment,
+    /// Punctuation / operators.
+    Operator,
+}
+
+/// Classify a lexeme for highlighting. Identifiers naming a 6502 mnemonic are
+/// [`TokenClass::Instruction`]; all other identifiers are
+/// [`TokenClass::Identifier`]. Whitespace and newlines (which highlighters drop)
+/// map to [`TokenClass::Operator`].
+#[must_use]
+pub fn classify(kind: LexKind, piece: &str) -> TokenClass {
+    match kind {
+        LexKind::Directive => TokenClass::Directive,
+        LexKind::Ident => {
+            if MNEMONICS.contains(&piece.to_ascii_lowercase()) {
+                TokenClass::Instruction
+            } else {
+                TokenClass::Identifier
+            }
+        }
+        LexKind::Number => TokenClass::Number,
+        LexKind::String | LexKind::Char => TokenClass::String,
+        LexKind::Comment => TokenClass::Comment,
+        LexKind::Punct | LexKind::Whitespace | LexKind::Newline => TokenClass::Operator,
+    }
+}
+
+/// A highlight token: a classified span given as a **UTF-16 code-unit** offset and
+/// length from the start of the source, so a JavaScript consumer's string indices
+/// line up. Whitespace and newlines are not emitted — the gaps between tokens are
+/// trivia the consumer renders verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HlToken {
+    /// Start offset in UTF-16 code units.
+    pub start: u32,
+    /// Length in UTF-16 code units.
+    pub len: u32,
+    /// The token's highlight class.
+    pub class: TokenClass,
+}
+
+/// Classify every significant lexeme in `source` for highlighting, with offsets in
+/// **UTF-16 code units**. This is the flat-offset convenience the wasm/editor
+/// highlighter consumes; the language server shares [`classify`] but keeps its own
+/// line/column delta encoding.
+#[must_use]
+pub fn highlight(source: &str) -> Vec<HlToken> {
+    let mut out = Vec::new();
+    let mut off = 0u32;
+    for lx in lex(source) {
+        let piece = &source[lx.start..lx.end];
+        let len = utf16_len(piece);
+        if !matches!(lx.kind, LexKind::Whitespace | LexKind::Newline) {
+            out.push(HlToken {
+                start: off,
+                len,
+                class: classify(lx.kind, piece),
+            });
+        }
+        off += len;
+    }
+    out
+}
+
+/// Length of `s` in UTF-16 code units.
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
 }
 
 /// Indent applied to instruction lines (labels, directives, and constant
@@ -352,5 +452,70 @@ mod tests {
     fn format_preserves_trailing_newline_presence() {
         assert_eq!(format("nop"), "    nop");
         assert_eq!(format("nop\n"), "    nop\n");
+    }
+
+    #[test]
+    fn classify_distinguishes_mnemonics_from_labels() {
+        // A mnemonic identifier vs. an ordinary label, case-insensitively.
+        assert_eq!(classify(LexKind::Ident, "lda"), TokenClass::Instruction);
+        assert_eq!(classify(LexKind::Ident, "LDA"), TokenClass::Instruction);
+        assert_eq!(classify(LexKind::Ident, "loop"), TokenClass::Identifier);
+        assert_eq!(classify(LexKind::Directive, ".db"), TokenClass::Directive);
+        assert_eq!(classify(LexKind::Number, "$00"), TokenClass::Number);
+        assert_eq!(classify(LexKind::String, "\"hi\""), TokenClass::String);
+        assert_eq!(classify(LexKind::Char, "'x'"), TokenClass::String);
+        assert_eq!(classify(LexKind::Comment, "; c"), TokenClass::Comment);
+        assert_eq!(classify(LexKind::Punct, "#"), TokenClass::Operator);
+    }
+
+    #[test]
+    fn highlight_emits_significant_tokens_only() {
+        // Whitespace and the newline are dropped; offsets are into the source.
+        assert_eq!(
+            highlight("lda #$00 ; c\n"),
+            vec![
+                HlToken {
+                    start: 0,
+                    len: 3,
+                    class: TokenClass::Instruction
+                }, // lda
+                HlToken {
+                    start: 4,
+                    len: 1,
+                    class: TokenClass::Operator
+                }, // #
+                HlToken {
+                    start: 5,
+                    len: 3,
+                    class: TokenClass::Number
+                }, // $00
+                HlToken {
+                    start: 9,
+                    len: 3,
+                    class: TokenClass::Comment
+                }, // ; c
+            ]
+        );
+    }
+
+    #[test]
+    fn highlight_offsets_are_utf16_not_bytes() {
+        // `é` is two UTF-8 bytes but one UTF-16 unit: the token after the
+        // multi-byte comment must line up in UTF-16 space (start 4, not 5).
+        assert_eq!(
+            highlight("; é\nnop\n"),
+            vec![
+                HlToken {
+                    start: 0,
+                    len: 3,
+                    class: TokenClass::Comment
+                }, // ; é
+                HlToken {
+                    start: 4,
+                    len: 3,
+                    class: TokenClass::Instruction
+                }, // nop
+            ]
+        );
     }
 }
