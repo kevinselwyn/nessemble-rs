@@ -137,6 +137,8 @@ fn dist() -> Result<(), String> {
     // Marketing website (index.html + static/, including the staged assembler)
     // at the site root.
     copy_dir(&root.join("website"), &site)?;
+    cache_bust(&site.join("index.html"))?;
+    cache_bust(&site.join("static/nessemble/nessemble-assembler.js"))?;
 
     // Documentation under /docs. Build from a transformed *copy* of the book so
     // the committed sources stay clean: `highlight_fences` rewrites each
@@ -150,11 +152,34 @@ fn dist() -> Result<(), String> {
     copy_dir(&root.join("docs"), &build_docs)?;
     let _ = std::fs::remove_dir_all(build_docs.join("book"));
     highlight_fences(&build_docs.join("src"))?;
+    // Cache-bust before mdBook copies these into the book, so every docs page
+    // requests the versioned asset URLs.
+    cache_bust(&build_docs.join("theme/head.hbs"))?;
+    cache_bust(&build_docs.join("src/nessemble/nessemble-assembler.js"))?;
     run_tool("mdbook", &["build", &build_docs.to_string_lossy()], None)?;
     copy_dir(&build_docs.join("book"), &site.join("docs"))?;
 
     println!("Built site at {}", site.display());
     Ok(())
+}
+
+/// Append `?v=<workspace version>` to the component/wasm asset references in
+/// `path`, so a new release invalidates any CDN- or browser-cached copy (the
+/// site is served behind a CDN, and unversioned URLs otherwise serve stale CSS/JS
+/// after a deploy). No-op for any reference not present in the file.
+fn cache_bust(path: &Path) -> Result<(), String> {
+    let version = env!("CARGO_PKG_VERSION"); // the workspace version
+    let mut text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    for asset in [
+        "nessemble-assembler.css",
+        "nessemble-assembler.js",
+        "nessemble.js",
+        "nessemble_bg.wasm",
+    ] {
+        text = text.replace(&format!("{asset}\""), &format!("{asset}?v={version}\""));
+    }
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
