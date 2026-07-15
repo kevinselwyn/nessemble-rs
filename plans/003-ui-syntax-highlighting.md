@@ -7,7 +7,8 @@
 > language server runs in the browser. All scoping choices in §6 are **settled**:
 > 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
 > fence tag + re-tag sweep), one shared light/dark palette, shipped as patch
-> `2.7.1`. Ready to start at Phase 0.
+> `2.7.1`. **Phase 0 (the shared classifier) is done in this PR**; the workspace is
+> on `2.7.1-dev`. Phases 1–5 remain.
 
 ---
 
@@ -80,18 +81,22 @@ Three options were weighed (see the discussion that produced this plan):
 
 ### 4.1 Hoist the classifier into `nessemble-core` (single source of truth)
 
-- Add `nessemble_core::tooling::highlight(source: &str) -> Vec<HlToken>` where
-  `HlToken { start: u32, len: u32, class: TokenClass }` and
-  `pub enum TokenClass { Directive, Instruction, Identifier, Number, String,
-  Comment, Operator }` (the LSP's 7 classes, named for humans rather than LSP token
-  types). Offsets/lengths in **UTF-16 code units** so a JS consumer's
-  `string.slice` lines up (reuse the LSP's `utf16_len` logic); whitespace/newlines
-  are consumed for positioning but not emitted.
-- **Refactor `nessemble-lsp` to consume it.** `semantic_tokens` becomes: call
-  `tooling::highlight`, then map `TokenClass` → the LSP legend index (`TT_*`) and
-  produce the delta-encoded `SemanticToken`s. The LSP keeps its LSP-specific
-  encoding; the *classification* is shared. No change to the LSP's advertised
-  capabilities or output.
+- Add two things to `nessemble_core::tooling`:
+  - `classify(kind, piece) -> TokenClass` — the shared **per-lexeme
+    classification** (mnemonic-aware via the ISA opcode set), where
+    `pub enum TokenClass { Directive, Instruction, Identifier, Number, String,
+    Comment, Operator }` (the LSP's 7 classes, named for humans, not LSP token
+    types). This is the anti-drift core: the *decision of what a token is*.
+  - `highlight(source) -> Vec<HlToken>` with `HlToken { start: u32, len: u32,
+    class: TokenClass }` — the **flat-offset convenience** the wasm/editor
+    highlighter consumes; offsets in **UTF-16 code units** so a JS consumer's
+    `string.slice` lines up. Whitespace/newlines are dropped.
+- **Refactor `nessemble-lsp` to share `classify`.** `semantic_tokens` keeps its
+  own line/column delta walk (it needs LSP `(deltaLine, deltaChar)`, not flat
+  offsets) but sources each token's type from `tooling::classify`, mapping
+  `TokenClass` → the legend index `TT_*`. So the LSP and the browser classify
+  identically while each keeps its own geometry. No change to the LSP's advertised
+  capabilities or output — pinned by its existing semantic-token test.
 
 ### 4.2 `tokenize` wasm export
 
@@ -193,14 +198,19 @@ build-time mdBook preprocessor (dev tooling, not on the assemble path). The
 interactive track (Phases 1–2) and the static-docs track (Phase 3) both depend
 only on the shared classifier from Phase 0 and are otherwise independent.
 
-### Phase 0 — Shared classifier in core
-- Add `tooling::highlight` + `TokenClass` to `nessemble-core`; unit-test the
-  classification (directive, mnemonic vs label, number/string/char, comment,
-  operator; UTF-16 offsets on a multi-byte line).
-- Refactor `nessemble-lsp::semantic_tokens` to call it and map to `TT_*`.
-- **Done when:** `cargo test -p nessemble-core -p nessemble-lsp` green (LSP
-  semantic-token output byte-for-byte unchanged vs current, pinned by a test);
-  `cargo clippy --workspace` clean; parity **122/122**.
+### Phase 0 — Shared classifier in core — ✅ done
+- Added `tooling::classify` + `TokenClass` and `tooling::highlight` + `HlToken`
+  (UTF-16 offsets) to `nessemble-core`, with unit tests for the classification
+  (directive, mnemonic vs label incl. case, number/string/char, comment, operator)
+  and for `highlight` (significant-tokens-only, and UTF-16 offsets on a multi-byte
+  line). ✅
+- Refactored `nessemble-lsp::semantic_tokens` to source classification from
+  `tooling::classify` (dropping its local mnemonic set + `token_type`), keeping its
+  delta encoding. ✅
+- **Done:** `cargo test -p nessemble-core -p nessemble-lsp` green (the LSP's
+  existing semantic-token test pins output unchanged); `cargo clippy` clean; parity
+  **122/122**. The workspace version moved to the pre-release `2.7.1-dev` so this
+  and later phases can land without cutting a release.
 
 ### Phase 1 — `tokenize` wasm export
 - Add `tokenize(source) -> Vec<u32>` to `nessemble-wasm`; host unit tests plus a
