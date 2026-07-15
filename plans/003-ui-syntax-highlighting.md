@@ -7,9 +7,10 @@
 > language server runs in the browser. All scoping choices in §6 are **settled**:
 > 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
 > fence tag + re-tag sweep), one shared light/dark palette, shipped as a minor
-> release `2.8.0`. **Phases 0–2 are done** (shared classifier in core; the
-> `tokenize` wasm export; the editor overlay renderer); the workspace is on
-> `2.8.0-dev`. Phases 3–5 remain.
+> release `2.8.0`. **Phases 0–4 are done** (shared classifier in core; the
+> `tokenize` wasm export; the editor overlay; static docs-block highlighting +
+> re-tag sweep; theming across surfaces); the workspace is on `2.8.0-dev`. Only
+> Phase 5 (release) remains.
 
 ---
 
@@ -156,11 +157,20 @@ a layer *behind* it (the CodeJar / "highlight-within-textarea" technique):
   textarea is a normal (uncolored) editor; the overlay activates once `tokenize` is
   available.
 
-### 4.6 Static docs code blocks (mdBook preprocessor)
+### 4.6 Static docs code blocks (build-time transform)
 
 The docs' **non-interactive** code fences (the `code` examples in `docs/src/*.md`)
 get the same highlighting, baked at build time — sharing the classifier and the
 CSS with the editor, not a separate grammar.
+
+> **Implemented (Phase 3):** as a `dist`-time markdown transform rather than a
+> registered mdBook preprocessor — `xtask dist` builds the book from a *copy* and
+> `highlight_fences` rewrites each ` ```nessemble ` fence via the shared
+> `tooling::lex`/`classify` before `mdbook build`. This avoids a JSON-preprocessor
+> dependency in the std-lean xtask and keeps the committed sources clean, while
+> the site (always built via `dist`) still gets fully-highlighted static blocks.
+> The bullets below describe the original preprocessor sketch; the emitted HTML
+> (`<pre class="na-code">` with `na-tok-*` spans, no `<code>`) is the same.
 
 - **An mdBook preprocessor** that reads the book JSON on stdin, walks each
   chapter's Markdown, and for every code fence tagged **` ```nessemble `** runs
@@ -237,23 +247,33 @@ only on the shared classifier from Phase 0 and are otherwise independent.
   scroll stays locked to the textarea, and assemble + the `nessemble:assembled`
   event still work. Column semantics preserved (the textarea still owns the text).
 
-### Phase 3 — Static docs code blocks (mdBook preprocessor)
-- Add the `xtask mdbook-highlight` preprocessor (§4.6): lex ` ```nessemble ` code
-  fences with `tooling::highlight`, emit HTML-escaped `na-tok-*` spans, register it
-  in `docs/book.toml`. Depends only on Phase 0 (independent of the wasm track).
-- **Re-tag sweep:** reclassify the genuinely-assembly ` ```text ` fences in
-  `docs/src/*.md` to ` ```nessemble ` (the opt-in signal); leave non-asm ` ```text `
-  (trees, tables, output) and other languages alone.
-- **Done when:** `xtask dist` produces docs whose ` ```nessemble ` fences are
-  highlighted with the shared classes (verified in headless Chromium), stock
-  highlight.js no longer touches them, and all other fences are unchanged.
+### Phase 3 — Static docs code blocks — ✅ done
+- **Implemented as a `dist`-time markdown transform**, not a registered mdBook
+  preprocessor: `xtask dist` builds the book from a *copy* and `highlight_fences`
+  rewrites each ` ```nessemble ` fence into `<pre class="na-code">` with
+  `na-tok-*` spans, via the shared `tooling::lex`/`classify` (xtask's only crate
+  dep is `nessemble-core`). Chosen over the mdBook-preprocessor/JSON route because
+  the site is always built via `dist`; it keeps xtask lean and the committed
+  sources clean (the transform runs on `target/docs-build`). No `<code>` element,
+  so mdBook's highlight.js/copy-button leave the block alone. ✅
+- **Re-tag sweep:** reclassified the genuinely-assembly ` ```text ` fences in
+  `docs/src/*.md` to ` ```nessemble ` (98 blocks), leaving hex-dump output, trees,
+  bit-layout diagrams, the `pseudo.txt` mapping, and other languages as-is. ✅
+- **Done:** `xtask dist` produces docs whose ` ```nessemble ` fences are
+  highlighted with the shared `na-tok-*` classes (verified in headless Chromium),
+  highlight.js doesn't touch them, normal fences still render, and the committed
+  `docs/src` gains only the re-tag edits.
 
-### Phase 4 — Theming across both surfaces + site
-- One overridable `--na-tok-*` light/dark palette (§4.4) applied to the editor
-  overlay *and* the static blocks, across mdBook themes and the marketing site.
-- **Done when:** a local `xtask dist` produces a `site/` where both the docs'
-  editors and the static code blocks are legible in light and dark (headless
-  Chromium across at least a light and a dark mdBook theme).
+### Phase 4 — Theming across both surfaces + site — ✅ done
+- Palette moved to `:root` (so `.na-host` **and** `.na-code` inherit it), with a
+  light default, a `prefers-color-scheme` dark, and — the fix for the OS-vs-page
+  mismatch — explicit **mdBook theme overrides** (`html.light`/`.rust` → light,
+  `html.coal`/`.navy`/`.ayu` → dark) that win over the media query, plus a
+  `.na-force-dark` opt-in the (dark) marketing site sets on `<body>`. ✅
+- **Done:** a local `xtask dist` site is legible in light and dark for **both**
+  the editor and the static blocks; verified in headless Chromium that switching
+  the mdBook theme (light ↔ coal) re-colors the shared `na-tok-*` classes
+  (instruction `rgb(130,80,223)` ↔ `rgb(210,168,255)`).
 
 ### Phase 5 — Release
 - Roll up under the workspace version and cut the release (see §6/§7).

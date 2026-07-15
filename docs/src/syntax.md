@@ -65,7 +65,7 @@ Binary, decimal, octal, hexadecimal, and ASCII character are all valid numbers.
 
 Named label declarations must be in the follow format:
 
-```text
+```nessemble
 NAME:
 ```
 
@@ -73,7 +73,7 @@ NAME:
 
 Example:
 
-```text
+```nessemble
     LDX #$08
 loop:
     DEX
@@ -88,7 +88,7 @@ Output:
 00000006
 ```
 
-```text
+```nessemble
     LDX #$08
 loop:
     DEX
@@ -100,14 +100,14 @@ loop:
 
 Temporary/un-named labels may also be declared by placing only a colon.
 
-```text
+```nessemble
 :
 ```
 
 To jump to a temporary label, the direction and count of the jumps must be
 given.
 
-```text
+```nessemble
 JMP :[+-]
 ```
 
@@ -121,7 +121,7 @@ further up in the code.
 
 Example:
 
-```text
+```nessemble
     LDX #$08
 :
     DEX
@@ -136,7 +136,7 @@ Output:
 00000006
 ```
 
-```text
+```nessemble
     LDX #$08
 :
     DEX
@@ -328,7 +328,7 @@ Convert ASCII string to bytes.
 
 Usage:
 
-```text
+```nessemble
 .ascii "STRING"[(+/-)NUMBER]
 ```
 
@@ -338,7 +338,7 @@ quotes.
 
 Example:
 
-```text
+```nessemble
 .ascii "When, in disgrace with fortune and men's eyes"
 ```
 
@@ -361,7 +361,7 @@ The `+/-` operators may also be used to increase/decrease the output.
 
 Example:
 
-```text
+```nessemble
 .ascii "I all alone beweep my outcast state"-32
 ```
 
@@ -381,7 +381,7 @@ Calculate crc32 checksum.
 
 Usage:
 
-```text
+```nessemble
 .checksum LABEL
 ```
 
@@ -389,7 +389,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 start:
     LDA #$01
     STA <$02
@@ -407,7 +407,7 @@ The checksum is `b8 1f ee 86`.
 
 > Checksums may only be performed on preceding data.
 
-```text
+```nessemble
 start:
     LDA #$01
     STA <$02
@@ -420,7 +420,7 @@ Set CHR bank index.
 
 Usage:
 
-```text
+```nessemble
 .chr NUMBER
 ```
 
@@ -428,7 +428,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .chr 0
 ```
 
@@ -442,7 +442,7 @@ Finds the closest valid NES color to the given hex color.
 
 Usage:
 
-```text
+```nessemble
 .color NUMBER[, NUMBER, ...]
 ```
 
@@ -452,7 +452,7 @@ be used.
 
 Example:
 
-```text
+```nessemble
 .color $FF0000
 ```
 
@@ -473,7 +473,7 @@ Define 8-bit byte(s).
 
 Usage:
 
-```text
+```nessemble
 .db NUMBER[, NUMBER, ...]
 ```
 
@@ -483,7 +483,7 @@ be used.
 
 Example:
 
-```text
+```nessemble
 .db $12, $34
 ```
 
@@ -504,7 +504,7 @@ light grey, and `3` representing white.
 
 Usage:
 
-```text
+```nessemble
 .defchr XXXXXXXX,
         XXXXXXXX,
         XXXXXXXX,
@@ -520,7 +520,7 @@ each.
 
 Example:
 
-```text
+```nessemble
 .defchr 333333333,
         300000003,
         300000003,
@@ -541,7 +541,7 @@ Output:
 Read more about PPU pattern tables
 [here](https://wiki.nesdev.com/w/index.php/PPU_pattern_tables).
 
-```text
+```nessemble
 .defchr 333333333,
         300000003,
         300000003,
@@ -558,7 +558,7 @@ Define 16-bit word(s).
 
 Usage:
 
-```text
+```nessemble
 .dw NUMBER[, NUMBER, ...]
 ```
 
@@ -568,7 +568,7 @@ be used.
 
 Example:
 
-```text
+```nessemble
 .dw $1234, $45678
 ```
 
@@ -586,13 +586,13 @@ Else condition of an [`.if`](#if)/[`.ifdef`](#ifdef)/[`.ifndef`](#ifndef) statem
 
 Usage:
 
-```text
+```nessemble
 .else
 ```
 
 Example:
 
-```text
+```nessemble
 .ifdef SOMETHING
     STA $00
 .else
@@ -606,13 +606,13 @@ End [`.enum`](#enum).
 
 Usage:
 
-```text
+```nessemble
 .endenum
 ```
 
 Example:
 
-```text
+```nessemble
 .enum $0080
 
 TEST_0 .rs 1
@@ -628,13 +628,13 @@ End [`.if`](#if)/[`.ifdef`](#ifdef)/[`.ifndef`](#ifndef) statement.
 
 Usage:
 
-```text
+```nessemble
 .endif
 ```
 
 Example:
 
-```text
+```nessemble
 .ifdef SOMETHING
     STA $00
 .else
@@ -648,13 +648,13 @@ End [`.macrodef`](#macrodef).
 
 Usage:
 
-```text
+```nessemble
 .endm
 ```
 
 Example:
 
-```text
+```nessemble
 .macrodef TEST_MACRO
     LDA #\1
     STA <\2
@@ -669,7 +669,7 @@ Start enumerated variable declarations.
 
 Usage:
 
-```text
+```nessemble
 .enum START[, INC]
 ```
 
@@ -678,7 +678,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .enum $0080
 
 TEST_0 .rs 1
@@ -694,7 +694,7 @@ Fill with bytes.
 
 Usage:
 
-```text
+```nessemble
 .fill COUNT[, VALUE]
 ```
 
@@ -703,7 +703,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .fill 16
 ```
 
@@ -721,7 +721,7 @@ Generate font character tile.
 
 Usage:
 
-```text
+```nessemble
 .font START[, END]
 ```
 
@@ -732,7 +732,7 @@ generated.
 
 Example:
 
-```text
+```nessemble
 .font 'A', 'G'
 ```
 
@@ -759,7 +759,7 @@ Output only the high byte of 16-bit word(s).
 
 Usage:
 
-```text
+```nessemble
 .hibytes NUMBER[, NUMBER]
 ```
 
@@ -769,7 +769,7 @@ be used.
 
 Example:
 
-```text
+```nessemble
 .hibytes $1234, $5678
 ```
 
@@ -790,7 +790,7 @@ Can be accompanied by an [`.else`](#else) and must be accompanied by an
 
 Usage:
 
-```text
+```nessemble
 .if CONDITION
 ```
 
@@ -799,7 +799,7 @@ the condition is true. See [Comparison Operators](#comparison-operators).
 
 Example:
 
-```text
+```nessemble
 .if SOMETHING == $01
     LDA #$01
 .endif
@@ -814,7 +814,7 @@ Can be accompanied by an [`.else`](#else) and must be accompanied by an
 
 Usage:
 
-```text
+```nessemble
 .ifdef VARIABLE
 ```
 
@@ -823,7 +823,7 @@ processed if the variable has been defined.
 
 Example:
 
-```text
+```nessemble
 .ifdef SOMETHING
     STA $00
 .else
@@ -840,7 +840,7 @@ Can be accompanied by an [`.else`](#else) and must be accompanied by an
 
 Usage:
 
-```text
+```nessemble
 .ifndef VARIABLE
 ```
 
@@ -849,7 +849,7 @@ processed if the variable has not been defined.
 
 Example:
 
-```text
+```nessemble
 .ifndef SOMETHING
     STA $01
 .else
@@ -863,7 +863,7 @@ Include binary file.
 
 Usage:
 
-```text
+```nessemble
 .incbin "FILENAME"[, OFFSET[, LIMIT]]
 ```
 
@@ -874,7 +874,7 @@ binary file.
 
 Example:
 
-```text
+```nessemble
 .incbin "file.bin"
 ```
 
@@ -884,7 +884,7 @@ Include assembly file.
 
 Usage:
 
-```text
+```nessemble
 .incbin "FILENAME"
 ```
 
@@ -892,7 +892,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .include "file.asm"
 ```
 
@@ -913,7 +913,7 @@ Include palette from PNG.
 
 Usage:
 
-```text
+```nessemble
 .incpal "FILENAME"
 ```
 
@@ -921,7 +921,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .incpal "palette.png"
 ```
 
@@ -946,7 +946,7 @@ Converts the PNG to CHR tiles. The image must include only 4 colors:
 
 Usage:
 
-```text
+```nessemble
 .incpng "FILENAME"
 ```
 
@@ -954,7 +954,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .incpng "image.png"
 ```
 
@@ -976,7 +976,7 @@ as `Konami RLE`. The breakdown of bytes:
 
 Usage:
 
-```text
+```nessemble
 .incrle "FILENAME"
 ```
 
@@ -993,7 +993,7 @@ Converts WAV to a 1-bit PCM.
 
 Usage:
 
-```text
+```nessemble
 .incwav "FILENAME"[, AMPLITUDE]
 ```
 
@@ -1002,7 +1002,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .incwav "audio.wav", 24
 ```
 
@@ -1012,7 +1012,7 @@ iNES CHR count.
 
 Usage:
 
-```text
+```nessemble
 .ineschr COUNT
 ```
 
@@ -1020,7 +1020,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .ineschr 1
 ```
 
@@ -1030,7 +1030,7 @@ iNES mapper number.
 
 Usage:
 
-```text
+```nessemble
 .inesmap NUMBER
 ```
 
@@ -1075,7 +1075,7 @@ xxxx3210
 
 Usage:
 
-```text
+```nessemble
 .inesmir NUMBER
 ```
 
@@ -1087,7 +1087,7 @@ iNES PRG count.
 
 Usage:
 
-```text
+```nessemble
 .inesprg COUNT
 ```
 
@@ -1095,7 +1095,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .inesprg 1
 ```
 
@@ -1109,7 +1109,7 @@ iNES trainer include.
 
 Usage:
 
-```text
+```nessemble
 .inestrn "FILENAME"
 ```
 
@@ -1117,7 +1117,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .inestrn "trainer.asm"
 ```
 
@@ -1127,7 +1127,7 @@ Output only the low byte of 16-bit word(s).
 
 Usage:
 
-```text
+```nessemble
 .lobytes NUMBER[, NUMBER]
 ```
 
@@ -1137,7 +1137,7 @@ be used.
 
 Example:
 
-```text
+```nessemble
 .lobytes $1234, $5678
 ```
 
@@ -1155,7 +1155,7 @@ Call macro.
 
 Usage:
 
-```text
+```nessemble
 .macro MACRO[, NUMBER, ...]
 ```
 
@@ -1165,7 +1165,7 @@ be used.
 
 Example:
 
-```text
+```nessemble
 .macro TEST_MACRO
 ```
 
@@ -1177,7 +1177,7 @@ Start macro definition.
 
 Usage:
 
-```text
+```nessemble
 .macrodef MACRO
     CODE...
 .endm
@@ -1188,7 +1188,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .macrodef TEST_MACRO
     LDA #\1
     STA <\2
@@ -1205,13 +1205,13 @@ Set the address of the current bank in which to start organizing code.
 
 Usage:
 
-```text
+```nessemble
 .org ADDRESS
 ```
 
 Example:
 
-```text
+```nessemble
 .org $C000
 ```
 
@@ -1221,7 +1221,7 @@ Set PRG bank index.
 
 Usage:
 
-```text
+```nessemble
 .prg NUMBER
 ```
 
@@ -1229,7 +1229,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .prg 0
 ```
 
@@ -1243,7 +1243,7 @@ The algorithm for the PRNG is the suggested POSIX implementation of `rand()`.
 
 Usage:
 
-```text
+```nessemble
 .random [SEED[, COUNT]]
 ```
 
@@ -1253,7 +1253,7 @@ Defaults to the current system time.
 
 Example:
 
-```text
+```nessemble
 .random "Secret Key", 16
 ```
 
@@ -1263,7 +1263,7 @@ Set initial value for [`.rs`](#rs) declarations.
 
 Usage:
 
-```text
+```nessemble
 .rsset ADDRESS
 ```
 
@@ -1271,7 +1271,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .rsset $0000
 ```
 
@@ -1281,7 +1281,7 @@ Reserve space for variable declaration.
 
 Usage:
 
-```text
+```nessemble
 VARIABLE .rs NUMBER
 ```
 
@@ -1290,7 +1290,7 @@ VARIABLE .rs NUMBER
 
 Example:
 
-```text
+```nessemble
 .rsset $0000
 
 label_01 .rs 1
@@ -1307,7 +1307,7 @@ Output:
 00000003
 ```
 
-```text
+```nessemble
 .rsset $0000
 
 label_01 .rs 1
@@ -1323,7 +1323,7 @@ Set code segment.
 
 Usage:
 
-```text
+```nessemble
 .segment "SEGMENT[0-9]+"
 ```
 
@@ -1334,7 +1334,7 @@ Usage:
 
 Example:
 
-```text
+```nessemble
 .segment "PRG1"
 ```
 
@@ -1356,7 +1356,7 @@ Generates bytes to simulate easing
 
 Usage:
 
-```text
+```nessemble
 .ease FUNCTION[, START[, END[, STEPS]]]
 ```
 
@@ -1383,7 +1383,7 @@ Valid `FUNCTION`s include:
 
 Example:
 
-```text
+```nessemble
 .ease "easeOutBounce", 0, $20, $40
 ```
 
@@ -1412,7 +1412,7 @@ functions.
 
 Example:
 
-```text
+```nessemble
 .macrodef TEST_MACRO
     LDA #$00
     STA $2005
@@ -1429,7 +1429,7 @@ Output:
 00000008
 ```
 
-```text
+```nessemble
 .macrodef TEST_MACRO
     LDA #$00
     STA $2005
@@ -1446,7 +1446,7 @@ Macros may also have parameters.
 
 Example:
 
-```text
+```nessemble
 .macrodef TEST_MACRO
     LDA #\1
     STA \2
@@ -1458,7 +1458,7 @@ Example:
 
 Output:
 
-```text
+```nessemble
 .macrodef TEST_MACRO
     LDA #\1
     STA \2
@@ -1477,7 +1477,7 @@ parameters.
 
 Example:
 
-```text
+```nessemble
 .macrodef COUNT_PARAMS
     .db \#
 .endm
@@ -1497,7 +1497,7 @@ the macro is called.
 
 Example:
 
-```text
+```nessemble
 .macrodef TEST_MACRO
     LDX #$08
 label_\@:

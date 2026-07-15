@@ -12,13 +12,13 @@ directive with a script.
 
 Example `pseudo.txt`:
 
-```text
+```nessemble
 .foo = foo.rhai
 ```
 
 Example `example.asm`:
 
-```text
+```nessemble
 .foo 1, 2, 3
 ```
 
@@ -66,7 +66,7 @@ fn custom(ints, texts) {
 }
 ```
 
-```text
+```nessemble
 .product 1, 2, 3   ; emits a single byte: 6
 ```
 
@@ -74,7 +74,7 @@ fn custom(ints, texts) {
 
 String arguments arrive (with quotes removed) in `texts`:
 
-```text
+```nessemble
 .foo "easeInQuad", 0, 16
 ```
 
@@ -124,7 +124,7 @@ fn custom(ints, texts) {
 }
 ```
 
-```text
+```nessemble
 .embed "logo.chr"   ; emits the raw bytes of logo.chr
 ```
 
@@ -204,7 +204,7 @@ let shades = nes_shade(img.tile(0, 0, 8, 8));
 Running `nessemble scripts` installs the bundled scripts. The `ease` script
 emits an easing curve as bytes:
 
-```text
+```nessemble
 .ease "easeInQuad"
 ```
 

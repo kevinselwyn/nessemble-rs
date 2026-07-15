@@ -12,12 +12,16 @@
 //!   wasm                    Build the WebAssembly assembler bundle (wasm-bindgen).
 //!   help                    Show this help.
 //!
-//! It is intentionally dependency-free (std only), shelling out to `curl`,
-//! `dpkg-deb`/`ar`/`tar`, and `cargo`.
+//! It shells out to `curl`, `dpkg-deb`/`ar`/`tar`, `cargo`, and `mdbook`; its
+//! only crate dependency is `nessemble-core`, whose lexer/classifier the `dist`
+//! command uses to syntax-highlight the docs' static ` ```nessemble ` code blocks
+//! (the same tokenizer the editor and language server use).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use nessemble_core::tooling::{self, LexKind, TokenClass};
 
 const REFERENCE_VERSION: &str = "1.1.1";
 const CORPUS_GROUPS: [&str; 4] = ["opcodes", "examples", "nerdy-nights", "errors"];
@@ -134,18 +138,114 @@ fn dist() -> Result<(), String> {
     // at the site root.
     copy_dir(&root.join("website"), &site)?;
 
-    // Documentation under /docs. mdBook copies the staged `src/nessemble/`
-    // assets into the book, and `theme/head.hbs` loads the component on every
-    // page.
-    run_tool(
-        "mdbook",
-        &["build", &root.join("docs").to_string_lossy()],
-        None,
-    )?;
-    copy_dir(&root.join("docs/book"), &site.join("docs"))?;
+    // Documentation under /docs. Build from a transformed *copy* of the book so
+    // the committed sources stay clean: `highlight_fences` rewrites each
+    // ` ```nessemble ` code block into pre-highlighted HTML (via the shared
+    // lexer), which mdBook passes through verbatim — the static blocks share the
+    // editor's `na-tok-*` classes without a second grammar. mdBook copies the
+    // staged `src/nessemble/` assets into the book, and `theme/head.hbs` loads
+    // the component (and its CSS) on every page.
+    let build_docs = root.join("target/docs-build");
+    let _ = std::fs::remove_dir_all(&build_docs);
+    copy_dir(&root.join("docs"), &build_docs)?;
+    let _ = std::fs::remove_dir_all(build_docs.join("book"));
+    highlight_fences(&build_docs.join("src"))?;
+    run_tool("mdbook", &["build", &build_docs.to_string_lossy()], None)?;
+    copy_dir(&build_docs.join("book"), &site.join("docs"))?;
 
     println!("Built site at {}", site.display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Docs syntax highlighting (build-time)
+// ---------------------------------------------------------------------------
+
+/// Recursively rewrite ` ```nessemble ` fenced code blocks in the `.md` files
+/// under `dir` into pre-highlighted `<pre class="na-code">…</pre>` HTML, so the
+/// docs' static code blocks are colored by the same lexer as the editor. Other
+/// fences (and everything else) are left untouched.
+fn highlight_fences(dir: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            highlight_fences(&path)?;
+        } else if path.extension().is_some_and(|e| e == "md") {
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            std::fs::write(&path, highlight_markdown(&text)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Replace every ` ```nessemble ` fenced block in `text` with a highlighted
+/// `<pre class="na-code">` HTML block (an mdBook-passthrough raw-HTML block).
+fn highlight_markdown(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() == "```nessemble" {
+            let mut j = i + 1;
+            while j < lines.len() && lines[j].trim() != "```" {
+                j += 1;
+            }
+            let code = lines[i + 1..j].join("\n");
+            // Blank lines around it so mdBook treats it as a raw-HTML block; no
+            // inner `<code>` so mdBook's code-block JS/highlight.js ignore it.
+            out.push_str("\n<pre class=\"na-code\">");
+            out.push_str(&highlight_code(&code));
+            out.push_str("</pre>\n\n");
+            i = j + 1;
+        } else {
+            out.push_str(lines[i]);
+            out.push('\n');
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Highlight nessemble `code` into HTML: significant tokens become
+/// `<span class="na-tok-…">`, whitespace/newlines are copied verbatim; all text
+/// is HTML-escaped. Uses the shared `tooling::lex` + `tooling::classify`.
+fn highlight_code(code: &str) -> String {
+    let mut html = String::new();
+    for lx in tooling::lex(code) {
+        let piece = &code[lx.start..lx.end];
+        let esc = escape_html(piece);
+        match lx.kind {
+            LexKind::Whitespace | LexKind::Newline => html.push_str(&esc),
+            kind => {
+                let _ = write!(
+                    html,
+                    "<span class=\"na-tok-{}\">{esc}</span>",
+                    class_name(tooling::classify(kind, piece))
+                );
+            }
+        }
+    }
+    html
+}
+
+/// The CSS class suffix for a token class (index-aligned with the wasm
+/// `token_classes` legend), so static blocks and the editor share `na-tok-*`.
+fn class_name(class: TokenClass) -> &'static str {
+    match class {
+        TokenClass::Directive => "directive",
+        TokenClass::Instruction => "instruction",
+        TokenClass::Identifier => "identifier",
+        TokenClass::Number => "number",
+        TokenClass::String => "string",
+        TokenClass::Comment => "comment",
+        TokenClass::Operator => "operator",
+    }
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Copy the assembler component + the wasm bundle into `dest` (recreating it),
