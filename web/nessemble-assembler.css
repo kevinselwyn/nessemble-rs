@@ -15,10 +15,15 @@
   border-radius: 6px;
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
 
-  /* Editor foreground (caret + default/identifier token) and the syntax-
-     highlight palette. Overridable per surface via these custom properties;
-     a light default here, dark below (Phase 4 aligns them to each host theme). */
+/* Syntax-highlight palette + editor foreground, defined on :root so BOTH the
+   editor (.na-host) and the docs' static code blocks (.na-code) inherit it.
+   `--na-tok-identifier` tracks `--na-fg`, so a theme only needs to set `--na-fg`.
+   Light default; dark via prefers-color-scheme for surfaces with no explicit
+   theme (the marketing site). mdBook pages carry a theme class (below) that wins
+   over the media query, so a light page viewed under OS dark mode stays light. */
+:root {
   --na-fg: #24292f;
   --na-tok-directive: #cf222e;
   --na-tok-instruction: #8250df;
@@ -30,7 +35,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  .na-host {
+  :root {
     --na-fg: #c9d1d9;
     --na-tok-directive: #ff7b72;
     --na-tok-instruction: #d2a8ff;
@@ -39,6 +44,35 @@
     --na-tok-comment: #8b949e;
     --na-tok-operator: #8b949e;
   }
+}
+
+/* mdBook themes: pin the palette to the page's theme regardless of OS setting. */
+html.light,
+html.rust {
+  --na-fg: #24292f;
+  --na-tok-directive: #cf222e;
+  --na-tok-instruction: #8250df;
+  --na-tok-number: #0550ae;
+  --na-tok-string: #0a7d33;
+  --na-tok-comment: #6e7781;
+  --na-tok-operator: #57606a;
+}
+
+html.coal,
+html.navy,
+html.ayu,
+/* A surface with no theme class can force the dark palette by putting
+   `na-force-dark` on an ancestor of the component (the marketing site does this
+   on <body>); descendants inherit the nearer value regardless of stylesheet
+   order. */
+.na-force-dark {
+  --na-fg: #c9d1d9;
+  --na-tok-directive: #ff7b72;
+  --na-tok-instruction: #d2a8ff;
+  --na-tok-number: #79c0ff;
+  --na-tok-string: #7ee787;
+  --na-tok-comment: #8b949e;
+  --na-tok-operator: #8b949e;
 }
 
 /* The editor's background/divider now live on the wrapper so the colored
@@ -114,6 +148,24 @@
 }
 .na-tok-operator {
   color: var(--na-tok-operator);
+}
+
+/* Static docs code blocks, emitted by `xtask dist` from ```nessemble fences.
+   Shares the na-tok-* palette above with the interactive editor. */
+.na-code {
+  margin: 1em 0;
+  padding: 0.75em;
+  overflow-x: auto;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.04);
+  font-family: "Source Code Pro", "SFMono-Regular", ui-monospace, Menlo, Consolas,
+    monospace;
+  font-size: 0.875em;
+  line-height: 1.45;
+  tab-size: 4;
+  white-space: pre;
+  color: var(--na-tok-identifier);
 }
 
 .na-toolbar {
