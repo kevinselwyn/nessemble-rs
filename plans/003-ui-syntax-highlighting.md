@@ -7,8 +7,9 @@
 > language server runs in the browser. All scoping choices in §6 are **settled**:
 > 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
 > fence tag + re-tag sweep), one shared light/dark palette, shipped as a minor
-> release `2.8.0`. **Phases 0–1 are done** (shared classifier in core; the
-> `tokenize` wasm export); the workspace is on `2.8.0-dev`. Phases 2–5 remain.
+> release `2.8.0`. **Phases 0–2 are done** (shared classifier in core; the
+> `tokenize` wasm export; the editor overlay renderer); the workspace is on
+> `2.8.0-dev`. Phases 3–5 remain.
 
 ---
 
@@ -222,15 +223,19 @@ only on the shared classifier from Phase 0 and are otherwise independent.
   (`lda #$00 ; c` → `[0,3,1, 4,1,6, 5,3,3, 9,3,5]`), the legend maps ids → names,
   and `assemble` still works. Parity **122/122** unaffected.
 
-### Phase 2 — Overlay renderer in the component
-- Implement the transparent-textarea overlay in `web/nessemble-assembler.js` +
-  base CSS: tokenize-on-input (rAF-debounced), scroll sync, transparent text /
-  visible caret, HTML-escaped spans, trailing-newline handling, and the legacy
-  `.nessemble-assembler` div path.
-- **Done when:** verified in **headless Chromium** on a standalone page — typing
-  updates colors live, the caret and colored text stay aligned while scrolling and
-  wrapping, `<` (source) never injects markup, and assemble + the assembled event
-  still work.
+### Phase 2 — Overlay renderer in the component — ✅ done
+- Implemented the transparent-textarea overlay in `web/nessemble-assembler.js` +
+  CSS: a `<pre class="na-highlight">` backdrop behind the (transparent-text)
+  textarea, `tokenize`-on-input (rAF-debounced), scroll sync, `--na-fg` caret,
+  HTML-escaped spans, zero-width-space trailing-newline handling, a base
+  `--na-tok-*` light/dark palette, and lazy wasm load on first focus (so untouched
+  editors don't fetch the module; the legacy `.nessemble-assembler` div path is
+  unchanged). ✅
+- **Done:** verified in **headless Chromium** (playwright-core + the real wasm
+  bundle) — mnemonics/comment/label colored correctly, typing updates colors live,
+  a literal `<` / `<script>` is escaped and never injects an element, the backdrop
+  scroll stays locked to the textarea, and assemble + the `nessemble:assembled`
+  event still work. Column semantics preserved (the textarea still owns the text).
 
 ### Phase 3 — Static docs code blocks (mdBook preprocessor)
 - Add the `xtask mdbook-highlight` preprocessor (§4.6): lex ` ```nessemble ` code
