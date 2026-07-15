@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for Syntax Highlighting in the Web Component
 
-> Status: **Phases 0–4 done + live-site bug fixes; Phase 5 (release) pending.**
+> Status: **Complete — all phases (0–5) done, plus live-site bug fixes.**
 > Approach (Option B below): reuse the assembler's own lexer, exposed to the
 > browser via the existing `nessemble-wasm` bundle, and render a highlight overlay
 > behind the `<nessemble-assembler>` editor **and** the docs' static code blocks
@@ -8,12 +8,11 @@
 > language server runs in the browser. All scoping choices in §6 are **settled**:
 > 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
 > fence tag + re-tag sweep), one shared light/dark palette, shipped as a minor
-> release `2.8.0`. **Phases 0–4 are done** — shared classifier in core; the
+> release `2.8.0`. **All phases (0–5) are done** — shared classifier in core; the
 > `tokenize` wasm export; the editor overlay; static docs-block highlighting +
-> re-tag sweep; theming across surfaces — plus **live-site bug fixes** (left-align,
-> highlight-on-load, asset cache-busting) landing ahead of the release. The
-> workspace stays on `2.8.0-dev`; **Phase 5 (drop the suffix → `2.8.0`) is the
-> only remaining step.**
+> re-tag sweep; theming across surfaces; the earlier **live-site bug fixes**
+> (left-align, highlight-on-load, asset cache-busting); and the release — the
+> workspace version dropped its `-dev` suffix to `2.8.0` to cut it.
 
 ---
 
@@ -295,10 +294,13 @@ bump); merging redeploys the site via `pages.yml` without cutting a release:
   left-aligned, static blocks are colored (light + dark), and assets carry
   `?v=<version>`.
 
-### Phase 5 — Release — pending
-- Drop the pre-release suffix (`2.8.0-dev` → `2.8.0`) and merge to cut the release
-  (see §6/§7).
-- **Done when:** the `2.8.0` release ships the updated wasm bundle + component.
+### Phase 5 — Release — ✅ done
+- Dropped the pre-release suffix (`2.8.0-dev` → `2.8.0`) so merging cuts the
+  `v2.8.0` release (see §6/§7). The version also stamps the asset cache-bust
+  (`?v=2.8.0`), invalidating the stale cached CSS/JS on the release deploy.
+- **Done:** `nessemble --version` → `v2.8.0`; parity **122/122**; `xtask dist`
+  emits `?v=2.8.0` on the asset URLs. Merging builds the platform artifacts + wasm
+  bundle and tags/publishes `v2.8.0`.
 
 ## 6. Decisions
 
