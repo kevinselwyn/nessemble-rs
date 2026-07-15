@@ -1,16 +1,19 @@
 # nessemble-rs: A Plan for Syntax Highlighting in the Web Component
 
-> Status: **Proposed — not started.** Approach decided (Option B below): reuse the
-> assembler's own lexer, exposed to the browser via the existing `nessemble-wasm`
-> bundle, and render a highlight overlay behind the `<nessemble-assembler>`
-> editor **and** the docs' static code blocks (both reuse the one lexer). No
+> Status: **Phases 0–4 done + live-site bug fixes; Phase 5 (release) pending.**
+> Approach (Option B below): reuse the assembler's own lexer, exposed to the
+> browser via the existing `nessemble-wasm` bundle, and render a highlight overlay
+> behind the `<nessemble-assembler>` editor **and** the docs' static code blocks
+> (both reuse the one lexer). No
 > language server runs in the browser. All scoping choices in §6 are **settled**:
 > 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
 > fence tag + re-tag sweep), one shared light/dark palette, shipped as a minor
-> release `2.8.0`. **Phases 0–4 are done** (shared classifier in core; the
+> release `2.8.0`. **Phases 0–4 are done** — shared classifier in core; the
 > `tokenize` wasm export; the editor overlay; static docs-block highlighting +
-> re-tag sweep; theming across surfaces); the workspace is on `2.8.0-dev`. Only
-> Phase 5 (release) remains.
+> re-tag sweep; theming across surfaces — plus **live-site bug fixes** (left-align,
+> highlight-on-load, asset cache-busting) landing ahead of the release. The
+> workspace stays on `2.8.0-dev`; **Phase 5 (drop the suffix → `2.8.0`) is the
+> only remaining step.**
 
 ---
 
@@ -275,9 +278,27 @@ only on the shared classifier from Phase 0 and are otherwise independent.
   the mdBook theme (light ↔ coal) re-colors the shared `na-tok-*` classes
   (instruction `rgb(130,80,223)` ↔ `rgb(210,168,255)`).
 
-### Phase 5 — Release
-- Roll up under the workspace version and cut the release (see §6/§7).
-- **Done when:** the version's release ships the updated wasm bundle + component.
+### Live-site bug fixes (landed ahead of the release) — ✅ done
+Three bugs spotted on the deployed site, fixed as a **bugfix** change (no version
+bump); merging redeploys the site via `pages.yml` without cutting a release:
+- **Left-align** the component (`text-align: left` on `.na-host`/`.na-editor`/
+  `.na-highlight`/`.na-code`), so a centered host page (the marketing hero) no
+  longer centers the source.
+- **Highlight on page load:** the editor now loads the wasm highlighter eagerly on
+  connect (shared module, one fetch per page) instead of lazily on first focus, so
+  colors appear immediately — not only after an interaction.
+- **Cache-busting:** `xtask dist` appends `?v=<version>` to the component/wasm
+  asset URLs (CSS/JS/glue/wasm), so the CDN-fronted deploy stops serving stale
+  `nessemble-assembler.css`/`.js` — the root cause of the static blocks and editor
+  appearing unstyled on the live site despite a successful deploy.
+- **Done:** re-verified in headless Chromium — editor highlights on load, source is
+  left-aligned, static blocks are colored (light + dark), and assets carry
+  `?v=<version>`.
+
+### Phase 5 — Release — pending
+- Drop the pre-release suffix (`2.8.0-dev` → `2.8.0`) and merge to cut the release
+  (see §6/§7).
+- **Done when:** the `2.8.0` release ships the updated wasm bundle + component.
 
 ## 6. Decisions
 
