@@ -15,29 +15,105 @@
   border-radius: 6px;
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+  /* Editor foreground (caret + default/identifier token) and the syntax-
+     highlight palette. Overridable per surface via these custom properties;
+     a light default here, dark below (Phase 4 aligns them to each host theme). */
+  --na-fg: #24292f;
+  --na-tok-directive: #cf222e;
+  --na-tok-instruction: #8250df;
+  --na-tok-identifier: var(--na-fg);
+  --na-tok-number: #0550ae;
+  --na-tok-string: #0a7d33;
+  --na-tok-comment: #6e7781;
+  --na-tok-operator: #57606a;
 }
 
-.na-editor {
-  display: block;
-  width: 100%;
+@media (prefers-color-scheme: dark) {
+  .na-host {
+    --na-fg: #c9d1d9;
+    --na-tok-directive: #ff7b72;
+    --na-tok-instruction: #d2a8ff;
+    --na-tok-number: #79c0ff;
+    --na-tok-string: #7ee787;
+    --na-tok-comment: #8b949e;
+    --na-tok-operator: #8b949e;
+  }
+}
+
+/* The editor's background/divider now live on the wrapper so the colored
+   backdrop can sit between it and the transparent-text textarea. */
+.na-editor-wrap {
+  position: relative;
+  background: rgba(127, 127, 127, 0.04);
+  border-bottom: 1px solid rgba(127, 127, 127, 0.35);
+}
+
+/* The textarea and the highlight backdrop MUST share an identical box model
+   (font, size, line-height, tab-size, padding, wrapping) so the colored text
+   drawn underneath stays glyph-aligned with the transparent textarea's caret. */
+.na-editor,
+.na-highlight {
   box-sizing: border-box;
   margin: 0;
   padding: 0.75em;
   border: 0;
-  border-bottom: 1px solid rgba(127, 127, 127, 0.35);
-  resize: vertical;
   font-family: "Source Code Pro", "SFMono-Regular", ui-monospace, Menlo, Consolas,
     monospace;
   font-size: 0.875em;
   line-height: 1.45;
   tab-size: 4;
-  color: inherit;
-  background: rgba(127, 127, 127, 0.04);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.na-editor {
+  position: relative;
+  display: block;
+  width: 100%;
+  resize: vertical;
+  color: transparent; /* text is drawn by the backdrop below */
+  caret-color: var(--na-fg);
+  background: transparent; /* let the backdrop show through */
+}
+
+/* Colored backdrop filling the wrapper, directly behind the textarea. */
+.na-highlight {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  pointer-events: none;
+  color: var(--na-tok-identifier);
+  background: transparent;
 }
 
 .na-editor:focus {
   outline: 2px solid #4a90d9;
   outline-offset: -2px;
+}
+
+.na-tok-directive {
+  color: var(--na-tok-directive);
+}
+.na-tok-instruction {
+  color: var(--na-tok-instruction);
+}
+.na-tok-identifier {
+  color: var(--na-tok-identifier);
+}
+.na-tok-number {
+  color: var(--na-tok-number);
+}
+.na-tok-string {
+  color: var(--na-tok-string);
+}
+.na-tok-comment {
+  color: var(--na-tok-comment);
+  font-style: italic;
+}
+.na-tok-operator {
+  color: var(--na-tok-operator);
 }
 
 .na-toolbar {
