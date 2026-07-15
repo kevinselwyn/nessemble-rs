@@ -9,5 +9,10 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[dependencies]
+# Only dependency: the shared lexer/classifier, so the docs' static code blocks
+# highlight through the exact same tokenizer as the editor and the LSP.
+nessemble-core.workspace = true
+
 [lints]
 workspace = true
