@@ -55,7 +55,7 @@ use lsp_types::{
     TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 
-use nessemble_core::tooling::{self, LexKind};
+use nessemble_core::tooling::{self, LexKind, TokenClass};
 use nessemble_core::{
     diagnose_project_with, diagnose_source_with, lenient_custom_resolver, Diag, ListSymbol,
     Options, ProjectDiagnostics,
@@ -995,12 +995,6 @@ fn full_range(text: &str) -> Range {
 /// Build delta-encoded LSP semantic tokens from the lossless lexeme stream.
 /// Whitespace and newlines advance the cursor but emit no token.
 fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
-    // Lower-cased documented+undocumented mnemonics, for classifying idents.
-    let mnemonics: HashSet<String> = OPCODES
-        .iter()
-        .map(|o| o.mnemonic.to_ascii_lowercase())
-        .collect();
-
     let mut data = Vec::new();
     let (mut line, mut col) = (0u32, 0u32);
     let (mut prev_line, mut prev_col) = (0u32, 0u32);
@@ -1020,7 +1014,9 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
                     delta_line,
                     delta_start,
                     length: len,
-                    token_type: token_type(kind, piece, &mnemonics),
+                    // Classification is shared with the wasm/editor highlighter via
+                    // `tooling::classify`; the LSP keeps its own delta encoding.
+                    token_type: token_type_index(tooling::classify(kind, piece)),
                     token_modifiers_bitset: 0,
                 });
                 (prev_line, prev_col) = (line, col);
@@ -1031,22 +1027,17 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
     data
 }
 
-/// Map a lexeme to its semantic-token type index (see [`TOKEN_TYPES`]).
-fn token_type(kind: LexKind, piece: &str, mnemonics: &HashSet<String>) -> u32 {
-    match kind {
-        LexKind::Directive => TT_KEYWORD,
-        LexKind::Ident => {
-            if mnemonics.contains(&piece.to_ascii_lowercase()) {
-                TT_FUNCTION
-            } else {
-                TT_VARIABLE
-            }
-        }
-        LexKind::Number => TT_NUMBER,
-        LexKind::String | LexKind::Char => TT_STRING,
-        LexKind::Comment => TT_COMMENT,
-        // Punctuation, and the unreachable Whitespace/Newline (handled above).
-        LexKind::Punct | LexKind::Whitespace | LexKind::Newline => TT_OPERATOR,
+/// Map a shared [`TokenClass`] to this server's semantic-token type index (see
+/// [`TOKEN_TYPES`]).
+fn token_type_index(class: TokenClass) -> u32 {
+    match class {
+        TokenClass::Directive => TT_KEYWORD,
+        TokenClass::Instruction => TT_FUNCTION,
+        TokenClass::Identifier => TT_VARIABLE,
+        TokenClass::Number => TT_NUMBER,
+        TokenClass::String => TT_STRING,
+        TokenClass::Comment => TT_COMMENT,
+        TokenClass::Operator => TT_OPERATOR,
     }
 }
 
