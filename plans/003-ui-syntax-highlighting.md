@@ -7,8 +7,8 @@
 > language server runs in the browser. All scoping choices in §6 are **settled**:
 > 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
 > fence tag + re-tag sweep), one shared light/dark palette, shipped as a minor
-> release `2.8.0`. **Phase 0 (the shared classifier) is done in this PR**; the
-> workspace is on `2.8.0-dev`. Phases 1–5 remain.
+> release `2.8.0`. **Phases 0–1 are done** (shared classifier in core; the
+> `tokenize` wasm export); the workspace is on `2.8.0-dev`. Phases 2–5 remain.
 
 ---
 
@@ -102,11 +102,11 @@ Three options were weighed (see the discussion that produced this plan):
 
 - `#[wasm_bindgen] pub fn tokenize(source: &str) -> Vec<u32>` returning a **flat,
   triple-packed** `[start, len, class, start, len, class, …]` (→ `Uint32Array` in
-  JS), `class` being the `TokenClass` discriminant. Flat typed array = cheapest
-  boundary crossing and trivial to iterate.
-- Document the class legend (0=directive … 6=operator) in the crate docs so JS maps
-  ids → CSS classes without guessing. (A tiny exported `token_classes() ->
-  Vec<String>` legend is optional; a comment + constants in the component suffice.)
+  JS). Flat typed array = cheapest boundary crossing and trivial to iterate. `class`
+  is an explicit id (not the enum discriminant) so the wire format is stable.
+- A self-describing legend is exported as `token_classes() -> Vec<String>`
+  (`["directive", "instruction", … , "operator"]`, indexed by class id), so JS
+  turns an id into a CSS class (`na-tok-<name>`) without hard-coding the mapping.
 - Panic-safe like `assemble` (the module's existing `start()` panic hook covers
   it); malformed input just yields best-effort tokens, never a throw.
 
@@ -212,12 +212,15 @@ only on the shared classifier from Phase 0 and are otherwise independent.
   **122/122**. The workspace version moved to the pre-release `2.8.0-dev` so this
   and later phases can land without cutting a release.
 
-### Phase 1 — `tokenize` wasm export
-- Add `tokenize(source) -> Vec<u32>` to `nessemble-wasm`; host unit tests plus a
-  Node smoke test over the real `wasm-bindgen` bundle (e.g. `lda #$00 ; c` yields
-  instruction/number/comment classes at the right offsets).
-- **Done when:** `cargo test -p nessemble-wasm` green and the Node smoke test
-  passes; workspace tests + parity unaffected.
+### Phase 1 — `tokenize` wasm export — ✅ done
+- Added `tokenize(source) -> Vec<u32>` (flat `[start, len, class]` triples, UTF-16
+  offsets) and a self-describing `token_classes() -> Vec<String>` legend to
+  `nessemble-wasm`, over `tooling::highlight`. ✅
+- **Done:** `cargo test -p nessemble-wasm` green (host unit tests: triple packing,
+  UTF-16 offsets, legend alignment); clippy/fmt clean; a Node smoke test over the
+  real `wasm-bindgen` bundle confirms `tokenize` returns a `Uint32Array`
+  (`lda #$00 ; c` → `[0,3,1, 4,1,6, 5,3,3, 9,3,5]`), the legend maps ids → names,
+  and `assemble` still works. Parity **122/122** unaffected.
 
 ### Phase 2 — Overlay renderer in the component
 - Implement the transparent-textarea overlay in `web/nessemble-assembler.js` +
