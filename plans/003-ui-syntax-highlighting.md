@@ -6,9 +6,9 @@
 > editor **and** the docs' static code blocks (both reuse the one lexer). No
 > language server runs in the browser. All scoping choices in §6 are **settled**:
 > 7 lexical classes, both surfaces (static blocks opt in via a ` ```nessemble `
-> fence tag + re-tag sweep), one shared light/dark palette, shipped as patch
-> `2.7.1`. **Phase 0 (the shared classifier) is done in this PR**; the workspace is
-> on `2.7.1-dev`. Phases 1–5 remain.
+> fence tag + re-tag sweep), one shared light/dark palette, shipped as a minor
+> release `2.8.0`. **Phase 0 (the shared classifier) is done in this PR**; the
+> workspace is on `2.8.0-dev`. Phases 1–5 remain.
 
 ---
 
@@ -209,7 +209,7 @@ only on the shared classifier from Phase 0 and are otherwise independent.
   delta encoding. ✅
 - **Done:** `cargo test -p nessemble-core -p nessemble-lsp` green (the LSP's
   existing semantic-token test pins output unchanged); `cargo clippy` clean; parity
-  **122/122**. The workspace version moved to the pre-release `2.7.1-dev` so this
+  **122/122**. The workspace version moved to the pre-release `2.8.0-dev` so this
   and later phases can land without cutting a release.
 
 ### Phase 1 — `tokenize` wasm export
@@ -281,7 +281,7 @@ Scoping (confirmed):
 6. **Theming — one dedicated, overridable palette** with light/dark variants
    (§4.4), not a per-theme match, for a consistent look; `--na-tok-*` variables
    leave per-surface overrides open.
-7. **Version — patch release: `2.7.1-dev` while landing, `2.7.1` to ship**
+7. **Version — minor release: `2.8.0-dev` while landing, `2.8.0` to ship**
    (main is `2.7.0`).
 
 ## 7. Risks & open constraints
@@ -304,8 +304,8 @@ Scoping (confirmed):
   review (the preprocessor can warn), not silently mis-highlighted.
 - **Versioning** — land the feature under a pre-release `-dev` version (as the LSP
   and wasm work did) so intermediate merges don't cut a release; drop the suffix in
-  Phase 5. Main is currently `2.7.0`; shipped as a patch → `2.7.1-dev` while
-  landing, `2.7.1` to ship.
+  Phase 5. Main is currently `2.7.0`; shipped as a minor release → `2.8.0-dev`
+  while landing, `2.8.0` to ship.
 
 ## 8. Non-goals
 
