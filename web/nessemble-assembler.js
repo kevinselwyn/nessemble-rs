@@ -19,12 +19,18 @@
   // `document.currentScript` is only valid during synchronous execution.
   var ASSET_BASE = new URL(".", document.currentScript.src).href;
 
-  // Load and initialize the wasm module once; every element shares it.
+  // Load and initialize the wasm module once; every element shares it. Once
+  // ready, `wasmMod` and `tokenClassNames` (the `tokenize` class-id → name
+  // legend) are cached so highlighting can run synchronously on each keystroke.
   var wasmPromise = null;
+  var wasmMod = null;
+  var tokenClassNames = null;
   function loadWasm() {
     if (!wasmPromise) {
       wasmPromise = import(ASSET_BASE + "nessemble.js").then(function (mod) {
         return mod.default(ASSET_BASE + "nessemble_bg.wasm").then(function () {
+          wasmMod = mod;
+          tokenClassNames = mod.token_classes();
           return mod;
         });
       });
@@ -79,6 +85,36 @@
     return node;
   }
 
+  function escapeHtml(s) {
+    return s.replace(/[&<>]/g, function (c) {
+      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;";
+    });
+  }
+
+  // Build highlighted HTML from `value` and a flat `[start, len, class, …]`
+  // token array (UTF-16 offsets from `tokenize`). Every character is
+  // HTML-escaped; the gaps between tokens (whitespace) are copied verbatim, so
+  // the backdrop text is identical to the textarea's, just colored.
+  function highlightHtml(value, triples, names) {
+    var html = "";
+    var pos = 0;
+    for (var i = 0; i < triples.length; i += 3) {
+      var start = triples[i];
+      var end = start + triples[i + 1];
+      var name = names[triples[i + 2]];
+      if (start > pos) html += escapeHtml(value.slice(pos, start));
+      html +=
+        '<span class="na-tok-' +
+        name +
+        '">' +
+        escapeHtml(value.slice(start, end)) +
+        "</span>";
+      pos = end;
+    }
+    if (pos < value.length) html += escapeHtml(value.slice(pos));
+    return html;
+  }
+
   var LABEL_ASSEMBLE = "Assemble";
 
   class NessembleAssembler extends HTMLElement {
@@ -104,6 +140,14 @@
       this._editor.value = this._source;
       this._editor.rows = Math.min(24, Math.max(3, this._source.split("\n").length));
 
+      // A colored backdrop rendered directly behind the (transparent-text)
+      // textarea. Purely decorative, so it's hidden from assistive tech and can't
+      // take pointer events.
+      this._highlight = el("pre", "na-highlight");
+      this._highlight.setAttribute("aria-hidden", "true");
+      var editorWrap = el("div", "na-editor-wrap");
+      editorWrap.append(this._highlight, this._editor);
+
       var bar = el("div", "na-toolbar");
       this._assembleBtn = el("button", "na-btn na-primary", LABEL_ASSEMBLE);
       this._assembleBtn.type = "button";
@@ -124,20 +168,82 @@
       this._output = el("pre", "na-output");
       this._output.hidden = true;
 
-      this.append(this._editor, bar, this._output);
+      this.append(editorWrap, bar, this._output);
 
       this._assembleBtn.addEventListener("click", this._assemble.bind(this));
       reset.addEventListener("click", () => {
         this._editor.value = this._source;
         this._clearOutput();
+        this._renderHighlight();
       });
       clear.addEventListener("click", () => {
         this._editor.value = "";
         this._clearOutput();
+        this._renderHighlight();
       });
       this._toggle.addEventListener("click", () => {
         this._output.hidden = !this._output.hidden;
         this._updateToggle();
+      });
+
+      this._editor.addEventListener("input", this._scheduleHighlight.bind(this));
+      this._editor.addEventListener("scroll", this._syncScroll.bind(this));
+      // Lazily fetch the wasm highlighter on first focus, so a page with many
+      // embedded editors doesn't pull the module for ones never touched; until
+      // then the source shows uncolored.
+      this._editor.addEventListener("focus", this._ensureHighlighter.bind(this), {
+        once: true,
+      });
+
+      // Seed the backdrop so the transparent-text textarea shows its source
+      // right away — colored if the module is already loaded, else plain.
+      this._renderHighlight();
+    }
+
+    // Re-highlight on the next frame, coalescing bursts of keystrokes.
+    _scheduleHighlight() {
+      if (this._rafPending) return;
+      this._rafPending = true;
+      var self = this;
+      requestAnimationFrame(function () {
+        self._rafPending = false;
+        self._renderHighlight();
+      });
+    }
+
+    // Render the backdrop from the current text: colored if the module is
+    // loaded, otherwise the plain (escaped) text so it stays visible.
+    _renderHighlight() {
+      var value = this._editor.value;
+      var html =
+        wasmMod && tokenClassNames
+          ? highlightHtml(value, wasmMod.tokenize(value), tokenClassNames)
+          : escapeHtml(value);
+      // A trailing newline (or empty buffer) leaves an empty last line in the
+      // textarea; give the backdrop the same line height with a zero-width space
+      // so the two stay aligned, without adding a visible glyph.
+      if (value === "" || value.charCodeAt(value.length - 1) === 10) {
+        html += "&#8203;";
+      }
+      this._highlight.innerHTML = html;
+      this._syncScroll();
+    }
+
+    // Keep the backdrop's scroll position locked to the textarea's.
+    _syncScroll() {
+      this._highlight.scrollTop = this._editor.scrollTop;
+      this._highlight.scrollLeft = this._editor.scrollLeft;
+    }
+
+    // Ensure the wasm highlighter is loading; re-render once it's ready.
+    _ensureHighlighter() {
+      if (wasmMod) {
+        this._renderHighlight();
+        return;
+      }
+      var self = this;
+      loadWasm().then(function () {
+        self._renderHighlight();
       });
     }
 
