@@ -15,6 +15,9 @@
   border-radius: 6px;
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* Don't inherit centered text from a host page (e.g. the marketing hero),
+     which would center the editor/output source. */
+  text-align: left;
 }
 
 /* Syntax-highlight palette + editor foreground, defined on :root so BOTH the
@@ -100,6 +103,7 @@ html.ayu,
   white-space: pre-wrap;
   overflow-wrap: break-word;
   word-break: break-word;
+  text-align: left;
 }
 
 .na-editor {
@@ -165,6 +169,7 @@ html.ayu,
   line-height: 1.45;
   tab-size: 4;
   white-space: pre;
+  text-align: left;
   color: var(--na-tok-identifier);
 }
 

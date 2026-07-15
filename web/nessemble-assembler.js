@@ -188,16 +188,14 @@
 
       this._editor.addEventListener("input", this._scheduleHighlight.bind(this));
       this._editor.addEventListener("scroll", this._syncScroll.bind(this));
-      // Lazily fetch the wasm highlighter on first focus, so a page with many
-      // embedded editors doesn't pull the module for ones never touched; until
-      // then the source shows uncolored.
-      this._editor.addEventListener("focus", this._ensureHighlighter.bind(this), {
-        once: true,
-      });
 
-      // Seed the backdrop so the transparent-text textarea shows its source
-      // right away — colored if the module is already loaded, else plain.
+      // Seed the backdrop so the transparent-text textarea shows its source right
+      // away (plain until the module loads), then eagerly load the wasm
+      // highlighter so colors appear on page load — not only after the first
+      // interaction. The module is shared across every editor on the page, so
+      // this stays one fetch regardless of how many editors a page embeds.
       this._renderHighlight();
+      this._ensureHighlighter();
     }
 
     // Re-highlight on the next frame, coalescing bursts of keystrokes.
