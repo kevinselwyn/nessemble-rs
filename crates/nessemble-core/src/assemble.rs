@@ -21,6 +21,31 @@ const TRAINER_MAX: usize = 512;
 /// Matches the reference `MAX_NESTED_IFS`.
 const MAX_NESTED_IFS: usize = 10;
 
+/// Convert a NES 2.0 RAM size in bytes to its logarithmic shift count, where a
+/// present size is `64 << shift` bytes. Returns `Some(0)` for no RAM (0 bytes),
+/// `Some(1..=15)` for a representable size (128 B … 2 MiB), or `None` when the
+/// byte count is not `0` or a power-of-two multiple of 64 in range.
+fn ram_shift_checked(bytes: i64) -> Option<i64> {
+    if bytes == 0 {
+        return Some(0);
+    }
+    if bytes < 0 || bytes % 64 != 0 {
+        return None;
+    }
+    let units = (bytes / 64) as u64;
+    if !units.is_power_of_two() {
+        return None;
+    }
+    let shift = units.trailing_zeros() as i64;
+    (1..=15).contains(&shift).then_some(shift)
+}
+
+/// Like [`ram_shift_checked`] but yields `0` for out-of-range input; callers
+/// validate with [`ram_shift_checked`] before the header is built.
+fn ram_shift(bytes: i64) -> i64 {
+    ram_shift_checked(bytes).unwrap_or(0)
+}
+
 /// A diagnostic (error) with a source-file display name, 1-based source line,
 /// and message, matching the reference tool's wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,10 +115,32 @@ struct Ines {
     prgram: i64,
     /// TV system (Flags 9 bit 0 / Flags 10 bits 0-1: 0 NTSC, 1 PAL).
     tv: i64,
-    /// VS Unisystem (Flags 7 bit 0).
+    /// VS Unisystem (Flags 7 bit 0 in iNES; console type 1 in NES 2.0).
     vs: i64,
-    /// PlayChoice-10 (Flags 7 bit 1).
+    /// PlayChoice-10 (Flags 7 bit 1 in iNES; console type 2 in NES 2.0).
     pc10: i64,
+    /// Emit a NES 2.0 header rather than iNES 1.0 (`.ines2`).
+    nes2: bool,
+    /// NES 2.0 submapper (byte 8 bits 4-7).
+    submap: i64,
+    /// NES 2.0 battery PRG-RAM size in bytes (byte 10 bits 4-7).
+    prgnvram: i64,
+    /// NES 2.0 volatile CHR-RAM size in bytes (byte 11 bits 0-3).
+    chrram: i64,
+    /// NES 2.0 battery CHR-RAM size in bytes (byte 11 bits 4-7).
+    chrnvram: i64,
+    /// NES 2.0 CPU/PPU timing (byte 12). `None` falls back to `tv`.
+    timing: Option<i64>,
+    /// NES 2.0 console type (Flags 7 bits 0-1), when set via `.inesconsole`.
+    console: i64,
+    /// NES 2.0 VS System PPU type (byte 13 bits 0-3).
+    vsppu: i64,
+    /// NES 2.0 VS System hardware type (byte 13 bits 4-7).
+    vshw: i64,
+    /// NES 2.0 number of miscellaneous ROMs (byte 14).
+    miscrom: i64,
+    /// NES 2.0 default expansion device (byte 15).
+    expansion: i64,
 }
 
 impl Default for Ines {
@@ -112,6 +159,17 @@ impl Default for Ines {
             tv: 0,
             vs: 0,
             pc10: 0,
+            nes2: false,
+            submap: 0,
+            prgnvram: 0,
+            chrram: 0,
+            chrnvram: 0,
+            timing: None,
+            console: 0,
+            vsppu: 0,
+            vshw: 0,
+            miscrom: 0,
+            expansion: 0,
         }
     }
 }
@@ -241,6 +299,7 @@ impl Assembler {
         self.pass = 2;
         self.reset_state();
         self.run_pass(lines);
+        self.validate_ines();
         (dedup(&self.errors), dedup(&self.warnings))
     }
 
@@ -322,6 +381,7 @@ impl Assembler {
         self.aborted = false;
         self.reset_state();
         self.run_pass(lines);
+        self.validate_ines();
         if let Some(d) = self.errors.last() {
             return Err(d.clone());
         }
@@ -369,7 +429,8 @@ impl Assembler {
         self.if_depth >= 2 && !self.if_cond[self.if_depth - 1]
     }
 
-    /// Assemble the final output bytes: raw ROM, or an iNES file in NES mode.
+    /// Assemble the final output bytes: raw ROM, or an iNES / NES 2.0 file in
+    /// NES mode.
     fn build_output(&self) -> Vec<u8> {
         if !self.nes {
             return self.rom.clone();
@@ -377,6 +438,7 @@ impl Assembler {
         let mut out = Vec::with_capacity(16 + self.rom.len());
         out.extend_from_slice(b"NES");
         out.push(0x1A);
+        // Bytes 4-6 are identical in iNES 1.0 and NES 2.0.
         out.push((self.ines.prg & 0xFF) as u8);
         out.push((self.ines.chr & 0xFF) as u8);
         let byte6 = (self.ines.mir & 0x01)
@@ -385,6 +447,21 @@ impl Assembler {
             | ((self.ines.fsc & 0x01) << 3)
             | ((self.ines.map & 0x0F) << 4);
         out.push((byte6 & 0xFF) as u8);
+        if self.ines.nes2 {
+            self.build_header_nes2(&mut out);
+        } else {
+            self.build_header_ines(&mut out);
+        }
+        // A trainer, when present, sits between the header and the PRG/CHR data.
+        if self.ines.trn == 1 {
+            out.extend_from_slice(&self.trainer);
+        }
+        out.extend_from_slice(&self.rom);
+        out
+    }
+
+    /// Bytes 7-15 of an iNES 1.0 header (bytes 0-6 already emitted).
+    fn build_header_ines(&self, out: &mut Vec<u8>) {
         let byte7 = (self.ines.vs & 0x01) | ((self.ines.pc10 & 0x01) << 1) | (self.ines.map & 0xF0);
         out.push((byte7 & 0xFF) as u8);
         // Byte 8: PRG-RAM size (8 KB units). Byte 9: TV system (bit 0).
@@ -395,12 +472,159 @@ impl Assembler {
         out.push(byte10);
         // iNES header bytes 11..15 are zero.
         out.resize(out.len() + 5, 0x00);
-        // A trainer, when present, sits between the header and the PRG/CHR data.
-        if self.ines.trn == 1 {
-            out.extend_from_slice(&self.trainer);
+    }
+
+    /// Bytes 7-15 of a NES 2.0 header (bytes 0-6 already emitted).
+    fn build_header_nes2(&self, out: &mut Vec<u8>) {
+        let i = &self.ines;
+        // Byte 7: console type (D0-1), NES 2.0 identifier (D2-3 = 0b10), mapper
+        // nibble 1 (D4-7).
+        let byte7 = (self.console_value() & 0x03) | 0x08 | (((i.map >> 4) & 0x0F) << 4);
+        out.push((byte7 & 0xFF) as u8);
+        // Byte 8: mapper nibble 2 (D0-3) + submapper (D4-7).
+        out.push((((i.map >> 8) & 0x0F) | ((i.submap & 0x0F) << 4)) as u8);
+        // Byte 9: PRG-ROM size MSB (D0-3) + CHR-ROM size MSB (D4-7).
+        out.push((((i.prg >> 8) & 0x0F) | (((i.chr >> 8) & 0x0F) << 4)) as u8);
+        // Byte 10: PRG-RAM (D0-3) + PRG-NVRAM (D4-7) shift counts.
+        out.push((ram_shift(i.prgram) | (ram_shift(i.prgnvram) << 4)) as u8);
+        // Byte 11: CHR-RAM (D0-3) + CHR-NVRAM (D4-7) shift counts.
+        out.push((ram_shift(i.chrram) | (ram_shift(i.chrnvram) << 4)) as u8);
+        // Byte 12: CPU/PPU timing; `.inestv` provides the NTSC/PAL fallback.
+        out.push((i.timing.unwrap_or(i.tv & 0x01) & 0x03) as u8);
+        // Byte 13: VS System PPU (D0-3) + hardware (D4-7) type (console type 1).
+        let byte13 = if self.console_value() == 1 {
+            (i.vsppu & 0x0F) | ((i.vshw & 0x0F) << 4)
+        } else {
+            0
+        };
+        out.push((byte13 & 0xFF) as u8);
+        // Byte 14: number of miscellaneous ROMs (D0-1).
+        out.push((i.miscrom & 0x03) as u8);
+        // Byte 15: default expansion device (D0-5).
+        out.push((i.expansion & 0x3F) as u8);
+    }
+
+    /// The resolved NES 2.0 console type (Flags 7 bits 0-1) from the explicit
+    /// `.inesconsole` value and the `.inesvs` / `.inespc10` sugar. Any conflict
+    /// is reported separately by [`Self::validate_ines`]; here the explicit
+    /// value wins, then VS, then PlayChoice-10.
+    fn console_value(&self) -> i64 {
+        if self.ines.console != 0 {
+            self.ines.console
+        } else if self.ines.vs != 0 {
+            1
+        } else if self.ines.pc10 != 0 {
+            2
+        } else {
+            0
         }
-        out.extend_from_slice(&self.rom);
-        out
+    }
+
+    /// Whether `.inesconsole`, `.inesvs`, and `.inespc10` disagree about the
+    /// NES 2.0 console type.
+    fn console_conflict(&self) -> bool {
+        let mut chosen: Option<i64> = None;
+        let intents = [
+            (self.ines.console != 0).then_some(self.ines.console),
+            (self.ines.vs != 0).then_some(1),
+            (self.ines.pc10 != 0).then_some(2),
+        ];
+        for v in intents.into_iter().flatten() {
+            match chosen {
+                Some(c) if c != v => return true,
+                _ => chosen = Some(v),
+            }
+        }
+        false
+    }
+
+    fn validate_range(&mut self, field: &str, value: i64, min: i64, max: i64) {
+        if !(min..=max).contains(&value) {
+            self.hard_error(t!(
+                "nes2-range",
+                field = field,
+                value = value,
+                min = min,
+                max = max
+            ));
+        }
+    }
+
+    /// Validate the iNES / NES 2.0 header state after both passes, reporting
+    /// out-of-range fields, malformed RAM sizes, console-type conflicts, and
+    /// NES 2.0-only directives used without `.ines2`.
+    fn validate_ines(&mut self) {
+        if !self.nes {
+            return;
+        }
+        let i = self.ines;
+        if i.nes2 {
+            self.validate_range("Mapper number", i.map, 0, 4095);
+            self.validate_range("PRG bank count", i.prg, 0, 4095);
+            self.validate_range("CHR bank count", i.chr, 0, 4095);
+            self.validate_range(".inessubmap", i.submap, 0, 15);
+            if let Some(t) = i.timing {
+                self.validate_range(".inestiming", t, 0, 3);
+            }
+            self.validate_range(".inesconsole", i.console, 0, 3);
+            self.validate_range(".inesmiscrom", i.miscrom, 0, 3);
+            self.validate_range(".inesexpansion", i.expansion, 0, 63);
+            self.validate_range(".inesvsppu", i.vsppu, 0, 15);
+            self.validate_range(".inesvshw", i.vshw, 0, 15);
+            for (val, field) in [
+                (i.prgram, ".inesprgram"),
+                (i.prgnvram, ".inesprgnvram"),
+                (i.chrram, ".ineschrram"),
+                (i.chrnvram, ".ineschrnvram"),
+            ] {
+                if ram_shift_checked(val).is_none() {
+                    self.hard_error(t!("nes2-ram-size", field = field, value = val));
+                }
+            }
+            if self.console_conflict() {
+                self.hard_error(t!("nes2-console-conflict"));
+            }
+            if self.console_value() == 3 {
+                self.hard_error(t!("nes2-extended-console"));
+            }
+            if (i.vsppu != 0 || i.vshw != 0) && self.console_value() != 1 {
+                self.warning(t!("nes2-vs-ignored"));
+            }
+        } else if i.map > 255 {
+            self.hard_error(t!(
+                "nes2-required",
+                what = format!("Mapper number {}", i.map)
+            ));
+        } else if i.prg > 255 {
+            self.hard_error(t!(
+                "nes2-required",
+                what = format!("PRG bank count {}", i.prg)
+            ));
+        } else if i.chr > 255 {
+            self.hard_error(t!(
+                "nes2-required",
+                what = format!("CHR bank count {}", i.chr)
+            ));
+        } else {
+            // NES 2.0-only fields must not be set without `.ines2`.
+            for (used, name) in [
+                (i.submap != 0, ".inessubmap"),
+                (i.prgnvram != 0, ".inesprgnvram"),
+                (i.chrram != 0, ".ineschrram"),
+                (i.chrnvram != 0, ".ineschrnvram"),
+                (i.timing.is_some(), ".inestiming"),
+                (i.console != 0, ".inesconsole"),
+                (i.vsppu != 0, ".inesvsppu"),
+                (i.vshw != 0, ".inesvshw"),
+                (i.miscrom != 0, ".inesmiscrom"),
+                (i.expansion != 0, ".inesexpansion"),
+            ] {
+                if used {
+                    self.hard_error(t!("nes2-required", what = name));
+                    break;
+                }
+            }
+        }
     }
 
     fn run_pass(&mut self, lines: &[Line]) {
@@ -779,6 +1003,50 @@ impl Assembler {
             Pseudo::InesPc10(e) => {
                 self.nes = true;
                 self.ines.pc10 = self.eval(e);
+            }
+            Pseudo::Ines2(e) => {
+                self.nes = true;
+                self.ines.nes2 = self.eval(e) != 0;
+            }
+            Pseudo::InesSubMap(e) => {
+                self.nes = true;
+                self.ines.submap = self.eval(e);
+            }
+            Pseudo::InesPrgNvRam(e) => {
+                self.nes = true;
+                self.ines.prgnvram = self.eval(e);
+            }
+            Pseudo::InesChrRam(e) => {
+                self.nes = true;
+                self.ines.chrram = self.eval(e);
+            }
+            Pseudo::InesChrNvRam(e) => {
+                self.nes = true;
+                self.ines.chrnvram = self.eval(e);
+            }
+            Pseudo::InesTiming(e) => {
+                self.nes = true;
+                self.ines.timing = Some(self.eval(e));
+            }
+            Pseudo::InesConsole(e) => {
+                self.nes = true;
+                self.ines.console = self.eval(e);
+            }
+            Pseudo::InesVsPpu(e) => {
+                self.nes = true;
+                self.ines.vsppu = self.eval(e);
+            }
+            Pseudo::InesVsHw(e) => {
+                self.nes = true;
+                self.ines.vshw = self.eval(e);
+            }
+            Pseudo::InesMiscRom(e) => {
+                self.nes = true;
+                self.ines.miscrom = self.eval(e);
+            }
+            Pseudo::InesExpansion(e) => {
+                self.nes = true;
+                self.ines.expansion = self.eval(e);
             }
             Pseudo::Prg(e) => {
                 self.segment_prg = true;

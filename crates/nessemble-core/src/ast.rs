@@ -108,10 +108,35 @@ pub enum Pseudo {
     /// `.inestv <system>` — TV system (Flags 9 bit 0 / Flags 10 bits 0-1:
     /// 0 NTSC, 1 PAL).
     InesTv(Expr),
-    /// `.inesvs <flag>` — VS Unisystem (Flags 7 bit 0).
+    /// `.inesvs <flag>` — VS Unisystem (Flags 7 bit 0 in iNES; console type 1
+    /// in NES 2.0).
     InesVs(Expr),
-    /// `.inespc10 <flag>` — PlayChoice-10 (Flags 7 bit 1).
+    /// `.inespc10 <flag>` — PlayChoice-10 (Flags 7 bit 1 in iNES; console type
+    /// 2 in NES 2.0).
     InesPc10(Expr),
+    /// `.ines2 <flag>` — emit a NES 2.0 header (Flags 7 bits 2-3 = 2).
+    Ines2(Expr),
+    /// `.inessubmap <n>` — NES 2.0 submapper (byte 8 bits 4-7).
+    InesSubMap(Expr),
+    /// `.inesprgnvram <bytes>` — NES 2.0 battery PRG-RAM size (byte 10 bits 4-7).
+    InesPrgNvRam(Expr),
+    /// `.ineschrram <bytes>` — NES 2.0 volatile CHR-RAM size (byte 11 bits 0-3).
+    InesChrRam(Expr),
+    /// `.ineschrnvram <bytes>` — NES 2.0 battery CHR-RAM size (byte 11 bits 4-7).
+    InesChrNvRam(Expr),
+    /// `.inestiming <n>` — NES 2.0 CPU/PPU timing (byte 12: 0 NTSC, 1 PAL,
+    /// 2 multi-region, 3 Dendy).
+    InesTiming(Expr),
+    /// `.inesconsole <n>` — NES 2.0 console type (Flags 7 bits 0-1).
+    InesConsole(Expr),
+    /// `.inesvsppu <n>` — NES 2.0 VS System PPU type (byte 13 bits 0-3).
+    InesVsPpu(Expr),
+    /// `.inesvshw <n>` — NES 2.0 VS System hardware type (byte 13 bits 4-7).
+    InesVsHw(Expr),
+    /// `.inesmiscrom <n>` — NES 2.0 number of miscellaneous ROMs (byte 14).
+    InesMiscRom(Expr),
+    /// `.inesexpansion <n>` — NES 2.0 default expansion device (byte 15).
+    InesExpansion(Expr),
     Prg(Expr),
     Chr(Expr),
     Segment(String),

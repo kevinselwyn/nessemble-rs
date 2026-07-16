@@ -305,17 +305,28 @@ Read more about 6502 addressing modes
 | [.incpng](#incpng)     | Include PNG                                                                         |
 | [.incrle](#incrle)     | Include binary data to be RLE-encoded                                               |
 | [.incwav](#incwav)     | Include WAV                                                                         |
+| [.ines2](#ines2)       | Emit a NES 2.0 header                                                                |
 | [.ines4scr](#ines4scr) | iNES four-screen VRAM flag                                                           |
 | [.inesbat](#inesbat)   | iNES battery / persistent memory flag                                               |
 | [.ineschr](#ineschr)   | iNES CHR count                                                                      |
-| [.inesmap](#inesmap)   | iNES mapper number                                                                  |
+| [.ineschrnvram](#ineschrnvram) | NES 2.0 battery CHR-RAM size                                                 |
+| [.ineschrram](#ineschrram) | NES 2.0 CHR-RAM size                                                             |
+| [.inesconsole](#inesconsole) | NES 2.0 console type                                                           |
+| [.inesexpansion](#inesexpansion) | NES 2.0 default expansion device                                          |
+| [.inesmap](#inesmap)   | iNES / NES 2.0 mapper number                                                        |
 | [.inesmir](#inesmir)   | iNES mirroring                                                                      |
+| [.inesmiscrom](#inesmiscrom) | NES 2.0 miscellaneous ROM count                                               |
 | [.inespc10](#inespc10) | iNES PlayChoice-10 flag                                                              |
-| [.inesprg](#inesprg)   | iNES PRG count                                                                      |
-| [.inesprgram](#inesprgram) | iNES PRG-RAM size                                                                |
+| [.inesprg](#inesprg)   | iNES / NES 2.0 PRG count                                                            |
+| [.inesprgnvram](#inesprgnvram) | NES 2.0 battery PRG-RAM size                                                 |
+| [.inesprgram](#inesprgram) | iNES / NES 2.0 PRG-RAM size                                                      |
+| [.inessubmap](#inessubmap) | NES 2.0 submapper number                                                         |
+| [.inestiming](#inestiming) | NES 2.0 CPU/PPU timing                                                           |
 | [.inestrn](#inestrn)   | iNES trainer include                                                                |
-| [.inestv](#inestv)     | iNES TV system                                                                      |
+| [.inestv](#inestv)     | iNES / NES 2.0 TV system                                                            |
 | [.inesvs](#inesvs)     | iNES VS Unisystem flag                                                              |
+| [.inesvshw](#inesvshw) | NES 2.0 VS System hardware type                                                      |
+| [.inesvsppu](#inesvsppu) | NES 2.0 VS System PPU type                                                         |
 | [.lobytes](#lobytes)   | Output only the low byte of 16-bit word(s)                                          |
 | [.macro](#macro)       | Call macro                                                                          |
 | [.macrodef](#macrodef) | Start macro definition                                                              |
@@ -1012,6 +1023,47 @@ Example:
 .incwav "audio.wav", 24
 ```
 
+### .ines2
+
+Emit a NES 2.0 header.
+
+Sets bits 2-3 of Flags 7 to the NES 2.0 identifier (`10`) and switches the
+output header from iNES 1.0 to [NES 2.0](https://www.nesdev.org/wiki/NES_2.0),
+which widens the mapper (0-4095) and PRG/CHR sizes and repurposes bytes 8-15.
+
+When NES 2.0 mode is active, some existing directives change meaning:
+
+- [.inesprg](#inesprg) / [.ineschr](#ineschr) become 12-bit (the byte-9 MSB
+  nibbles are written automatically for counts above 255).
+- [.inesmap](#inesmap) becomes 12-bit (writes byte 8 as well).
+- [.inesprgram](#inesprgram) targets the NES 2.0 PRG-RAM field and takes a
+  **byte** size (not 8 KB units).
+- [.inestv](#inestv) provides the NTSC/PAL fallback for the
+  [.inestiming](#inestiming) byte.
+- [.inesvs](#inesvs) / [.inespc10](#inespc10) become sugar for the
+  [.inesconsole](#inesconsole) type.
+
+NES 2.0-only directives ([.inessubmap](#inessubmap),
+[.inesprgnvram](#inesprgnvram), [.ineschrram](#ineschrram),
+[.ineschrnvram](#ineschrnvram), [.inestiming](#inestiming),
+[.inesconsole](#inesconsole), [.inesvsppu](#inesvsppu),
+[.inesvshw](#inesvshw), [.inesmiscrom](#inesmiscrom),
+[.inesexpansion](#inesexpansion)) require this directive.
+
+Usage:
+
+```nessemble
+.ines2 FLAG
+```
+
+* `FLAG` - Number, required. Non-zero to emit a NES 2.0 header.
+
+Example:
+
+```nessemble
+.ines2 1
+```
+
 ### .ines4scr
 
 iNES four-screen VRAM flag.
@@ -1065,12 +1117,109 @@ Usage:
 .ineschr COUNT
 ```
 
-* `COUNT` - Number, required. Number of CHR banks.
+* `COUNT` - Number, required. Number of CHR banks. In [NES 2.0](#ines2) mode a
+  count above 255 also writes the byte-9 MSB nibble (up to 4095).
 
 Example:
 
 ```nessemble
 .ineschr 1
+```
+
+### .ineschrnvram
+
+NES 2.0 battery CHR-RAM size.
+
+Sets the battery-backed CHR-RAM field (byte 11 bits 4-7) of a
+[NES 2.0](#ines2) header. Requires [.ines2](#ines2).
+
+Usage:
+
+```nessemble
+.ineschrnvram BYTES
+```
+
+* `BYTES` - Number, required. Size in bytes: `0`, or a power-of-two byte count
+  from 128 to 2097152 (stored as the shift count `size = 64 << n`).
+
+Example:
+
+```nessemble
+.ineschrnvram 8192
+```
+
+### .ineschrram
+
+NES 2.0 CHR-RAM size.
+
+Sets the volatile CHR-RAM field (byte 11 bits 0-3) of a [NES 2.0](#ines2)
+header. Requires [.ines2](#ines2).
+
+Usage:
+
+```nessemble
+.ineschrram BYTES
+```
+
+* `BYTES` - Number, required. Size in bytes: `0`, or a power-of-two byte count
+  from 128 to 2097152 (stored as the shift count `size = 64 << n`).
+
+Example:
+
+```nessemble
+.ineschrram 8192
+```
+
+### .inesconsole
+
+NES 2.0 console type.
+
+Sets bits 0-1 of Flags 7. Requires [.ines2](#ines2). This is the canonical form
+of [.inesvs](#inesvs) (value 1) and [.inespc10](#inespc10) (value 2); setting a
+conflicting combination is an error.
+
+| Value | Console type       |
+|:-----:|:-------------------|
+| 0     | Nintendo NES / FC  |
+| 1     | VS System          |
+| 2     | PlayChoice-10      |
+| 3     | Extended (unsupported) |
+
+> Value 3 (extended console type) is not yet supported.
+
+Usage:
+
+```nessemble
+.inesconsole NUMBER
+```
+
+* `NUMBER` - Number, required. Console type (0-3).
+
+Example:
+
+```nessemble
+.inesconsole 1
+```
+
+### .inesexpansion
+
+NES 2.0 default expansion device.
+
+Sets byte 15 (bits 0-5) of a [NES 2.0](#ines2) header. Requires
+[.ines2](#ines2).
+
+Usage:
+
+```nessemble
+.inesexpansion NUMBER
+```
+
+* `NUMBER` - Number, required. Expansion device (0-63).
+
+Example:
+
+```nessemble
+.inesexpansion 1
 ```
 
 ### .inesmap
@@ -1083,7 +1232,9 @@ Usage:
 .inesmap NUMBER
 ```
 
-* `NUMBER` - Number, required. Mapper number.
+* `NUMBER` - Number, required. Mapper number. iNES supports 0-255; in
+  [NES 2.0](#ines2) mode the range widens to 0-4095 (byte 8 holds the high
+  nibble). A value above 255 requires [.ines2](#ines2).
 
 Read more about NES mappers
 [here](https://wiki.nesdev.com/w/index.php/List_of_mappers).
@@ -1116,12 +1267,34 @@ Usage:
 
 * `NUMBER` - Number, required. Mirroring type.
 
+### .inesmiscrom
+
+NES 2.0 miscellaneous ROM count.
+
+Sets byte 14 (bits 0-1) of a [NES 2.0](#ines2) header, the number of
+miscellaneous ROMs present. Requires [.ines2](#ines2).
+
+Usage:
+
+```nessemble
+.inesmiscrom NUMBER
+```
+
+* `NUMBER` - Number, required. Number of miscellaneous ROMs (0-3).
+
+Example:
+
+```nessemble
+.inesmiscrom 1
+```
+
 ### .inespc10
 
 iNES PlayChoice-10 flag.
 
 Sets bit 1 of Flags 7, marking the ROM as a PlayChoice-10 title. This bit is not
-part of the official specification and most emulators ignore it.
+part of the official specification and most emulators ignore it. In
+[NES 2.0](#ines2) mode this is sugar for [.inesconsole](#inesconsole) type 2.
 
 > Only the header bit is set. The optional 8 KB PlayChoice INST-ROM and PROM data
 > sections are not emitted.
@@ -1150,7 +1323,8 @@ Usage:
 .inesprg COUNT
 ```
 
-* `COUNT` - Number, required. Number of PRG banks.
+* `COUNT` - Number, required. Number of PRG banks. In [NES 2.0](#ines2) mode a
+  count above 255 also writes the byte-9 MSB nibble (up to 4095).
 
 Example:
 
@@ -1158,25 +1332,102 @@ Example:
 .inesprg 1
 ```
 
-### .inesprgram
+### .inesprgnvram
 
-iNES PRG-RAM size.
+NES 2.0 battery PRG-RAM size.
 
-Sets byte 8 of the header, the size of PRG-RAM in 8 KB units. A value of `0`
-infers 8 KB for compatibility.
+Sets the battery-backed PRG-RAM field (byte 10 bits 4-7) of a [NES 2.0](#ines2)
+header. Requires [.ines2](#ines2).
 
 Usage:
 
 ```nessemble
-.inesprgram COUNT
+.inesprgnvram BYTES
 ```
 
-* `COUNT` - Number, required. PRG-RAM size in 8 KB units.
+* `BYTES` - Number, required. Size in bytes: `0`, or a power-of-two byte count
+  from 128 to 2097152 (stored as the shift count `size = 64 << n`).
+
+Example:
+
+```nessemble
+.inesprgnvram 8192
+```
+
+### .inesprgram
+
+iNES / NES 2.0 PRG-RAM size.
+
+In iNES mode, sets byte 8 of the header, the size of PRG-RAM in 8 KB units (a
+value of `0` infers 8 KB for compatibility).
+
+In [NES 2.0](#ines2) mode, sets the volatile PRG-RAM field (byte 10 bits 0-3)
+and the argument is a **byte** size instead — pair it with
+[.inesprgnvram](#inesprgnvram) for battery-backed PRG-RAM.
+
+Usage:
+
+```nessemble
+.inesprgram SIZE
+```
+
+* `SIZE` - Number, required. In iNES mode, PRG-RAM size in 8 KB units. In
+  NES 2.0 mode, a byte size: `0`, or a power-of-two byte count from 128 to
+  2097152 (stored as the shift count `size = 64 << n`).
 
 Example:
 
 ```nessemble
 .inesprgram 1
+```
+
+### .inessubmap
+
+NES 2.0 submapper number.
+
+Sets byte 8 (bits 4-7) of a [NES 2.0](#ines2) header, the submapper that
+distinguishes variants of a mapper. Requires [.ines2](#ines2).
+
+Usage:
+
+```nessemble
+.inessubmap NUMBER
+```
+
+* `NUMBER` - Number, required. Submapper number (0-15).
+
+Example:
+
+```nessemble
+.inessubmap 1
+```
+
+### .inestiming
+
+NES 2.0 CPU/PPU timing.
+
+Sets byte 12 of a [NES 2.0](#ines2) header, the region timing. Requires
+[.ines2](#ines2). When unset, [.inestv](#inestv) provides the NTSC/PAL value.
+
+| Value | Timing        |
+|:-----:|:--------------|
+| 0     | RP2C02 (NTSC) |
+| 1     | RP2C07 (PAL)  |
+| 2     | Multi-region  |
+| 3     | UMC 6527P (Dendy) |
+
+Usage:
+
+```nessemble
+.inestiming NUMBER
+```
+
+* `NUMBER` - Number, required. Timing (0-3).
+
+Example:
+
+```nessemble
+.inestiming 0
 ```
 
 ### .inestrn
@@ -1207,7 +1458,8 @@ iNES TV system.
 
 Sets bit 0 of Flags 9, the TV system the ROM targets. PAL is also mirrored into
 the unofficial Flags 10 TV-system field (bits 0-1: `0` NTSC, `2` PAL) that some
-emulators honor.
+emulators honor. In [NES 2.0](#ines2) mode this instead provides the NTSC/PAL
+fallback for the [.inestiming](#inestiming) byte.
 
 ```text
 xxxxxxx0
@@ -1239,7 +1491,8 @@ Example:
 
 iNES VS Unisystem flag.
 
-Sets bit 0 of Flags 7, marking the ROM as a VS Unisystem arcade title.
+Sets bit 0 of Flags 7, marking the ROM as a VS Unisystem arcade title. In
+[NES 2.0](#ines2) mode this is sugar for [.inesconsole](#inesconsole) type 1.
 
 Usage:
 
@@ -1253,6 +1506,50 @@ Example:
 
 ```nessemble
 .inesvs 1
+```
+
+### .inesvshw
+
+NES 2.0 VS System hardware type.
+
+Sets byte 13 (bits 4-7) of a [NES 2.0](#ines2) header. Only meaningful when the
+[.inesconsole](#inesconsole) type is VS (1); ignored otherwise. Requires
+[.ines2](#ines2).
+
+Usage:
+
+```nessemble
+.inesvshw NUMBER
+```
+
+* `NUMBER` - Number, required. VS System hardware type (0-15).
+
+Example:
+
+```nessemble
+.inesvshw 0
+```
+
+### .inesvsppu
+
+NES 2.0 VS System PPU type.
+
+Sets byte 13 (bits 0-3) of a [NES 2.0](#ines2) header. Only meaningful when the
+[.inesconsole](#inesconsole) type is VS (1); ignored otherwise. Requires
+[.ines2](#ines2).
+
+Usage:
+
+```nessemble
+.inesvsppu NUMBER
+```
+
+* `NUMBER` - Number, required. VS System PPU type (0-15).
+
+Example:
+
+```nessemble
+.inesvsppu 0
 ```
 
 ### .lobytes

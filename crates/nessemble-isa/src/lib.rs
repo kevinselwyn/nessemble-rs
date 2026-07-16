@@ -103,6 +103,10 @@ pub const DIRECTIVES: &[(&str, &str)] = &[
         ".inesprg / .ineschr / .inesmap / .inesmir / .inesbat / .ines4scr / .inesprgram / .inestv / .inesvs / .inespc10 / .inestrn",
         "iNES header fields",
     ),
+    (
+        ".ines2 / .inessubmap / .inesprgnvram / .ineschrram / .ineschrnvram / .inestiming / .inesconsole / .inesvsppu / .inesvshw / .inesmiscrom / .inesexpansion",
+        "NES 2.0 header fields",
+    ),
     (".prg / .chr / .segment", "select a PRG/CHR bank"),
 ];
 

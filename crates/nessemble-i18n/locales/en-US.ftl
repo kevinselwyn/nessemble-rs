@@ -23,6 +23,12 @@ fill-args = Not enough .fill arguments
 font-args = Not enough .font arguments
 defchr-args = Too few arguments. { $count } provided, need 8
 value-too-high = Value too high
+nes2-required = { $what } requires NES 2.0 mode (`.ines2 1`)
+nes2-range = { $field } value { $value } is out of range ({ $min }-{ $max })
+nes2-ram-size = Invalid { $field } size { $value } (must be 0 or a power-of-two byte count from 128 to 2097152)
+nes2-console-conflict = Conflicting console type: VS, PlayChoice-10, and .inesconsole are mutually exclusive
+nes2-extended-console = Extended console type (.inesconsole 3) is not yet supported
+nes2-vs-ignored = VS PPU/hardware type set but console type is not VS; value ignored
 
 ## Media importers
 
