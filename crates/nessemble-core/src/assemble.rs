@@ -385,9 +385,7 @@ impl Assembler {
             | ((self.ines.fsc & 0x01) << 3)
             | ((self.ines.map & 0x0F) << 4);
         out.push((byte6 & 0xFF) as u8);
-        let byte7 = (self.ines.vs & 0x01)
-            | ((self.ines.pc10 & 0x01) << 1)
-            | (self.ines.map & 0xF0);
+        let byte7 = (self.ines.vs & 0x01) | ((self.ines.pc10 & 0x01) << 1) | (self.ines.map & 0xF0);
         out.push((byte7 & 0xFF) as u8);
         // Byte 8: PRG-RAM size (8 KB units). Byte 9: TV system (bit 0).
         out.push((self.ines.prgram & 0xFF) as u8);
