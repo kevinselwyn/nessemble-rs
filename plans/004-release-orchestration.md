@@ -237,7 +237,7 @@ A new job (or step) that runs **only on `pull_request`**:
   `contents: write`, installed on the repo, App ID + private key stored as the
   `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY` secrets, and added to `main`'s
   branch-protection bypass list. Recorded in
-  [`docs/repo/release-app-setup.md`](../docs/repo/release-app-setup.md).
+  [`ref/repo/release-app-setup.md`](../ref/repo/release-app-setup.md).
 - Added `.github/workflows/version.yml` — a `workflow_dispatch` **Release**
   workflow that mints an App token (`actions/create-github-app-token`), runs
   `xtask changeset status` + `version`, commits as `nessemble-release[bot]`, and
