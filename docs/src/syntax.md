@@ -310,10 +310,12 @@ Read more about 6502 addressing modes
 | [.ineschr](#ineschr)   | iNES CHR count                                                                      |
 | [.inesmap](#inesmap)   | iNES mapper number                                                                  |
 | [.inesmir](#inesmir)   | iNES mirroring                                                                      |
+| [.inespc10](#inespc10) | iNES PlayChoice-10 flag                                                              |
 | [.inesprg](#inesprg)   | iNES PRG count                                                                      |
 | [.inesprgram](#inesprgram) | iNES PRG-RAM size                                                                |
 | [.inestrn](#inestrn)   | iNES trainer include                                                                |
 | [.inestv](#inestv)     | iNES TV system                                                                      |
+| [.inesvs](#inesvs)     | iNES VS Unisystem flag                                                              |
 | [.lobytes](#lobytes)   | Output only the low byte of 16-bit word(s)                                          |
 | [.macro](#macro)       | Call macro                                                                          |
 | [.macrodef](#macrodef) | Start macro definition                                                              |
@@ -1114,6 +1116,30 @@ Usage:
 
 * `NUMBER` - Number, required. Mirroring type.
 
+### .inespc10
+
+iNES PlayChoice-10 flag.
+
+Sets bit 1 of Flags 7, marking the ROM as a PlayChoice-10 title. This bit is not
+part of the official specification and most emulators ignore it.
+
+> Only the header bit is set. The optional 8 KB PlayChoice INST-ROM and PROM data
+> sections are not emitted.
+
+Usage:
+
+```nessemble
+.inespc10 FLAG
+```
+
+* `FLAG` - Number, required. Non-zero to mark a PlayChoice-10 title.
+
+Example:
+
+```nessemble
+.inespc10 1
+```
+
 ### .inesprg
 
 iNES PRG count.
@@ -1179,7 +1205,9 @@ Example:
 
 iNES TV system.
 
-Sets bit 0 of Flags 9, the TV system the ROM targets.
+Sets bit 0 of Flags 9, the TV system the ROM targets. PAL is also mirrored into
+the unofficial Flags 10 TV-system field (bits 0-1: `0` NTSC, `2` PAL) that some
+emulators honor.
 
 ```text
 xxxxxxx0
@@ -1188,10 +1216,10 @@ xxxxxxx0
                      1: PAL
 ```
 
-| Value | TV system |
-|:-----:|:---------:|
-| 0     | NTSC      |
-| 1     | PAL       |
+| Value | TV system | Flags 9 | Flags 10 |
+|:-----:|:---------:|:-------:|:--------:|
+| 0     | NTSC      | 0       | 0        |
+| 1     | PAL       | 1       | 2        |
 
 Usage:
 
@@ -1205,6 +1233,26 @@ Example:
 
 ```nessemble
 .inestv 1
+```
+
+### .inesvs
+
+iNES VS Unisystem flag.
+
+Sets bit 0 of Flags 7, marking the ROM as a VS Unisystem arcade title.
+
+Usage:
+
+```nessemble
+.inesvs FLAG
+```
+
+* `FLAG` - Number, required. Non-zero to mark a VS Unisystem title.
+
+Example:
+
+```nessemble
+.inesvs 1
 ```
 
 ### .lobytes
