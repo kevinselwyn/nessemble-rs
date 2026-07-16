@@ -1,7 +1,8 @@
 # nessemble-rs: A Plan for Changeset-Driven Release Orchestration
 
-> Status: **Decisions settled (§9); Phase 0 (convention & docs) done —
-> Phases 1–3 pending.** Phase 0 established the `.changeset/` convention, the
+> Status: **Decisions settled (§9); Phases 0–1 done — Phases 2–3 pending.**
+> Phase 1 added the `xtask changeset` tooling. Phase 0 established the
+> `.changeset/` convention, the
 > `RELEASING.md` rewrite, and the PR-template update in this PR; the tooling, CI
 > enforcement, and Release workflow land in follow-up PRs.
 
@@ -212,9 +213,14 @@ A new job (or step) that runs **only on `pull_request`**:
   impact" section with a "Changeset" section (which change type, or the
   `no-changeset` opt-out).
 
-### Phase 1 — `xtask changeset` tooling
-- Implement `add`, `check`, `status`, `version` with unit tests over fixture
-  changeset dirs. Wire `cargo set-version` for the mutation.
+### Phase 1 — `xtask changeset` tooling — ✅ done
+- Implemented `add`, `check`, `status`, `version` (`xtask/src/changeset.rs`)
+  using the `changesets` crate to parse the file format and the project's
+  single-version (`nessemble` umbrella key) policy on top. Unit tests cover bump
+  precedence, the `none` opt-out, semver math, changelog rendering, and the
+  `README.md`-skipping loader; `version` delegates the manifest/lockfile edit to
+  `cargo set-version --workspace`, verified end-to-end to bump the root version,
+  the inherited crates, and the internal `[workspace.dependencies]` pins.
 
 ### Phase 2 — CI enforcement
 - Add the changeset-presence job to `ci.yml`, with the agreed escape hatch.
