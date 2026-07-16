@@ -1,8 +1,9 @@
 # nessemble-rs: A Plan for Changeset-Driven Release Orchestration
 
-> Status: **Planning — no code written; decisions settled (§9).** This document
-> proposes the design; the decisions in §9 are now locked and a follow-up set of
-> PRs implements it on the go-ahead.
+> Status: **Decisions settled (§9); Phase 0 (convention & docs) done —
+> Phases 1–3 pending.** Phase 0 established the `.changeset/` convention, the
+> `RELEASING.md` rewrite, and the PR-template update in this PR; the tooling, CI
+> enforcement, and Release workflow land in follow-up PRs.
 
 ---
 
@@ -201,11 +202,13 @@ A new job (or step) that runs **only on `pull_request`**:
 
 *(Nothing below is implemented yet.)*
 
-### Phase 0 — Convention & docs
-- Create `.changeset/` with a `README.md` describing the format and workflow.
-- Rewrite `RELEASING.md` around the changeset model (the `-dev` mechanism is
-  retired; document the new "run the Release action" flow).
-- Update `.github/pull_request_template.md` — replace the `-dev`-based "Release
+### Phase 0 — Convention & docs — ✅ done
+- Created `.changeset/` with a `README.md` describing the format and workflow,
+  plus a `nessemble: none` changeset for this planning PR.
+- Rewrote `RELEASING.md` around the changeset model (the `-dev` mechanism is
+  retired; documents the new "run the Release action" flow), with a rollout note
+  since the automation lands in Phases 1–3.
+- Updated `.github/pull_request_template.md` — replaced the `-dev`-based "Release
   impact" section with a "Changeset" section (which change type, or the
   `no-changeset` opt-out).
 
