@@ -1,11 +1,16 @@
-name: Release
+name: Publish
 
-# The release version is the workspace version in the root Cargo.toml
-# (`[workspace.package] version`) — the same version the CLI reports. There is
-# no manual version input. On every push to main (or a manual run), the pipeline
-# reads that version and, if a `v<version>` tag does not already exist, builds
-# every platform artifact and publishes a tagged GitHub Release for it. Bumping
-# the workspace version is therefore all it takes to cut a release.
+# Build & publish pipeline. The release version is the workspace version in the
+# root Cargo.toml (`[workspace.package] version`) — the same version the CLI
+# reports. On every push to main, the pipeline reads that version and, if a
+# `v<version>` tag does not already exist, builds every platform artifact and
+# publishes a tagged GitHub Release for it.
+#
+# The version is advanced by the changeset-driven **Release** workflow
+# (version.yml), which bumps the workspace from the accumulated changesets and
+# pushes the bump to main — that push is what triggers this pipeline. Ordinary
+# pushes to main leave the version unchanged, so the tag already exists and
+# nothing is built. See plans/004-release-orchestration.md.
 #
 # Artifacts:
 #   macOS          nessemble_<v>.pkg  nessemble_<v>_macos.tar.gz
@@ -42,13 +47,11 @@ jobs:
         run: |
           version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          # A pre-release version (anything with a `-<suffix>`, e.g. 2.5.0-dev) is
-          # work-in-progress and is never released; `exists=true` gates every
-          # build/release job below off. Drop the suffix to cut the release.
-          if [[ "$version" == *-* ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Workspace version **$version** is a pre-release; skipping release." >> "$GITHUB_STEP_SUMMARY"
-          elif git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+          # Build only when this version has no tag yet. The changeset-driven
+          # Release workflow (version.yml) is what advances the version, so an
+          # un-tagged version on main means it just cut a release; every other
+          # push leaves the version at its already-tagged value and no-ops.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Workspace version **$version** — tag \`v$version\` already exists; nothing to release." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -219,9 +222,9 @@ jobs:
   # ----------------------------------------------------------------- Release
   #
   # Creates the `v<version>` tag (at this commit) and its GitHub Release,
-  # uploads all artifacts, and auto-generates release notes listing every
-  # pull request merged since the previous release (GitHub's "What's Changed"
-  # changelog; grouping is configured in .github/release.yml).
+  # uploads all artifacts, and uses the curated CHANGELOG.md section for this
+  # version (written by `xtask changeset version`) as the release notes, plus
+  # the static downloads/install boilerplate from .github/release-body.md.
   release:
     needs: [version, linux, windows, macos, wasm]
     if: needs.version.outputs.exists == 'false'
@@ -229,9 +232,37 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Assemble release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Extract this version's section from CHANGELOG.md: the lines between
+          # its `## <version> - <date>` heading and the next `## ` heading, with
+          # the heading and surrounding blank lines trimmed.
+          notes="$(awk -v ver="## $VERSION " '
+            index($0, ver)==1 { grab=1; next }
+            grab && index($0, "## ")==1 { grab=0 }
+            grab {
+              if ($0 == "" && !started) next
+              started=1
+              buf = buf $0 "\n"
+            }
+            END { sub(/\n+$/, "", buf); print buf }
+          ' CHANGELOG.md)"
+          {
+            echo '`nessemble` — a 6502 assembler for the Nintendo Entertainment System.'
+            if [ -n "$notes" ]; then
+              printf '\n## What'\''s Changed\n\n%s\n' "$notes"
+            fi
+            echo
+            cat .github/release-body.md
+          } > RELEASE_NOTES.md
+          echo "----- RELEASE_NOTES.md -----"
+          cat RELEASE_NOTES.md
       - name: Create tagged release
         uses: softprops/action-gh-release@v2
         with:
@@ -241,40 +272,9 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
-          generate_release_notes: true
+          generate_release_notes: false
           fail_on_unmatched_files: true
-          body: |
-            `nessemble` — a 6502 assembler for the Nintendo Entertainment System.
-
-            ### Downloads
-
-            | Platform       | Artifact(s)                                |
-            |----------------|--------------------------------------------|
-            | macOS          | `nessemble_*.pkg`, `nessemble_*_macos.tar.gz` |
-            | Linux amd64    | `nessemble_*_amd64.deb`                    |
-            | Linux i386     | `nessemble_*_i386.deb`                     |
-            | Windows 32-bit | `nessemble_*_win32.exe`, `…_win32.msi`     |
-            | Windows 64-bit | `nessemble_*_win64.exe`, `…_win64.msi`     |
-            | WebAssembly    | `nessemble_*_wasm.tar.gz` (in-browser assembler) |
-
-            #### macOS: "Apple could not verify…" on the `.pkg`
-
-            The `.pkg` is not signed with an Apple Developer ID, so macOS
-            Gatekeeper blocks it after download. Either clear the quarantine flag
-            and install the `.pkg` normally:
-
-            ```sh
-            xattr -d com.apple.quarantine nessemble_*.pkg
-            sudo installer -pkg nessemble_*.pkg -target /
-            ```
-
-            …or skip the installer entirely and use the plain binary tarball:
-
-            ```sh
-            tar -xzf nessemble_*_macos.tar.gz
-            xattr -d com.apple.quarantine nessemble        # clear quarantine
-            sudo mv nessemble /usr/local/bin/               # onto your PATH
-            ```
+          body_path: RELEASE_NOTES.md
           files: |
             artifacts/**/*.deb
             artifacts/**/*.exe

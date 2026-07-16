@@ -1,9 +1,12 @@
 # nessemble-rs: A Plan for Changeset-Driven Release Orchestration
 
-> Status: **Decisions settled (§9); Phases 0–2 done — Phase 3 pending.**
-> Phase 2 added the CI changeset gate. Phase 1 added the `xtask changeset`
-> tooling. Phase 0 established the `.changeset/` convention, the `RELEASING.md`
-> rewrite, and the PR-template update; the Release workflow lands in Phase 3.
+> Status: **Complete — Phases 0–4 done; decisions settled (§9).** The
+> changeset-driven flow is live end-to-end: the `.changeset/` convention
+> (Phase 0), the `xtask changeset` tooling (Phase 1), the CI changeset gate
+> (Phase 2), the `nessemble-release[bot]` Release workflow that bumps the
+> workspace and hands off to the Publish pipeline (Phase 3), and the Publish
+> pipeline using the curated `CHANGELOG.md` section as the GitHub Release body
+> (Phase 4 / D5). The `-dev` guard has been removed from the Publish pipeline.
 
 ---
 
@@ -229,20 +232,29 @@ A new job (or step) that runs **only on `pull_request`**:
   changeset fails CI before it can reach the Release action.
 - Each implementing PR carries its own changeset (seeding the convention).
 
-### Phase 3 — Release workflow
-- **Set up the `nessemble-release[bot]` GitHub App** (D4): register with
-  `contents: write`, install on the repo, store App ID + private key as secrets,
-  and add the App to `main`'s branch-protection bypass list.
-- Add `.github/workflows/version.yml` (`workflow_dispatch`) that mints an App
-  token (`actions/create-github-app-token`), runs `xtask changeset version`,
-  commits as the bot, and **pushes the bump directly to `main`** (D4) so
-  `release.yml` fires.
-- **Remove the `-dev` pre-release logic** (D6): drop the `*-*` branch from
-  `release.yml`'s version-resolve step, leaving only the tag-existence check.
-- Confirm end-to-end on a dry run / test tag before first real use.
+### Phase 3 — Release workflow — ✅ done
+- **Set up the `nessemble-release[bot]` GitHub App** (D4): registered with
+  `contents: write`, installed on the repo, App ID + private key stored as the
+  `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY` secrets, and added to `main`'s
+  branch-protection bypass list. Recorded in
+  [`docs/repo/release-app-setup.md`](../docs/repo/release-app-setup.md).
+- Added `.github/workflows/version.yml` — a `workflow_dispatch` **Release**
+  workflow that mints an App token (`actions/create-github-app-token`), runs
+  `xtask changeset status` + `version`, commits as `nessemble-release[bot]`, and
+  **pushes the bump directly to `main`** (D4). That push triggers the Publish
+  pipeline.
+- **Removed the `-dev` pre-release logic** (D6): dropped the `*-*` branch from
+  the version-resolve step of `release.yml`, which is now the **Publish** pipeline
+  (renamed from `Release` to disambiguate from the new dispatch workflow).
 
-### Phase 4 — Changelog surfacing
-- Generate `CHANGELOG.md`; optionally feed the new section into the Release body.
+### Phase 4 — Changelog surfacing — ✅ done
+- `CHANGELOG.md` is generated and prepended by `xtask changeset version`
+  (Phase 1).
+- The Publish pipeline (`release.yml`) now extracts this version's `CHANGELOG.md`
+  section and uses it as the GitHub Release body (with the static
+  downloads/install boilerplate in `.github/release-body.md`), replacing
+  `generate_release_notes` (D5). The now-unused auto-notes grouping config
+  (`.github/release.yml`) was removed.
 
 ## 6. Interaction with today's pipeline
 
