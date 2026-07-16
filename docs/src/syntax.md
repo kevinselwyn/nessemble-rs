@@ -305,11 +305,17 @@ Read more about 6502 addressing modes
 | [.incpng](#incpng)     | Include PNG                                                                         |
 | [.incrle](#incrle)     | Include binary data to be RLE-encoded                                               |
 | [.incwav](#incwav)     | Include WAV                                                                         |
+| [.ines4scr](#ines4scr) | iNES four-screen VRAM flag                                                           |
+| [.inesbat](#inesbat)   | iNES battery / persistent memory flag                                               |
 | [.ineschr](#ineschr)   | iNES CHR count                                                                      |
 | [.inesmap](#inesmap)   | iNES mapper number                                                                  |
 | [.inesmir](#inesmir)   | iNES mirroring                                                                      |
+| [.inespc10](#inespc10) | iNES PlayChoice-10 flag                                                              |
 | [.inesprg](#inesprg)   | iNES PRG count                                                                      |
+| [.inesprgram](#inesprgram) | iNES PRG-RAM size                                                                |
 | [.inestrn](#inestrn)   | iNES trainer include                                                                |
+| [.inestv](#inestv)     | iNES TV system                                                                      |
+| [.inesvs](#inesvs)     | iNES VS Unisystem flag                                                              |
 | [.lobytes](#lobytes)   | Output only the low byte of 16-bit word(s)                                          |
 | [.macro](#macro)       | Call macro                                                                          |
 | [.macrodef](#macrodef) | Start macro definition                                                              |
@@ -1006,6 +1012,49 @@ Example:
 .incwav "audio.wav", 24
 ```
 
+### .ines4scr
+
+iNES four-screen VRAM flag.
+
+Sets bit 3 of Flags 6 (the "alternative nametable layout" bit), used by boards
+that provide four-screen VRAM instead of the hard-wired mirroring selected by
+[.inesmir](#inesmir).
+
+Usage:
+
+```nessemble
+.ines4scr FLAG
+```
+
+* `FLAG` - Number, required. Non-zero to set four-screen VRAM.
+
+Example:
+
+```nessemble
+.ines4scr 1
+```
+
+### .inesbat
+
+iNES battery / persistent memory flag.
+
+Sets bit 1 of Flags 6, indicating the cartridge contains battery-backed PRG-RAM
+at `$6000-$7FFF` (or other persistent memory).
+
+Usage:
+
+```nessemble
+.inesbat FLAG
+```
+
+* `FLAG` - Number, required. Non-zero to indicate persistent memory.
+
+Example:
+
+```nessemble
+.inesbat 1
+```
+
 ### .ineschr
 
 iNES CHR count.
@@ -1043,35 +1092,21 @@ Read more about NES mappers
 
 iNES mirroring.
 
-```text
-xxxx3210
-    ||||
-    |||+- Mirroring: 0: horizontal (vertical arrangement)
-    |||              1: vertical (horizontal arrangement)
-    ||+-- 1: Cartridge contains battery-backed PRG-RAM
-    |+--- 1: 512-byte trainer at $7000-$71FF
-    +---- 1: Ignore mirroring control, provide 4-screen VRAM
+Sets bit 0 of Flags 6, the hard-wired nametable arrangement. The other Flags 6
+bits are controlled by their own directives: [.inesbat](#inesbat) (battery),
+[.inestrn](#inestrn) (trainer), and [.ines4scr](#ines4scr) (four-screen VRAM).
 
+```text
+xxxxxxx0
+       |
+       +- Mirroring: 0: horizontal (vertical arrangement)
+                     1: vertical (horizontal arrangement)
 ```
 
-| Value | Binary   | Mirroring  | PRG-RAM                                 | Trainer                                 | 4-Screen                                |
-|:-----:|:--------:|:----------:|:---------------------------------------:|:---------------------------------------:|:---------------------------------------:|
-| 0     | 00000000 | Horizontal | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   |
-| 1     | 00000001 | Vertical   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   |
-| 2     | 00000010 | Horizontal | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   |
-| 3     | 00000011 | Vertical   | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   |
-| 4     | 00000100 | Horizontal | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   |
-| 5     | 00000101 | Vertical   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   |
-| 6     | 00000110 | Horizontal | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   |
-| 7     | 00000111 | Vertical   | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   |
-| 8     | 00001000 | Horizontal | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> |
-| 9     | 00001001 | Vertical   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> |
-| 10    | 00001010 | Horizontal | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> |
-| 11    | 00001011 | Vertical   | <i class="fa fa-check color-green"></i> | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> |
-| 12    | 00001100 | Horizontal | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> |
-| 13    | 00001101 | Vertical   | <i class="fa fa-times color-red"></i>   | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> |
-| 14    | 00001110 | Horizontal | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> |
-| 15    | 00001111 | Vertical   | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> | <i class="fa fa-check color-green"></i> |
+| Value | Mirroring  |
+|:-----:|:----------:|
+| 0     | Horizontal |
+| 1     | Vertical   |
 
 Usage:
 
@@ -1080,6 +1115,30 @@ Usage:
 ```
 
 * `NUMBER` - Number, required. Mirroring type.
+
+### .inespc10
+
+iNES PlayChoice-10 flag.
+
+Sets bit 1 of Flags 7, marking the ROM as a PlayChoice-10 title. This bit is not
+part of the official specification and most emulators ignore it.
+
+> Only the header bit is set. The optional 8 KB PlayChoice INST-ROM and PROM data
+> sections are not emitted.
+
+Usage:
+
+```nessemble
+.inespc10 FLAG
+```
+
+* `FLAG` - Number, required. Non-zero to mark a PlayChoice-10 title.
+
+Example:
+
+```nessemble
+.inespc10 1
+```
 
 ### .inesprg
 
@@ -1097,6 +1156,27 @@ Example:
 
 ```nessemble
 .inesprg 1
+```
+
+### .inesprgram
+
+iNES PRG-RAM size.
+
+Sets byte 8 of the header, the size of PRG-RAM in 8 KB units. A value of `0`
+infers 8 KB for compatibility.
+
+Usage:
+
+```nessemble
+.inesprgram COUNT
+```
+
+* `COUNT` - Number, required. PRG-RAM size in 8 KB units.
+
+Example:
+
+```nessemble
+.inesprgram 1
 ```
 
 ### .inestrn
@@ -1119,6 +1199,60 @@ Example:
 
 ```nessemble
 .inestrn "trainer.asm"
+```
+
+### .inestv
+
+iNES TV system.
+
+Sets bit 0 of Flags 9, the TV system the ROM targets. PAL is also mirrored into
+the unofficial Flags 10 TV-system field (bits 0-1: `0` NTSC, `2` PAL) that some
+emulators honor.
+
+```text
+xxxxxxx0
+       |
+       +- TV system: 0: NTSC
+                     1: PAL
+```
+
+| Value | TV system | Flags 9 | Flags 10 |
+|:-----:|:---------:|:-------:|:--------:|
+| 0     | NTSC      | 0       | 0        |
+| 1     | PAL       | 1       | 2        |
+
+Usage:
+
+```nessemble
+.inestv SYSTEM
+```
+
+* `SYSTEM` - Number, required. `0` for NTSC, `1` for PAL.
+
+Example:
+
+```nessemble
+.inestv 1
+```
+
+### .inesvs
+
+iNES VS Unisystem flag.
+
+Sets bit 0 of Flags 7, marking the ROM as a VS Unisystem arcade title.
+
+Usage:
+
+```nessemble
+.inesvs FLAG
+```
+
+* `FLAG` - Number, required. Non-zero to mark a VS Unisystem title.
+
+Example:
+
+```nessemble
+.inesvs 1
 ```
 
 ### .lobytes

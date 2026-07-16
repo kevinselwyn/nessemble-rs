@@ -10,7 +10,7 @@ produces the platform artifacts.
 The design is documented in
 [`plans/004-release-orchestration.md`](plans/004-release-orchestration.md); the
 one-time GitHub App setup the Release workflow relies on is in
-[`docs/repo/release-app-setup.md`](docs/repo/release-app-setup.md).
+[`ref/repo/release-app-setup.md`](ref/repo/release-app-setup.md).
 
 ## Every PR carries a changeset
 

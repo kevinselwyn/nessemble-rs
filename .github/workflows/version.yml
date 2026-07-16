@@ -14,7 +14,7 @@ name: Release
 #
 # Requires the App's credentials as repo secrets (RELEASE_APP_ID,
 # RELEASE_APP_PRIVATE_KEY) and the App on `main`'s branch-protection bypass
-# list. See docs/repo/release-app-setup.md and plans/004-release-orchestration.md.
+# list. See ref/repo/release-app-setup.md and plans/004-release-orchestration.md.
 
 on:
   workflow_dispatch:

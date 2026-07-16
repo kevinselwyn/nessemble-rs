@@ -82,17 +82,36 @@ struct Ines {
     mir: i64,
     prg: i64,
     trn: i64,
+    /// Battery-backed / persistent memory (Flags 6 bit 1).
+    bat: i64,
+    /// Four-screen VRAM / alternative nametable layout (Flags 6 bit 3).
+    fsc: i64,
+    /// PRG-RAM size in 8 KB units (byte 8).
+    prgram: i64,
+    /// TV system (Flags 9 bit 0 / Flags 10 bits 0-1: 0 NTSC, 1 PAL).
+    tv: i64,
+    /// VS Unisystem (Flags 7 bit 0).
+    vs: i64,
+    /// PlayChoice-10 (Flags 7 bit 1).
+    pc10: i64,
 }
 
 impl Default for Ines {
     fn default() -> Self {
-        // Matches the reference initializer { chr:1, map:0, mir:0, prg:1, trn:0 }.
+        // Matches the reference initializer { chr:1, map:0, mir:0, prg:1, trn:0 };
+        // the header extensions (bat/fsc/prgram/tv/vs/pc10) default to off/zero.
         Ines {
             chr: 1,
             map: 0,
             mir: 0,
             prg: 1,
             trn: 0,
+            bat: 0,
+            fsc: 0,
+            prgram: 0,
+            tv: 0,
+            vs: 0,
+            pc10: 0,
         }
     }
 }
@@ -360,13 +379,22 @@ impl Assembler {
         out.push(0x1A);
         out.push((self.ines.prg & 0xFF) as u8);
         out.push((self.ines.chr & 0xFF) as u8);
-        let byte6 =
-            (self.ines.mir & 0x01) | ((self.ines.trn & 0x01) << 2) | ((self.ines.map & 0x0F) << 4);
+        let byte6 = (self.ines.mir & 0x01)
+            | ((self.ines.bat & 0x01) << 1)
+            | ((self.ines.trn & 0x01) << 2)
+            | ((self.ines.fsc & 0x01) << 3)
+            | ((self.ines.map & 0x0F) << 4);
         out.push((byte6 & 0xFF) as u8);
-        let byte7 = self.ines.map & 0xF0;
+        let byte7 = (self.ines.vs & 0x01) | ((self.ines.pc10 & 0x01) << 1) | (self.ines.map & 0xF0);
         out.push((byte7 & 0xFF) as u8);
-        // iNES header bytes 8..15 are zero.
-        out.resize(out.len() + 8, 0x00);
+        // Byte 8: PRG-RAM size (8 KB units). Byte 9: TV system (bit 0).
+        out.push((self.ines.prgram & 0xFF) as u8);
+        out.push((self.ines.tv & 0x01) as u8);
+        // Byte 10: unofficial TV-system field (0: NTSC; 2: PAL), mirroring byte 9.
+        let byte10 = if self.ines.tv & 0x01 != 0 { 0b10 } else { 0b00 };
+        out.push(byte10);
+        // iNES header bytes 11..15 are zero.
+        out.resize(out.len() + 5, 0x00);
         // A trainer, when present, sits between the header and the PRG/CHR data.
         if self.ines.trn == 1 {
             out.extend_from_slice(&self.trainer);
@@ -727,6 +755,30 @@ impl Assembler {
             Pseudo::InesMir(e) => {
                 self.nes = true;
                 self.ines.mir = self.eval(e);
+            }
+            Pseudo::InesBat(e) => {
+                self.nes = true;
+                self.ines.bat = self.eval(e);
+            }
+            Pseudo::Ines4Scr(e) => {
+                self.nes = true;
+                self.ines.fsc = self.eval(e);
+            }
+            Pseudo::InesPrgRam(e) => {
+                self.nes = true;
+                self.ines.prgram = self.eval(e);
+            }
+            Pseudo::InesTv(e) => {
+                self.nes = true;
+                self.ines.tv = self.eval(e);
+            }
+            Pseudo::InesVs(e) => {
+                self.nes = true;
+                self.ines.vs = self.eval(e);
+            }
+            Pseudo::InesPc10(e) => {
+                self.nes = true;
+                self.ines.pc10 = self.eval(e);
             }
             Pseudo::Prg(e) => {
                 self.segment_prg = true;

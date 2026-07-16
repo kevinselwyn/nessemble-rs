@@ -99,6 +99,19 @@ pub enum Pseudo {
     InesChr(Expr),
     InesMap(Expr),
     InesMir(Expr),
+    /// `.inesbat <flag>` — battery-backed / persistent memory (Flags 6 bit 1).
+    InesBat(Expr),
+    /// `.ines4scr <flag>` — four-screen VRAM / alt. nametable (Flags 6 bit 3).
+    Ines4Scr(Expr),
+    /// `.inesprgram <count>` — PRG-RAM size in 8 KB units (byte 8).
+    InesPrgRam(Expr),
+    /// `.inestv <system>` — TV system (Flags 9 bit 0 / Flags 10 bits 0-1:
+    /// 0 NTSC, 1 PAL).
+    InesTv(Expr),
+    /// `.inesvs <flag>` — VS Unisystem (Flags 7 bit 0).
+    InesVs(Expr),
+    /// `.inespc10 <flag>` — PlayChoice-10 (Flags 7 bit 1).
+    InesPc10(Expr),
     Prg(Expr),
     Chr(Expr),
     Segment(String),

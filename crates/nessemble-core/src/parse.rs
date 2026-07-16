@@ -343,6 +343,12 @@ impl Parser {
             "ineschr" => Pseudo::InesChr(self.parse_expr()?),
             "inesmap" => Pseudo::InesMap(self.parse_expr()?),
             "inesmir" => Pseudo::InesMir(self.parse_expr()?),
+            "inesbat" => Pseudo::InesBat(self.parse_expr()?),
+            "ines4scr" => Pseudo::Ines4Scr(self.parse_expr()?),
+            "inesprgram" => Pseudo::InesPrgRam(self.parse_expr()?),
+            "inestv" => Pseudo::InesTv(self.parse_expr()?),
+            "inesvs" => Pseudo::InesVs(self.parse_expr()?),
+            "inespc10" => Pseudo::InesPc10(self.parse_expr()?),
             "prg" => Pseudo::Prg(self.parse_expr()?),
             "chr" => Pseudo::Chr(self.parse_expr()?),
             "segment" => match self.bump() {
