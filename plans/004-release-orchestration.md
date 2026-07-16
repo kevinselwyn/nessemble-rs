@@ -170,9 +170,11 @@ A new `workflow_dispatch` workflow — the "release trigger" the user asked for:
    fail with a clear message (nothing to release).
 4. `xtask changeset version` → bumps the workspace, writes `CHANGELOG.md`,
    deletes consumed changesets.
-5. Commit the result and **push it directly to `main`** (D4 — direct push). This
-   requires the workflow to run with a token permitted to push to `main` under
-   branch protection (see §9 D4 / §10 risks).
+5. Commit the result and **push it directly to `main`** (D4 — direct push),
+   authenticated as a **`nessemble-release[bot]` GitHub App**. The App token both
+   satisfies branch protection (via a bypass allowance for the App) and — unlike
+   the default `GITHUB_TOKEN` — lets the push trigger `release.yml` (§10). The
+   commit is authored by the bot identity.
 6. The push to `main` **chains into the existing `release.yml`**, which sees the
    new, un-tagged version and builds + tags + publishes the assets — unchanged.
 
@@ -216,9 +218,13 @@ A new job (or step) that runs **only on `pull_request`**:
 - Seed the repo's own convention: the implementing PRs each carry a changeset.
 
 ### Phase 3 — Release workflow
-- Add `.github/workflows/version.yml` (`workflow_dispatch`) that runs
-  `xtask changeset version`, commits, and **pushes the bump directly to `main`**
-  (D4) so `release.yml` fires.
+- **Set up the `nessemble-release[bot]` GitHub App** (D4): register with
+  `contents: write`, install on the repo, store App ID + private key as secrets,
+  and add the App to `main`'s branch-protection bypass list.
+- Add `.github/workflows/version.yml` (`workflow_dispatch`) that mints an App
+  token (`actions/create-github-app-token`), runs `xtask changeset version`,
+  commits as the bot, and **pushes the bump directly to `main`** (D4) so
+  `release.yml` fires.
 - **Remove the `-dev` pre-release logic** (D6): drop the `*-*` branch from
   `release.yml`'s version-resolve step, leaving only the tag-existence check.
 - Confirm end-to-end on a dry run / test tag before first real use.
@@ -277,8 +283,12 @@ A new job (or step) that runs **only on `pull_request`**:
    the self-documenting "no release impact" marker **and** honor a `no-changeset`
    PR label as a lighter override. *Settled: both.*
 4. **D4 — How the bump lands on `main`.** **Direct push** from the Release action
-   to `main`, which immediately chains into `release.yml`. Requires a token
-   permitted to push to `main` under branch protection (§10). *Settled.*
+   to `main`, authenticated as a **`nessemble-release[bot]` GitHub App**, which
+   immediately chains into `release.yml`. The App is granted a branch-protection
+   bypass on `main`; its token (minted per run via
+   `actions/create-github-app-token`) both authorizes the push and, being a
+   non-`GITHUB_TOKEN` identity, lets the resulting push trigger `release.yml`
+   (§10). *Settled.*
 5. **D5 — Release-notes source.** Write a curated `CHANGELOG.md` from changeset
    summaries and surface that section as the GitHub Release body, *replacing*
    today's `generate_release_notes`. *Settled.*
@@ -291,17 +301,17 @@ crates.io publishing; artifact build path unchanged.
 
 ## 10. Risks & constraints
 
-- **Direct push to `main` under branch protection (D4).** The Release action must
-  push the version-bump commit to `main`. If `main` requires PRs / status checks,
-  the default `GITHUB_TOKEN` cannot bypass that, so this needs either a rule that
-  lets the release identity push (e.g. a bypass allowance for a PAT / GitHub App
-  token) or a relaxation of protection for that path. This is the main
-  operational prerequisite to confirm before Phase 3.
+- **Direct push to `main` under branch protection (D4).** Handled by the
+  **`nessemble-release[bot]` GitHub App**: the App is added to `main`'s
+  branch-protection **bypass** list, and the workflow mints a short-lived
+  installation token per run with `actions/create-github-app-token`. Operational
+  prerequisites to set up before Phase 3: (a) create/register the App with
+  `contents: write` on this repo, (b) install it, (c) store its App ID + private
+  key as repo secrets, (d) add it to the `main` bypass list.
 - **Chained-workflow trigger.** A push made with the default `GITHUB_TOKEN` does
-  **not** trigger other workflows — so if the bump is pushed with `GITHUB_TOKEN`,
-  `release.yml` won't fire. The push must use a PAT / App token (which also
-  satisfies the branch-protection point above), or `release.yml` must be invoked
-  explicitly (e.g. `workflow_dispatch` from the Release action).
+  **not** trigger other workflows, which would leave `release.yml` unfired. The
+  App-token push is a distinct identity, so it triggers `release.yml` normally —
+  no explicit re-dispatch needed.
 - **Concurrent changesets.** Two PRs adding changesets never conflict (distinct
   random filenames). The Release action consumes and deletes them atomically in
   one commit; changesets added after that commit simply belong to the next
