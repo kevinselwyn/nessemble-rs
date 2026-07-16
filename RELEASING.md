@@ -1,55 +1,71 @@
 # Releasing
 
-The release version is the **workspace version** in the root `Cargo.toml`
-(`[workspace.package] version`). It is the single source of truth: it is the
-version the CLI reports (`nessemble --version`) and the version the release
-pipeline publishes. There is no manual version input.
+Releases are **driven by changesets** and cut on demand by a **GitHub Action** —
+there is no hand-edited version string. Every PR that changes shipped behavior
+adds a changeset declaring its version impact; the Release action reads all the
+changesets accumulated since the last release, computes the next semantic
+version, upversions the whole workspace, and hands off to the build pipeline that
+produces the platform artifacts.
+
+> **Rollout status.** This document describes the target process from
+> [`plans/004-release-orchestration.md`](plans/004-release-orchestration.md). The
+> `.changeset/` convention (Phase 0) is in place now; the `xtask changeset`
+> tooling, the CI check that requires a changeset, and the Release workflow that
+> performs the version bump (Phases 1–3) land in follow-up PRs. Until they ship,
+> changesets are authored by hand (see `.changeset/README.md`) and accumulate for
+> the first automated release.
+
+## Every PR carries a changeset
+
+Add a file under `.changeset/` describing how your change affects the next
+release — see [`.changeset/README.md`](.changeset/README.md) for the format. In
+short:
+
+```markdown
+---
+nessemble: minor
+---
+A one-line, user-facing description of the change.
+```
+
+The change type is `major`, `minor`, or `patch` (or `none` for a change with no
+release impact — docs, CI, chores). Because this is a single-version workspace,
+use the single umbrella key `nessemble`, not individual crate names.
+
+A PR with no release impact can instead carry the `no-changeset` label.
 
 ## Cutting a release
 
-Bump the workspace version on `main` and merge:
+Run the **Release** action (Actions → *Release* → *Run workflow*). It:
 
-```toml
-# Cargo.toml
-[workspace.package]
-version = "0.2.0"
-```
+1. Reads every changeset in `.changeset/` and computes the next version — the
+   **highest** change type wins (any `major` → major bump; else any `minor` →
+   minor; else `patch`). A set of only `none` changesets releases nothing.
+2. Upversions the **whole workspace** — the root `[workspace.package] version`
+   (which every crate inherits via `version.workspace = true`), the internal
+   `[workspace.dependencies]` version pins, and `Cargo.lock` — using
+   `cargo set-version`.
+3. Aggregates the changeset summaries into a new `CHANGELOG.md` section and
+   **deletes the consumed changesets**.
+4. Commits the result as the `nessemble-release[bot]` GitHub App and pushes it to
+   `main`.
 
-That's it. On the push to `main`, the **Release** workflow
-(`.github/workflows/release.yml`) reads the workspace version and, because no
-`v0.2.0` tag exists yet:
+## Build & publish
 
-1. builds every platform artifact — the seven files matching the upstream
-   v1.1.1 release:
+That push to `main` triggers the existing **Release** build pipeline
+(`.github/workflows/release.yml`), which — seeing a new workspace version with no
+matching tag — builds every platform artifact, creates the `v<version>` tag and
+its GitHub Release, and uploads the assets:
 
-   | Platform       | Artifact(s)                              | Tool        |
-   |----------------|------------------------------------------|-------------|
-   | macOS          | `nessemble_<v>.pkg`                      | `pkgbuild`  |
-   | Linux amd64    | `nessemble_<v>_amd64.deb`               | `cargo-deb` |
-   | Linux i386     | `nessemble_<v>_i386.deb`                | `cargo-deb` |
-   | Windows 32-bit | `nessemble_<v>_win32.exe`, `…_win32.msi`| `cargo-wix` |
-   | Windows 64-bit | `nessemble_<v>_win64.exe`, `…_win64.msi`| `cargo-wix` |
+| Platform       | Artifact(s)                                   | Tool        |
+|----------------|-----------------------------------------------|-------------|
+| macOS          | `nessemble_<v>.pkg`, `nessemble_<v>_macos.tar.gz` | `pkgbuild`  |
+| Linux amd64    | `nessemble_<v>_amd64.deb`                     | `cargo-deb` |
+| Linux i386     | `nessemble_<v>_i386.deb`                      | `cargo-deb` |
+| Windows 32-bit | `nessemble_<v>_win32.exe`, `…_win32.msi`      | `cargo-wix` |
+| Windows 64-bit | `nessemble_<v>_win64.exe`, `…_win64.msi`      | `cargo-wix` |
+| WebAssembly    | `nessemble_<v>_wasm.tar.gz`                    | `xtask wasm`|
 
-2. creates the `v<version>` tag at that commit and its GitHub Release, uploads
-   all seven artifacts, and **auto-generates release notes** listing every pull
-   request merged since the previous release (GitHub's "What's Changed"
-   changelog; grouping is configured in `.github/release.yml`).
-
-If the version is unchanged (the tag already exists), the pipeline resolves the
-version, sees the tag, and does nothing — so ordinary pushes to `main` never
-re-release.
-
-## Pre-release versions (work in progress)
-
-A version with a pre-release suffix — anything like `2.5.0-dev` or `2.5.0-alpha`
-— is treated as work in progress and is **never released**: the pipeline
-resolves the version, sees the `-` suffix, and stops. This lets a multi-part
-feature land on `main` across several PRs under a single `-dev` version without
-cutting a release each time. When the feature is complete, drop the suffix
-(`2.5.0-dev` → `2.5.0`) and merge — that one change cuts the release.
-
-## Re-running on demand
-
-The Release workflow can also be started manually (Actions → *Release* → *Run
-workflow*). It applies the same logic: it releases only if the workspace
-version has no matching tag yet.
+Ordinary pushes to `main` never re-release: between releases the workspace
+version stays at the last released version, whose tag already exists, so the
+pipeline resolves the version, sees the tag, and does nothing.

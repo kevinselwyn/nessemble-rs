@@ -13,16 +13,17 @@
 <!-- One short paragraph: what this PR does and why. If it implements a plan
      phase, link it, e.g. "Phase 3 of `plans/002-wasm.md`". -->
 
-## Release impact
+## Changeset
 
-<!-- This repo cuts a GitHub release straight from the workspace version in the
-     root Cargo.toml (`[workspace.package] version`; see
-     .github/workflows/release.yml). A `-dev` suffix (e.g. `2.6.2-dev`) is a
-     pre-release and is NEVER released; DROPPING the suffix on merge builds every
-     platform artifact and tags `vX.Y.Z`. Keep the line that applies: -->
+<!-- Every PR that changes shipped behavior carries a changeset under
+     `.changeset/` declaring its version impact; releases are cut on demand by
+     the Release action, which computes the next version from the accumulated
+     changesets. See `.changeset/README.md`. Tick the line that applies: -->
 
-- No release — stays on the `X.Y.Z-dev` pre-release.
-<!-- - ⚠️ Merging cuts the **`vX.Y.Z`** release (drops the `-dev` suffix). -->
+- [ ] Added a changeset (`nessemble: major | minor | patch`) with a user-facing
+      summary.
+- [ ] No release impact — a `nessemble: none` changeset, or the `no-changeset`
+      label.
 
 ## Changes
 
