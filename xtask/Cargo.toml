@@ -10,9 +10,12 @@ authors.workspace = true
 publish = false
 
 [dependencies]
-# Only dependency: the shared lexer/classifier, so the docs' static code blocks
-# highlight through the exact same tokenizer as the editor and the LSP.
+# The shared lexer/classifier, so the docs' static code blocks highlight through
+# the exact same tokenizer as the editor and the LSP.
 nessemble-core.workspace = true
+# Parses/validates changeset files for the `changeset` command group (the
+# release-orchestration tooling); see plans/004-release-orchestration.md.
+changesets = "0.4"
 
 [lints]
 workspace = true
