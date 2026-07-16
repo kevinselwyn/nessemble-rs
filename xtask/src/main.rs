@@ -294,6 +294,14 @@ fn stage_web_assets(dest: &Path) -> Result<(), String> {
         let name = src.file_name().ok_or("bad asset path")?;
         std::fs::copy(&src, dest.join(name)).map_err(|e| format!("copy {}: {e}", src.display()))?;
     }
+    // The vendored CodeMirror 6 bundle is the editing surface; keep its `vendor/`
+    // subdir so the staged layout matches `web/` and the component's relative
+    // `import("vendor/codemirror.js")` resolves.
+    let vendor = dest.join("vendor");
+    std::fs::create_dir_all(&vendor).map_err(|e| e.to_string())?;
+    let cm = root.join("web/vendor/codemirror.js");
+    std::fs::copy(&cm, vendor.join("codemirror.js"))
+        .map_err(|e| format!("copy {}: {e}", cm.display()))?;
     Ok(())
 }
 

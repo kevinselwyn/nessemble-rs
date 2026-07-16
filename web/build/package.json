@@ -1,0 +1,19 @@
+{
+  "name": "nessemble-assembler-editor-build",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Build tooling that produces the vendored CodeMirror 6 bundle for the <nessemble-assembler> web component. Not shipped; output is web/vendor/codemirror.js.",
+  "type": "module",
+  "scripts": {
+    "build": "node build-vendor.mjs"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.7.1",
+    "@codemirror/search": "^6.5.8",
+    "@codemirror/state": "^6.5.0",
+    "@codemirror/view": "^6.36.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}

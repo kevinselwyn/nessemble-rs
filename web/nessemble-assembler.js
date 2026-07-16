@@ -5,18 +5,29 @@
 // a hex dump, with a download link and error/warning output. It also upgrades
 // legacy `<div class="nessemble-assembler">` elements from the old docs.
 //
+// The editing surface is CodeMirror 6, loaded from a vendored, prebuilt ESM
+// bundle (`vendor/codemirror.js`) that sits next to this script — so the browser
+// gets a real editor (visible text selection, a working Cmd-F search panel)
+// instead of the transparent-textarea overlay this component used to roll by
+// hand. Syntax highlighting still comes from the assembler's own lexer: a
+// CodeMirror view plugin decorates the document from `tokenize`, so the colors
+// match the language server exactly and reuse the same `na-tok-*` palette as the
+// static docs code blocks.
+//
 // On each run it dispatches a `nessemble:assembled` event whose `detail` carries
 // `{ rom: Uint8Array, ok, errors, warnings }`, so an embedding page can react —
 // e.g. play the ROM in an emulator.
 //
-// The WebAssembly glue (`nessemble.js`) and binary (`nessemble_bg.wasm`) are
-// expected next to this script; their location is resolved from this script's
-// own URL, so it works at any page depth.
+// The WebAssembly glue (`nessemble.js`), the wasm binary (`nessemble_bg.wasm`),
+// and the CodeMirror bundle (`vendor/codemirror.js`) are expected next to this
+// script; their location is resolved from this script's own URL, so it works at
+// any page depth.
 (function () {
   "use strict";
 
-  // The directory holding this script (and the wasm glue), captured now:
-  // `document.currentScript` is only valid during synchronous execution.
+  // The directory holding this script (and the wasm glue / editor bundle),
+  // captured now: `document.currentScript` is only valid during synchronous
+  // execution.
   var ASSET_BASE = new URL(".", document.currentScript.src).href;
 
   // Load and initialize the wasm module once; every element shares it. Once
@@ -36,6 +47,17 @@
       });
     }
     return wasmPromise;
+  }
+
+  // Load the vendored CodeMirror 6 bundle once; every element shares it. The
+  // bundle re-exports just the primitives this component uses (see
+  // web/build/codemirror.entry.mjs).
+  var cmPromise = null;
+  function loadEditor() {
+    if (!cmPromise) {
+      cmPromise = import(ASSET_BASE + "vendor/codemirror.js");
+    }
+    return cmPromise;
   }
 
   // Trim surrounding blank lines only. Indentation is preserved on purpose:
@@ -85,34 +107,102 @@
     return node;
   }
 
-  function escapeHtml(s) {
-    return s.replace(/[&<>]/g, function (c) {
-      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;";
-    });
+  // Build the CodeMirror decorations for `text` from the assembler's `tokenize`
+  // output — a flat `[start, len, class, …]` array of UTF-16 offsets, which map
+  // 1:1 onto CodeMirror document positions. Returns an empty set until the wasm
+  // module has loaded (the document then renders plain, matching the old
+  // pre-load behavior). Tokens are already sorted and non-overlapping, as
+  // `RangeSetBuilder` requires.
+  function computeDecorations(cm, text) {
+    var builder = new cm.RangeSetBuilder();
+    if (wasmMod && tokenClassNames) {
+      var triples = wasmMod.tokenize(text);
+      var len = text.length;
+      for (var i = 0; i < triples.length; i += 3) {
+        var start = triples[i];
+        var end = start + triples[i + 1];
+        if (start >= len) break;
+        if (end > len) end = len;
+        if (end <= start) continue;
+        var name = tokenClassNames[triples[i + 2]];
+        builder.add(start, end, cm.Decoration.mark({ class: "na-tok-" + name }));
+      }
+    }
+    return builder.finish();
   }
 
-  // Build highlighted HTML from `value` and a flat `[start, len, class, …]`
-  // token array (UTF-16 offsets from `tokenize`). Every character is
-  // HTML-escaped; the gaps between tokens (whitespace) are copied verbatim, so
-  // the backdrop text is identical to the textarea's, just colored.
-  function highlightHtml(value, triples, names) {
-    var html = "";
-    var pos = 0;
-    for (var i = 0; i < triples.length; i += 3) {
-      var start = triples[i];
-      var end = start + triples[i + 1];
-      var name = names[triples[i + 2]];
-      if (start > pos) html += escapeHtml(value.slice(pos, start));
-      html +=
-        '<span class="na-tok-' +
-        name +
-        '">' +
-        escapeHtml(value.slice(start, end)) +
-        "</span>";
-      pos = end;
-    }
-    if (pos < value.length) html += escapeHtml(value.slice(pos));
-    return html;
+  // A view plugin that keeps the token decorations in sync with the document. It
+  // recomputes on every edit, and on a `refreshHighlight` effect — dispatched
+  // once the wasm module finishes loading so an editor built beforehand repaints
+  // with color instead of staying plain.
+  function makeHighlighter(cm, refreshHighlight) {
+    return cm.ViewPlugin.fromClass(
+      class {
+        constructor(view) {
+          this.decorations = computeDecorations(cm, view.state.doc.toString());
+        }
+        update(update) {
+          var refreshed = update.transactions.some(function (tr) {
+            return tr.effects.some(function (e) {
+              return e.is(refreshHighlight);
+            });
+          });
+          if (update.docChanged || refreshed) {
+            this.decorations = computeDecorations(
+              cm,
+              update.state.doc.toString()
+            );
+          }
+        }
+      },
+      {
+        decorations: function (plugin) {
+          return plugin.decorations;
+        },
+      }
+    );
+  }
+
+  // A CodeMirror theme that reproduces the component's previous look: the
+  // Source Code Pro monospace stack at 0.875em / 1.45 line-height, 0.75em
+  // padding, a transparent background (the wrapper supplies the tint), the
+  // foreground/caret pinned to `--na-fg`, and the same focus ring. The token
+  // colors themselves come from the shared `.na-tok-*` rules in the stylesheet,
+  // applied to the spans this component's decorations create.
+  function makeTheme(cm) {
+    return cm.EditorView.theme({
+      "&": {
+        fontSize: "0.875em",
+        color: "var(--na-fg)",
+        backgroundColor: "transparent",
+        height: "100%",
+      },
+      ".cm-scroller": {
+        fontFamily:
+          '"Source Code Pro", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace',
+        lineHeight: "1.45",
+        overflow: "auto",
+      },
+      ".cm-content": {
+        padding: "0.75em 0",
+        caretColor: "var(--na-fg)",
+        tabSize: "4",
+      },
+      ".cm-line": { padding: "0 0.75em" },
+      "&.cm-focused": { outline: "2px solid #4a90d9", outlineOffset: "-2px" },
+      "&.cm-editor.cm-focused": { outline: "2px solid #4a90d9" },
+      ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--na-fg)" },
+      // Blend the search panel (Cmd-F) into the toolbar's tint.
+      ".cm-panels": {
+        backgroundColor: "rgba(127, 127, 127, 0.08)",
+        color: "var(--na-fg)",
+      },
+      ".cm-panel.cm-search": { padding: "0.4em 0.75em" },
+      ".cm-panel.cm-search input, .cm-panel.cm-search button, .cm-panel.cm-search label":
+        { fontSize: "0.85em" },
+      ".cm-searchMatch": { backgroundColor: "rgba(74, 144, 217, 0.3)" },
+      ".cm-searchMatch-selected": { backgroundColor: "rgba(74, 144, 217, 0.5)" },
+    });
   }
 
   var LABEL_ASSEMBLE = "Assemble";
@@ -135,18 +225,18 @@
     _build() {
       this.classList.add("na-host");
 
-      this._editor = el("textarea", "na-editor");
-      this._editor.spellcheck = false;
-      this._editor.value = this._source;
-      this._editor.rows = Math.min(24, Math.max(3, this._source.split("\n").length));
-
-      // A colored backdrop rendered directly behind the (transparent-text)
-      // textarea. Purely decorative, so it's hidden from assistive tech and can't
-      // take pointer events.
-      this._highlight = el("pre", "na-highlight");
-      this._highlight.setAttribute("aria-hidden", "true");
-      var editorWrap = el("div", "na-editor-wrap");
-      editorWrap.append(this._highlight, this._editor);
+      // The editor mounts into this wrapper. Its initial height mirrors the old
+      // textarea's row sizing (3–24 lines); it stays user-resizable and scrolls
+      // internally once the source outgrows it.
+      this._editorWrap = el("div", "na-editor-wrap");
+      var rows = Math.min(24, Math.max(3, this._source.split("\n").length));
+      // 1.45 line-height × 0.875em text + 1.5em of vertical padding, in the
+      // host's em so it tracks the surrounding prose like the rest of the widget.
+      this._editorWrap.style.height = (rows * 1.45 * 0.875 + 1.5).toFixed(2) + "em";
+      // Show the source immediately (plain) so there's no blank flash before the
+      // CodeMirror bundle loads; `_mountEditor` replaces this with the editor.
+      this._placeholder = el("pre", "na-editor-placeholder", this._source);
+      this._editorWrap.append(this._placeholder);
 
       var bar = el("div", "na-toolbar");
       this._assembleBtn = el("button", "na-btn na-primary", LABEL_ASSEMBLE);
@@ -168,81 +258,92 @@
       this._output = el("pre", "na-output");
       this._output.hidden = true;
 
-      this.append(editorWrap, bar, this._output);
+      this.append(this._editorWrap, bar, this._output);
 
       this._assembleBtn.addEventListener("click", this._assemble.bind(this));
       reset.addEventListener("click", () => {
-        this._editor.value = this._source;
+        this._setDoc(this._source);
         this._clearOutput();
-        this._renderHighlight();
       });
       clear.addEventListener("click", () => {
-        this._editor.value = "";
+        this._setDoc("");
         this._clearOutput();
-        this._renderHighlight();
       });
       this._toggle.addEventListener("click", () => {
         this._output.hidden = !this._output.hidden;
         this._updateToggle();
       });
 
-      this._editor.addEventListener("input", this._scheduleHighlight.bind(this));
-      this._editor.addEventListener("scroll", this._syncScroll.bind(this));
-
-      // Seed the backdrop so the transparent-text textarea shows its source right
-      // away (plain until the module loads), then eagerly load the wasm
-      // highlighter so colors appear on page load — not only after the first
-      // interaction. The module is shared across every editor on the page, so
-      // this stays one fetch regardless of how many editors a page embeds.
-      this._renderHighlight();
-      this._ensureHighlighter();
+      // Mount the real editor, and eagerly load the wasm highlighter so colors
+      // appear on page load — not only after the first interaction. Both modules
+      // are shared across every editor on the page, so this stays one fetch each
+      // regardless of how many editors a page embeds.
+      this._mountEditor();
     }
 
-    // Re-highlight on the next frame, coalescing bursts of keystrokes.
-    _scheduleHighlight() {
-      if (this._rafPending) return;
-      this._rafPending = true;
+    // Swap the plain placeholder for a CodeMirror editor once its bundle loads,
+    // then refresh the highlighting when the wasm tokenizer is ready.
+    _mountEditor() {
       var self = this;
-      requestAnimationFrame(function () {
-        self._rafPending = false;
-        self._renderHighlight();
+      loadEditor().then(function (cm) {
+        self._cm = cm;
+        self._refreshHighlight = cm.StateEffect.define();
+
+        self._view = new cm.EditorView({
+          doc: self._source,
+          parent: self._editorWrap,
+          extensions: [
+            cm.history(),
+            cm.keymap.of(
+              cm.defaultKeymap
+                .concat(cm.historyKeymap)
+                .concat(cm.searchKeymap)
+            ),
+            cm.search({ top: true }),
+            cm.highlightSelectionMatches(),
+            cm.EditorView.lineWrapping,
+            cm.EditorState.tabSize.of(4),
+            makeHighlighter(cm, self._refreshHighlight),
+            makeTheme(cm),
+          ],
+        });
+        if (self._placeholder) {
+          self._placeholder.remove();
+          self._placeholder = null;
+        }
+
+        loadWasm().then(function () {
+          if (self._view) {
+            self._view.dispatch({
+              effects: self._refreshHighlight.of(null),
+            });
+          }
+        });
       });
     }
 
-    // Render the backdrop from the current text: colored if the module is
-    // loaded, otherwise the plain (escaped) text so it stays visible.
-    _renderHighlight() {
-      var value = this._editor.value;
-      var html =
-        wasmMod && tokenClassNames
-          ? highlightHtml(value, wasmMod.tokenize(value), tokenClassNames)
-          : escapeHtml(value);
-      // A trailing newline (or empty buffer) leaves an empty last line in the
-      // textarea; give the backdrop the same line height with a zero-width space
-      // so the two stay aligned, without adding a visible glyph.
-      if (value === "" || value.charCodeAt(value.length - 1) === 10) {
-        html += "&#8203;";
-      }
-      this._highlight.innerHTML = html;
-      this._syncScroll();
+    // The current editor contents — from CodeMirror once mounted, else the
+    // placeholder text (so an assemble triggered before the bundle loads still
+    // works).
+    _value() {
+      return this._view ? this._view.state.doc.toString() : this._source;
     }
 
-    // Keep the backdrop's scroll position locked to the textarea's.
-    _syncScroll() {
-      this._highlight.scrollTop = this._editor.scrollTop;
-      this._highlight.scrollLeft = this._editor.scrollLeft;
-    }
-
-    // Ensure the wasm highlighter is loading; re-render once it's ready.
-    _ensureHighlighter() {
-      if (wasmMod) {
-        this._renderHighlight();
-        return;
+    // Replace the whole document (Reset/Clear). Falls back to updating the
+    // placeholder if the editor hasn't mounted yet.
+    _setDoc(text) {
+      if (this._view) {
+        this._view.dispatch({
+          changes: {
+            from: 0,
+            to: this._view.state.doc.length,
+            insert: text,
+          },
+        });
+      } else {
+        this._source = text;
+        if (this._placeholder) this._placeholder.textContent = text;
       }
-      var self = this;
-      loadWasm().then(function () {
-        self._renderHighlight();
-      });
     }
 
     // Reflect the current output visibility on the toggle button's label.
@@ -270,7 +371,7 @@
       this._assembleBtn.textContent = "Assembling…";
       loadWasm()
         .then(function (mod) {
-          var result = mod.assemble(self._editor.value, self._opts);
+          var result = mod.assemble(self._value(), self._opts);
           self._show(result);
         })
         .catch(function (err) {

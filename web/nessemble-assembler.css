@@ -78,23 +78,35 @@ html.ayu,
   --na-tok-operator: #8b949e;
 }
 
-/* The editor's background/divider now live on the wrapper so the colored
-   backdrop can sit between it and the transparent-text textarea. */
+/* The editor's background/divider live on the wrapper; CodeMirror mounts inside
+   it. The wrapper is user-resizable (vertical) and clips the editor, which
+   scrolls internally — mirroring the old textarea's resize/scroll behavior. Its
+   initial height is set inline from the source's line count. */
 .na-editor-wrap {
   position: relative;
   background: rgba(127, 127, 127, 0.04);
   border-bottom: 1px solid rgba(127, 127, 127, 0.35);
+  resize: vertical;
+  overflow: hidden;
+  min-height: 4em;
 }
 
-/* The textarea and the highlight backdrop MUST share an identical box model
-   (font, size, line-height, tab-size, padding, wrapping) so the colored text
-   drawn underneath stays glyph-aligned with the transparent textarea's caret. */
-.na-editor,
-.na-highlight {
+/* Make CodeMirror fill the resizable wrapper. Font, size, line-height, padding,
+   tab-size, caret, and focus ring are set by the component's CodeMirror theme
+   (makeTheme) so the editor keeps its previous look; only the token colors below
+   come from CSS, shared with the static docs code blocks. */
+.na-editor-wrap .cm-editor {
+  height: 100%;
+}
+
+/* Plain source shown before the CodeMirror bundle loads, so the widget never
+   flashes empty. Matches the editor's font/metrics/padding for a seamless swap. */
+.na-editor-placeholder {
   box-sizing: border-box;
   margin: 0;
   padding: 0.75em;
-  border: 0;
+  height: 100%;
+  overflow: auto;
   font-family: "Source Code Pro", "SFMono-Regular", ui-monospace, Menlo, Consolas,
     monospace;
   font-size: 0.875em;
@@ -104,31 +116,7 @@ html.ayu,
   overflow-wrap: break-word;
   word-break: break-word;
   text-align: left;
-}
-
-.na-editor {
-  position: relative;
-  display: block;
-  width: 100%;
-  resize: vertical;
-  color: transparent; /* text is drawn by the backdrop below */
-  caret-color: var(--na-fg);
-  background: transparent; /* let the backdrop show through */
-}
-
-/* Colored backdrop filling the wrapper, directly behind the textarea. */
-.na-highlight {
-  position: absolute;
-  inset: 0;
-  overflow: auto;
-  pointer-events: none;
   color: var(--na-tok-identifier);
-  background: transparent;
-}
-
-.na-editor:focus {
-  outline: 2px solid #4a90d9;
-  outline-offset: -2px;
 }
 
 .na-tok-directive {
