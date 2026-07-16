@@ -10,6 +10,7 @@
 //!   verify-goldens          Confirm the oracle reproduces every committed golden.
 //!   parity [--release]      Run nessemble-rs over the corpus and report parity.
 //!   wasm                    Build the WebAssembly assembler bundle (wasm-bindgen).
+//!   changeset <sub>         Changeset-driven release versioning (add/check/status/version).
 //!   help                    Show this help.
 //!
 //! It shells out to `curl`, `dpkg-deb`/`ar`/`tar`, `cargo`, and `mdbook`; its
@@ -22,6 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nessemble_core::tooling::{self, LexKind, TokenClass};
+
+mod changeset;
 
 const REFERENCE_VERSION: &str = "1.1.1";
 const CORPUS_GROUPS: [&str; 4] = ["opcodes", "examples", "nerdy-nights", "errors"];
@@ -37,6 +40,7 @@ fn main() -> std::process::ExitCode {
         "parity" => parity(rest),
         "wasm" => wasm(),
         "dist" => dist(),
+        "changeset" => changeset::run(rest),
         "help" | "-h" | "--help" => {
             print_help();
             Ok(())
@@ -64,6 +68,7 @@ fn print_help() {
          \x20 parity [--release]      Run nessemble-rs over the corpus and report parity\n\
          \x20 wasm                    Build the WebAssembly assembler bundle (needs the wasm32 target + wasm-bindgen)\n\
          \x20 dist                    Build the GitHub Pages site (website + mdBook docs)\n\
+         \x20 changeset <sub>         Changeset-driven release versioning: add | check | status | version\n\
          \x20 help                    Show this help"
     );
 }
