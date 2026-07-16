@@ -20,7 +20,9 @@
 //!   (an outline of labels/constants/macros), `textDocument/definition` and
 //!   `textDocument/references` (jump to / list a symbol's occurrences), and
 //!   `textDocument/hover` (opcode/addressing details, directive descriptions,
-//!   symbol values), all driven by the lossless tooling lexer over the buffer.
+//!   symbol values, plus the doc comment from the run of line comments directly
+//!   above a symbol's definition), all driven by the lossless tooling lexer over
+//!   the buffer.
 //! - **Workspace-aware diagnostics** (Phase 7): when a workspace folder is open,
 //!   a file is analyzed in the context of the `.include` project it belongs to,
 //!   so cross-file symbols aren't flagged as undefined.
@@ -1196,18 +1198,54 @@ fn ident_hover(name: &str, text: &str, symbols: &[ListSymbol]) -> Option<String>
     }
     if let Some(sym) = symbols.iter().find(|s| s.name == name) {
         let kind = if sym.label { "label" } else { "constant" };
-        return Some(format!(
+        let mut md = format!(
             "**{}** ({}) = {} (`{}`)",
             sym.name,
             kind,
             sym.value,
             format_hex(sym.value),
-        ));
+        );
+        // Append the doc comment: the run of line comments directly above the
+        // symbol's definition in this buffer, so hovering shows what the author
+        // wrote to describe it.
+        if let Some(doc) = preceding_doc(text, name) {
+            md.push_str("\n\n");
+            md.push_str(&doc);
+        }
+        return Some(md);
     }
     if macro_names(text).iter().any(|m| m == name) {
         return Some(format!("**{name}** (macro)"));
     }
     None
+}
+
+/// The documentation for the symbol `name`: the run of line comments
+/// immediately preceding its definition in `text`. Contiguous `;`-comment lines
+/// directly above the defining line are collected in source order (their `;`
+/// and one following space stripped); a blank line or any code breaks the run,
+/// so an "errant" comment separated by a gap is excluded. `None` when the
+/// symbol isn't defined in this buffer or has no preceding comment.
+fn preceding_doc(text: &str, name: &str) -> Option<String> {
+    let def = definitions(text)
+        .into_iter()
+        .find(|d| d.name == name && matches!(d.kind, DefKind::Label | DefKind::Constant))?;
+    let def_line = def.range.start.line as usize;
+    let lines: Vec<&str> = text.lines().collect();
+
+    let mut collected: Vec<String> = Vec::new();
+    for line in lines[..def_line].iter().rev() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(';') else {
+            break; // a blank line or code ends the contiguous run
+        };
+        collected.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+    }
+    if collected.is_empty() {
+        return None;
+    }
+    collected.reverse();
+    Some(collected.join("\n"))
 }
 
 /// Hover markdown for an instruction mnemonic: a table of its addressing modes
@@ -2036,6 +2074,81 @@ mod tests {
         assert!(md.value.contains("count"));
         assert!(md.value.contains("(constant)"));
         assert!(md.value.contains("$05"));
+    }
+
+    #[test]
+    fn hover_includes_preceding_comment_doc() {
+        let mut server = Server::default();
+        let text = concat!(
+            "; Errant comment\n",     // 0
+            "\n",                     // 1 — blank line breaks the run
+            "; Always $42\n",         // 2
+            "SPECIAL_VALUE = $42\n",  // 3
+            "  lda #SPECIAL_VALUE\n", // 4
+        );
+        open(&mut server, "file:///doc.asm", text);
+        let uri = Url::parse("file:///doc.asm").unwrap();
+        // Cursor on `SPECIAL_VALUE` in the operand (line 4).
+        let hover = server
+            .hover(&uri, Position::new(4, 10))
+            .expect("hover on SPECIAL_VALUE");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(md.value.contains("(constant)"), "{}", md.value);
+        // The contiguous comment directly above is included…
+        assert!(md.value.contains("Always $42"), "{}", md.value);
+        // …but the errant comment across the blank line is not.
+        assert!(!md.value.contains("Errant comment"), "{}", md.value);
+    }
+
+    #[test]
+    fn hover_joins_multiline_comment_doc_for_a_label() {
+        let mut server = Server::default();
+        let text = concat!(
+            "; This is a fun subroutine that doubles the value in the accumulator (A) and sets\n",
+            "; the value of X to SPECIAL_VALUE\n",
+            "double_accumulator:\n",
+            "  asl a\n",
+            "  ldx #$42\n",
+            "  jsr double_accumulator\n",
+        );
+        open(&mut server, "file:///sub.asm", text);
+        let uri = Url::parse("file:///sub.asm").unwrap();
+        // Cursor on `double_accumulator` in the `jsr` operand (line 5).
+        let hover = server
+            .hover(&uri, Position::new(5, 10))
+            .expect("hover on double_accumulator");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(md.value.contains("(label)"), "{}", md.value);
+        assert!(
+            md.value.contains("This is a fun subroutine"),
+            "{}",
+            md.value
+        );
+        assert!(
+            md.value.contains("the value of X to SPECIAL_VALUE"),
+            "{}",
+            md.value
+        );
+    }
+
+    #[test]
+    fn hover_without_a_preceding_comment_omits_doc() {
+        let mut server = Server::default();
+        let text = "count = 5\n  lda #count\n";
+        open(&mut server, "file:///nc.asm", text);
+        let uri = Url::parse("file:///nc.asm").unwrap();
+        let hover = server
+            .hover(&uri, Position::new(1, 8))
+            .expect("hover on count");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        // Just the value line — no trailing doc paragraph.
+        assert_eq!(md.value, "**count** (constant) = 5 (`$05`)");
     }
 
     #[test]

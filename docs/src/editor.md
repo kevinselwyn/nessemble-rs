@@ -42,6 +42,9 @@ Once connected, the server provides:
   project, so it reaches a symbol defined in a sibling or parent file.
 - **Hover** — opcode and addressing-mode details for an instruction, the
   description of a directive, and the resolved value of a constant or label.
+  A constant or label is also documented with the run of comment lines
+  immediately preceding its definition, so an explanatory comment written above
+  a symbol appears when you hover over any use of it.
 - **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)
   blocks, and runs of consecutive comments, can be collapsed.
 - **Rename** — renaming a symbol updates its definition and every use across the
