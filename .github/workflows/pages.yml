@@ -1,10 +1,17 @@
 name: Pages
 
 # Build the marketing website + mdBook documentation and deploy to GitHub Pages.
+#
+# Deploys only when a GitHub Release is published (by the Publish pipeline in
+# release.yml) — not on every push to main. Pushing docs to Pages on each merge
+# would let the published site drift ahead of the last released code; tying it
+# to the release keeps the docs in lockstep with the version users can install.
+# Use the manual `workflow_dispatch` trigger to re-deploy the current release's
+# site out of band.
 
 on:
-  push:
-    branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
