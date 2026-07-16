@@ -222,9 +222,9 @@ jobs:
   # ----------------------------------------------------------------- Release
   #
   # Creates the `v<version>` tag (at this commit) and its GitHub Release,
-  # uploads all artifacts, and auto-generates release notes listing every
-  # pull request merged since the previous release (GitHub's "What's Changed"
-  # changelog; grouping is configured in .github/release.yml).
+  # uploads all artifacts, and uses the curated CHANGELOG.md section for this
+  # version (written by `xtask changeset version`) as the release notes, plus
+  # the static downloads/install boilerplate from .github/release-body.md.
   release:
     needs: [version, linux, windows, macos, wasm]
     if: needs.version.outputs.exists == 'false'
@@ -232,9 +232,37 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Assemble release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Extract this version's section from CHANGELOG.md: the lines between
+          # its `## <version> - <date>` heading and the next `## ` heading, with
+          # the heading and surrounding blank lines trimmed.
+          notes="$(awk -v ver="## $VERSION " '
+            index($0, ver)==1 { grab=1; next }
+            grab && index($0, "## ")==1 { grab=0 }
+            grab {
+              if ($0 == "" && !started) next
+              started=1
+              buf = buf $0 "\n"
+            }
+            END { sub(/\n+$/, "", buf); print buf }
+          ' CHANGELOG.md)"
+          {
+            echo '`nessemble` — a 6502 assembler for the Nintendo Entertainment System.'
+            if [ -n "$notes" ]; then
+              printf '\n## What'\''s Changed\n\n%s\n' "$notes"
+            fi
+            echo
+            cat .github/release-body.md
+          } > RELEASE_NOTES.md
+          echo "----- RELEASE_NOTES.md -----"
+          cat RELEASE_NOTES.md
       - name: Create tagged release
         uses: softprops/action-gh-release@v2
         with:
@@ -244,40 +272,9 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
-          generate_release_notes: true
+          generate_release_notes: false
           fail_on_unmatched_files: true
-          body: |
-            `nessemble` — a 6502 assembler for the Nintendo Entertainment System.
-
-            ### Downloads
-
-            | Platform       | Artifact(s)                                |
-            |----------------|--------------------------------------------|
-            | macOS          | `nessemble_*.pkg`, `nessemble_*_macos.tar.gz` |
-            | Linux amd64    | `nessemble_*_amd64.deb`                    |
-            | Linux i386     | `nessemble_*_i386.deb`                     |
-            | Windows 32-bit | `nessemble_*_win32.exe`, `…_win32.msi`     |
-            | Windows 64-bit | `nessemble_*_win64.exe`, `…_win64.msi`     |
-            | WebAssembly    | `nessemble_*_wasm.tar.gz` (in-browser assembler) |
-
-            #### macOS: "Apple could not verify…" on the `.pkg`
-
-            The `.pkg` is not signed with an Apple Developer ID, so macOS
-            Gatekeeper blocks it after download. Either clear the quarantine flag
-            and install the `.pkg` normally:
-
-            ```sh
-            xattr -d com.apple.quarantine nessemble_*.pkg
-            sudo installer -pkg nessemble_*.pkg -target /
-            ```
-
-            …or skip the installer entirely and use the plain binary tarball:
-
-            ```sh
-            tar -xzf nessemble_*_macos.tar.gz
-            xattr -d com.apple.quarantine nessemble        # clear quarantine
-            sudo mv nessemble /usr/local/bin/               # onto your PATH
-            ```
+          body_path: RELEASE_NOTES.md
           files: |
             artifacts/**/*.deb
             artifacts/**/*.exe

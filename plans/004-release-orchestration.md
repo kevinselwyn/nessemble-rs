@@ -1,13 +1,12 @@
 # nessemble-rs: A Plan for Changeset-Driven Release Orchestration
 
-> Status: **Phases 0–3 done — Phase 4 (release-body surfacing) pending;
-> decisions settled (§9).** The changeset-driven flow is live end-to-end: the
-> `.changeset/` convention (Phase 0), the `xtask changeset` tooling (Phase 1),
-> the CI changeset gate (Phase 2), and the `nessemble-release[bot]` Release
-> workflow that bumps the workspace and hands off to the Publish pipeline
-> (Phase 3). `CHANGELOG.md` is generated; wiring that section into the GitHub
-> Release body in place of the auto-generated notes (Phase 4 / D5) remains.
-> The `-dev` guard has been removed from the Publish pipeline.
+> Status: **Complete — Phases 0–4 done; decisions settled (§9).** The
+> changeset-driven flow is live end-to-end: the `.changeset/` convention
+> (Phase 0), the `xtask changeset` tooling (Phase 1), the CI changeset gate
+> (Phase 2), the `nessemble-release[bot]` Release workflow that bumps the
+> workspace and hands off to the Publish pipeline (Phase 3), and the Publish
+> pipeline using the curated `CHANGELOG.md` section as the GitHub Release body
+> (Phase 4 / D5). The `-dev` guard has been removed from the Publish pipeline.
 
 ---
 
@@ -248,10 +247,14 @@ A new job (or step) that runs **only on `pull_request`**:
   the version-resolve step of `release.yml`, which is now the **Publish** pipeline
   (renamed from `Release` to disambiguate from the new dispatch workflow).
 
-### Phase 4 — Changelog surfacing — partially done
+### Phase 4 — Changelog surfacing — ✅ done
 - `CHANGELOG.md` is generated and prepended by `xtask changeset version`
-  (Phase 1). **Pending:** feed the new section into the GitHub Release body in
-  place of `release.yml`'s `generate_release_notes` (D5).
+  (Phase 1).
+- The Publish pipeline (`release.yml`) now extracts this version's `CHANGELOG.md`
+  section and uses it as the GitHub Release body (with the static
+  downloads/install boilerplate in `.github/release-body.md`), replacing
+  `generate_release_notes` (D5). The now-unused auto-notes grouping config
+  (`.github/release.yml`) was removed.
 
 ## 6. Interaction with today's pipeline
 
