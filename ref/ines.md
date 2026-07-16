@@ -248,6 +248,7 @@ Recommended detection procedure:
 
 ## See also
 
+- [NES 2.0](nes2.md) — the backwards-compatible extension of this format
 - INES 1.0 Mapper Grid
 - List of INES mappers
 - TNES – file format used by 3DS Virtual Console
