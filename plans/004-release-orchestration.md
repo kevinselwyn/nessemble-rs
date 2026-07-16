@@ -1,7 +1,8 @@
 # nessemble-rs: A Plan for Changeset-Driven Release Orchestration
 
-> Status: **Planning — no code written.** This document proposes the design; a
-> follow-up set of PRs implements it once the decisions in §9 are approved.
+> Status: **Planning — no code written; decisions settled (§9).** This document
+> proposes the design; the decisions in §9 are now locked and a follow-up set of
+> PRs implements it on the go-ahead.
 
 ---
 
@@ -10,10 +11,11 @@
 Make releases **intentional, auditable, and semantically versioned from the work
 itself**:
 
-1. **Every PR carries a changeset** — a small file declaring how the change
-   affects the version (`major` / `minor` / `patch`) and a human-readable
-   changelog line. CI **fails a PR that has neither a changeset nor an explicit
-   opt-out**.
+1. **Every PR carries a changeset** — a small Markdown file, in the format the
+   [`changesets`](https://crates.io/crates/changesets) Rust crate parses,
+   declaring how the change affects the version (`major` / `minor` / `patch`)
+   plus a human-readable changelog summary. CI **fails a PR that has neither a
+   changeset nor an explicit opt-out**.
 2. **Releases are triggered on demand** by a GitHub Action, not by hand-editing a
    version string.
 3. **The next version is computed from the accumulated changesets** since the
@@ -84,41 +86,58 @@ thing that advances it.
 ### 4.1 Changeset files
 
 - **Location:** a new `.changeset/` directory at the repo root.
-- **Format:** one Markdown file per changeset, with a minimal YAML front-matter
-  block and a Markdown body:
+- **Format:** exactly the one the [`changesets`](https://crates.io/crates/changesets)
+  crate parses — a `.md` file whose front matter, delimited by `---` lines, is a
+  set of `package: change_type` pairs, followed by a Markdown body that is the
+  change **summary**:
 
   ```markdown
   ---
-  bump: minor
+  nessemble: minor
   ---
   Add syntax highlighting to the in-browser assembler component.
   ```
 
-  - `bump` ∈ `major | minor | patch | none`. Because this is a **single-version
-    workspace**, a changeset declares **one** bump level for the whole release —
-    there is no per-crate matrix (the key simplification over JS `changesets`).
-  - The body is the user-facing changelog line(s); Markdown is allowed.
+  - `change_type` is `major`, `minor`, or `patch` (the crate also permits custom
+    types, which it treats as `patch` for versioning but can distinguish in the
+    changelog).
+  - **Single-version workspace ⇒ a single umbrella package key** — `nessemble` —
+    rather than a per-crate matrix. Because every crate shares the one workspace
+    version, one pair per changeset is all that's meaningful; the release computes
+    the highest `change_type` across every pending changeset. (This is the key
+    simplification over the JS `changesets` per-package model, while still using
+    the Rust crate's exact enforced file format.)
+  - The body is the user-facing changelog summary (the crate treats it as plain
+    text, not parsed Markdown).
 - **Filename:** arbitrary and unique; a short random slug (e.g.
   `.changeset/brave-otters-sing.md`) avoids collisions across concurrent PRs.
   `xtask changeset add` can generate one.
+- **No-release opt-out:** a changeset with the custom type `nessemble: none`
+  documents an intentional no-version-impact change; xtask special-cases `none`
+  as "no bump" (see §4.2 / §4.5). This is in addition to the `no-changeset` label
+  (§4.5).
 - **`.changeset/README.md`** documents the convention and is **excluded** from all
   scanning (it is not a changeset).
 
 ### 4.2 `xtask` subcommands (the brains)
 
 A new `changeset` command group in `xtask` keeps the logic in Rust, tested like
-the rest of the tooling:
+the rest of the tooling. It uses the **`changesets` crate for parsing and format
+validation** (so files match the crate's enforced format exactly, D1), and layers
+the project's own version-decision policy on top (bump precedence + the `none`
+opt-out):
 
-- `xtask changeset add` — scaffold a new changeset file (prompt or flags for
-  `--bump` and a message). Convenience for contributors.
-- `xtask changeset check` — validate that pending changesets parse (valid `bump`,
-  non-empty body). Used by CI and locally.
+- `xtask changeset add` — scaffold a new changeset file (prompt or flags for the
+  change type and a summary). Convenience for contributors.
+- `xtask changeset check` — validate that pending changesets parse (valid front
+  matter, non-empty summary). Used by CI and locally.
 - `xtask changeset status` — print the pending changesets and the version bump
   they would produce (dry run of the computation).
 - `xtask changeset version` — the release-time mutation:
-  1. Parse every `.changeset/*.md` (except `README.md`).
-  2. Compute the next version: highest bump wins (`major` > `minor` > `patch`;
-     `none`-only ⇒ no release, error out).
+  1. Parse every `.changeset/*.md` (except `README.md`) via the `changesets`
+     crate.
+  2. Compute the next version: highest change type wins (`major` > `minor` >
+     `patch`; a set that is `none`-only ⇒ no release, error out).
   3. Apply the bump to the workspace — see §4.3.
   4. Aggregate the changeset bodies into a new `CHANGELOG.md` section under the
      new version + date.
@@ -151,8 +170,9 @@ A new `workflow_dispatch` workflow — the "release trigger" the user asked for:
    fail with a clear message (nothing to release).
 4. `xtask changeset version` → bumps the workspace, writes `CHANGELOG.md`,
    deletes consumed changesets.
-5. Commit the result and **land it on `main`** (see §9 decision D4 — direct push
-   vs. a "Release PR").
+5. Commit the result and **push it directly to `main`** (D4 — direct push). This
+   requires the workflow to run with a token permitted to push to `main` under
+   branch protection (see §9 D4 / §10 risks).
 6. The push to `main` **chains into the existing `release.yml`**, which sees the
    new, un-tagged version and builds + tags + publishes the assets — unchanged.
 
@@ -164,9 +184,9 @@ A new job (or step) that runs **only on `pull_request`**:
 - **Pass** if at least one new changeset file is present (and
   `xtask changeset check` validates it).
 - **Escape hatch** for PRs that legitimately need no version bump (docs-only, CI,
-  chores): either a `bump: none` changeset (explicit, self-documenting — the
-  recommended path) **or** a `no-changeset` PR label that the job honors. See §9
-  decision D3.
+  chores): either a `nessemble: none` changeset (explicit, self-documenting — the
+  preferred path) **or** a `no-changeset` PR label that the job honors (D3 —
+  both).
 
 ### 4.6 Release notes / changelog
 
@@ -183,6 +203,9 @@ A new job (or step) that runs **only on `pull_request`**:
 - Create `.changeset/` with a `README.md` describing the format and workflow.
 - Rewrite `RELEASING.md` around the changeset model (the `-dev` mechanism is
   retired; document the new "run the Release action" flow).
+- Update `.github/pull_request_template.md` — replace the `-dev`-based "Release
+  impact" section with a "Changeset" section (which change type, or the
+  `no-changeset` opt-out).
 
 ### Phase 1 — `xtask changeset` tooling
 - Implement `add`, `check`, `status`, `version` with unit tests over fixture
@@ -194,7 +217,10 @@ A new job (or step) that runs **only on `pull_request`**:
 
 ### Phase 3 — Release workflow
 - Add `.github/workflows/version.yml` (`workflow_dispatch`) that runs
-  `xtask changeset version`, commits, and lands the bump so `release.yml` fires.
+  `xtask changeset version`, commits, and **pushes the bump directly to `main`**
+  (D4) so `release.yml` fires.
+- **Remove the `-dev` pre-release logic** (D6): drop the `*-*` branch from
+  `release.yml`'s version-resolve step, leaving only the tag-existence check.
 - Confirm end-to-end on a dry run / test tag before first real use.
 
 ### Phase 4 — Changelog surfacing
@@ -206,11 +232,11 @@ A new job (or step) that runs **only on `pull_request`**:
   new-version push to `main`. The only behavioral shift: the *only* thing that
   now advances the version on `main` is the Release action, so ordinary feature
   PRs never trip it.
-- **The `-dev` pre-release guard becomes vestigial** — kept as a harmless
-  belt-and-suspenders, or removed (D6). With changesets, the version on `main`
-  simply *stays at the last released version* between releases, so `release.yml`
-  sees the existing tag and no-ops on ordinary pushes; there is nothing to
-  suppress.
+- **The `-dev` pre-release guard is removed** (D6). With changesets, the version
+  on `main` simply *stays at the last released version* between releases, so
+  `release.yml` sees the existing tag and no-ops on ordinary pushes; there is
+  nothing left to suppress, and the `*-*` guard in the version-resolve step is
+  deleted.
 
 ## 7. Testing strategy
 
@@ -235,33 +261,51 @@ A new job (or step) that runs **only on `pull_request`**:
 
 ## 9. Decisions
 
-**Recommended (pending your approval):**
+**All settled:**
 
-1. **D1 — Changeset home & format.** A repo-root `.changeset/` dir, one
-   Markdown-with-front-matter file per changeset, a single `bump` level per file
-   (single-version workspace). *Recommended.*
+1. **D1 — Changeset home & format.** A repo-root `.changeset/` dir; each changeset
+   is a `.md` file in the **`changesets` crate's format** — `package: change_type`
+   pairs between `---` delimiters, then a plain-text summary body. A single
+   umbrella package key (`nessemble`) is used since the workspace is
+   single-versioned. *Settled (§4.1).*
 2. **D2 — Tooling in `xtask`, mutation via `cargo-edit`.** Logic lives in a Rust
-   `xtask changeset` command group; the actual manifest/lockfile edit is done by
-   `cargo set-version --bump <level> --workspace`. *Recommended over* a
-   hand-rolled TOML rewriter *and over* pulling in Node's `@changesets/cli`.
-3. **D3 — No-changeset escape hatch.** Support a `bump: none` changeset as the
-   self-documenting way to say "no release impact," **and** honor a
-   `no-changeset` label as a lighter override. *Recommended: both.*
-4. **D4 — How the bump lands on `main`.** *Open — needs your call.*
-   - **(a) Direct push** from the Release action to `main`, which immediately
-     chains into `release.yml`. Simplest; matches "release via an action." Needs a
-     token/permission that can push to `main` under branch protection.
-   - **(b) A "Release PR"** the action opens/updates (the changesets-ecosystem
-     pattern): merging it cuts the release. Adds a review gate on the computed
-     version + changelog, works cleanly with branch protection, but is a
-     two-step, standing-PR flow rather than a single dispatch.
+   `xtask changeset` command group (parsing via the `changesets` crate); the
+   actual manifest/lockfile edit is done by
+   `cargo set-version --bump <level> --workspace`. No Node/`@changesets/cli`.
+   *Settled.*
+3. **D3 — No-changeset escape hatch.** Support a `nessemble: none` changeset as
+   the self-documenting "no release impact" marker **and** honor a `no-changeset`
+   PR label as a lighter override. *Settled: both.*
+4. **D4 — How the bump lands on `main`.** **Direct push** from the Release action
+   to `main`, which immediately chains into `release.yml`. Requires a token
+   permitted to push to `main` under branch protection (§10). *Settled.*
 5. **D5 — Release-notes source.** Write a curated `CHANGELOG.md` from changeset
-   bodies and surface that section as the GitHub Release body, *replacing*
-   today's `generate_release_notes`. *Recommended* (author-written beats
-   PR-title-derived). Alternative: keep both.
-6. **D6 — Fate of the `-dev` guard.** Keep the pre-release guard in `release.yml`
-   as harmless insurance for now; consider removing it once the changeset flow is
-   proven. *Recommended: keep, revisit.*
+   summaries and surface that section as the GitHub Release body, *replacing*
+   today's `generate_release_notes`. *Settled.*
+6. **D6 — Fate of the `-dev` guard.** **Removed.** Delete the `*-*` pre-release
+   branch from `release.yml`'s version-resolve step; the changeset flow makes it
+   unnecessary. *Settled.*
 
 **Settled by the framing:** single-version workspace; Rust-native tooling; no
 crates.io publishing; artifact build path unchanged.
+
+## 10. Risks & constraints
+
+- **Direct push to `main` under branch protection (D4).** The Release action must
+  push the version-bump commit to `main`. If `main` requires PRs / status checks,
+  the default `GITHUB_TOKEN` cannot bypass that, so this needs either a rule that
+  lets the release identity push (e.g. a bypass allowance for a PAT / GitHub App
+  token) or a relaxation of protection for that path. This is the main
+  operational prerequisite to confirm before Phase 3.
+- **Chained-workflow trigger.** A push made with the default `GITHUB_TOKEN` does
+  **not** trigger other workflows — so if the bump is pushed with `GITHUB_TOKEN`,
+  `release.yml` won't fire. The push must use a PAT / App token (which also
+  satisfies the branch-protection point above), or `release.yml` must be invoked
+  explicitly (e.g. `workflow_dispatch` from the Release action).
+- **Concurrent changesets.** Two PRs adding changesets never conflict (distinct
+  random filenames). The Release action consumes and deletes them atomically in
+  one commit; changesets added after that commit simply belong to the next
+  release.
+- **`cargo set-version` availability & correctness.** The workflow installs
+  `cargo-edit`; the plan's Phase 1 test confirms a bump moves the root version,
+  the six internal `[workspace.dependencies]` pins, and `Cargo.lock` together.
