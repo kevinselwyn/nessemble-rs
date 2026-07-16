@@ -26,3 +26,43 @@ jobs:
         run: cargo test --all-features
       - name: Parity
         run: cargo run -p xtask -- parity
+      - name: Changeset validate
+        # Confirm every pending changeset parses and is on-convention, so a
+        # malformed file can't break the Release action later. Presence is
+        # enforced separately (the `changeset` job, PRs only).
+        run: cargo run -p xtask -- changeset check
+
+  # ------------------------------------------------------------- Changeset gate
+  #
+  # Every PR that changes shipped behavior must add a changeset under
+  # `.changeset/` (see .changeset/README.md and plans/004-release-orchestration.md).
+  # A PR with no release impact opts out with a `nessemble: none` changeset (which
+  # still satisfies this presence check) or the `no-changeset` label.
+  changeset:
+    name: changeset
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a changeset
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ ",$LABELS," == *",no-changeset,"* ]]; then
+            echo "PR carries the \`no-changeset\` label — changeset requirement waived." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          added="$(git diff --name-only --diff-filter=A "$BASE_SHA...$HEAD_SHA" -- .changeset/ \
+            | { grep -E '\.md$' || true; } | { grep -vx '.changeset/README.md' || true; })"
+          if [[ -z "$added" ]]; then
+            echo "::error::No changeset found. Add one under .changeset/ (see .changeset/README.md), e.g. \`cargo run -p xtask -- changeset add <major|minor|patch|none> \"summary\"\`, or apply the \`no-changeset\` label."
+            exit 1
+          fi
+          {
+            echo "Changeset(s) added in this PR:"
+            echo "$added" | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"

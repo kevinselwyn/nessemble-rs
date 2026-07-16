@@ -1,10 +1,9 @@
 # nessemble-rs: A Plan for Changeset-Driven Release Orchestration
 
-> Status: **Decisions settled (§9); Phases 0–1 done — Phases 2–3 pending.**
-> Phase 1 added the `xtask changeset` tooling. Phase 0 established the
-> `.changeset/` convention, the
-> `RELEASING.md` rewrite, and the PR-template update in this PR; the tooling, CI
-> enforcement, and Release workflow land in follow-up PRs.
+> Status: **Decisions settled (§9); Phases 0–2 done — Phase 3 pending.**
+> Phase 2 added the CI changeset gate. Phase 1 added the `xtask changeset`
+> tooling. Phase 0 established the `.changeset/` convention, the `RELEASING.md`
+> rewrite, and the PR-template update; the Release workflow lands in Phase 3.
 
 ---
 
@@ -222,9 +221,13 @@ A new job (or step) that runs **only on `pull_request`**:
   `cargo set-version --workspace`, verified end-to-end to bump the root version,
   the inherited crates, and the internal `[workspace.dependencies]` pins.
 
-### Phase 2 — CI enforcement
-- Add the changeset-presence job to `ci.yml`, with the agreed escape hatch.
-- Seed the repo's own convention: the implementing PRs each carry a changeset.
+### Phase 2 — CI enforcement — ✅ done
+- Added a PR-only `changeset` job to `ci.yml` that requires a changeset added
+  under `.changeset/` (diffing the PR against its base), with the `no-changeset`
+  label as the escape hatch (a `nessemble: none` changeset also satisfies it).
+- Added a `changeset check` step to the existing `check` job so a malformed
+  changeset fails CI before it can reach the Release action.
+- Each implementing PR carries its own changeset (seeding the convention).
 
 ### Phase 3 — Release workflow
 - **Set up the `nessemble-release[bot]` GitHub App** (D4): register with
