@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.10.0 - 2026-07-16
+
+### Minor changes
+
+- Add `.inesbat`, `.ines4scr`, `.inesprgram`, `.inestv`, `.inesvs`, and
+  `.inespc10` pseudo-instructions so the battery, four-screen, PRG-RAM size, TV
+  system, VS Unisystem, and PlayChoice-10 fields of the iNES header can be
+  configured from source. `.inestv 1` (PAL) is also mirrored into the unofficial
+  Flags 10 TV-system field.
+- Add NES 2.0 header support. The new `.ines2` pseudo-instruction emits a NES 2.0
+  header, widening `.inesmap` to 12-bit mappers and `.inesprg`/`.ineschr` to
+  12-bit sizes, and enabling the companion directives `.inessubmap`,
+  `.inesprgnvram`, `.ineschrram`, `.ineschrnvram`, `.inestiming`, `.inesconsole`,
+  `.inesvsppu`, `.inesvshw`, `.inesmiscrom`, and `.inesexpansion`. In NES 2.0 mode
+  `.inesprgram` takes a byte size, `.inestv` provides the timing fallback, and
+  `.inesvs`/`.inespc10` become console-type sugar.
+
 ## 2.9.0 - 2026-07-16
 
 ### Minor changes
