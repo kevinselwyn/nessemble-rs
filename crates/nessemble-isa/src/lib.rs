@@ -100,7 +100,7 @@ pub const DIRECTIVES: &[(&str, &str)] = &[
     (".font", "emit bundled font glyphs"),
     (".defchr", "define an 8x8 tile inline"),
     (
-        ".inesprg / .ineschr / .inesmap / .inesmir / .inestrn",
+        ".inesprg / .ineschr / .inesmap / .inesmir / .inesbat / .ines4scr / .inesprgram / .inestv / .inestrn",
         "iNES header fields",
     ),
     (".prg / .chr / .segment", "select a PRG/CHR bank"),

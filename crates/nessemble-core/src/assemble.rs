@@ -82,17 +82,30 @@ struct Ines {
     mir: i64,
     prg: i64,
     trn: i64,
+    /// Battery-backed / persistent memory (Flags 6 bit 1).
+    bat: i64,
+    /// Four-screen VRAM / alternative nametable layout (Flags 6 bit 3).
+    fsc: i64,
+    /// PRG-RAM size in 8 KB units (byte 8).
+    prgram: i64,
+    /// TV system (Flags 9 bit 0: 0 NTSC, 1 PAL).
+    tv: i64,
 }
 
 impl Default for Ines {
     fn default() -> Self {
-        // Matches the reference initializer { chr:1, map:0, mir:0, prg:1, trn:0 }.
+        // Matches the reference initializer { chr:1, map:0, mir:0, prg:1, trn:0 };
+        // the header extensions (bat/fsc/prgram/tv) default to off/zero.
         Ines {
             chr: 1,
             map: 0,
             mir: 0,
             prg: 1,
             trn: 0,
+            bat: 0,
+            fsc: 0,
+            prgram: 0,
+            tv: 0,
         }
     }
 }
@@ -360,13 +373,19 @@ impl Assembler {
         out.push(0x1A);
         out.push((self.ines.prg & 0xFF) as u8);
         out.push((self.ines.chr & 0xFF) as u8);
-        let byte6 =
-            (self.ines.mir & 0x01) | ((self.ines.trn & 0x01) << 2) | ((self.ines.map & 0x0F) << 4);
+        let byte6 = (self.ines.mir & 0x01)
+            | ((self.ines.bat & 0x01) << 1)
+            | ((self.ines.trn & 0x01) << 2)
+            | ((self.ines.fsc & 0x01) << 3)
+            | ((self.ines.map & 0x0F) << 4);
         out.push((byte6 & 0xFF) as u8);
         let byte7 = self.ines.map & 0xF0;
         out.push((byte7 & 0xFF) as u8);
-        // iNES header bytes 8..15 are zero.
-        out.resize(out.len() + 8, 0x00);
+        // Byte 8: PRG-RAM size (8 KB units). Byte 9: TV system (bit 0).
+        out.push((self.ines.prgram & 0xFF) as u8);
+        out.push((self.ines.tv & 0x01) as u8);
+        // iNES header bytes 10..15 are zero.
+        out.resize(out.len() + 6, 0x00);
         // A trainer, when present, sits between the header and the PRG/CHR data.
         if self.ines.trn == 1 {
             out.extend_from_slice(&self.trainer);
@@ -727,6 +746,22 @@ impl Assembler {
             Pseudo::InesMir(e) => {
                 self.nes = true;
                 self.ines.mir = self.eval(e);
+            }
+            Pseudo::InesBat(e) => {
+                self.nes = true;
+                self.ines.bat = self.eval(e);
+            }
+            Pseudo::Ines4Scr(e) => {
+                self.nes = true;
+                self.ines.fsc = self.eval(e);
+            }
+            Pseudo::InesPrgRam(e) => {
+                self.nes = true;
+                self.ines.prgram = self.eval(e);
+            }
+            Pseudo::InesTv(e) => {
+                self.nes = true;
+                self.ines.tv = self.eval(e);
             }
             Pseudo::Prg(e) => {
                 self.segment_prg = true;
