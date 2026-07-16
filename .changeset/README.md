@@ -8,12 +8,8 @@ which computes the next version from every changeset accumulated here since the
 last release. See [`plans/004-release-orchestration.md`](../plans/004-release-orchestration.md)
 for the full design.
 
-> **Rollout status.** This directory and its convention land first (plan 004,
-> Phase 0). The tooling that *consumes* changesets — the `xtask changeset`
-> commands, the CI check that requires one, and the Release workflow that bumps
-> the version and cuts the release — lands in the follow-up phases (1–3). Until
-> those ship, add changeset files by hand as described below; they simply
-> accumulate here and inform the first automated release.
+You can scaffold a changeset with `cargo run -p xtask -- changeset add <major|minor|patch|none> "summary"`,
+or just write the file by hand in the format below.
 
 ## File format
 

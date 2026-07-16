@@ -7,13 +7,10 @@ changesets accumulated since the last release, computes the next semantic
 version, upversions the whole workspace, and hands off to the build pipeline that
 produces the platform artifacts.
 
-> **Rollout status.** This document describes the target process from
-> [`plans/004-release-orchestration.md`](plans/004-release-orchestration.md). The
-> `.changeset/` convention (Phase 0) is in place now; the `xtask changeset`
-> tooling, the CI check that requires a changeset, and the Release workflow that
-> performs the version bump (Phases 1–3) land in follow-up PRs. Until they ship,
-> changesets are authored by hand (see `.changeset/README.md`) and accumulate for
-> the first automated release.
+The design is documented in
+[`plans/004-release-orchestration.md`](plans/004-release-orchestration.md); the
+one-time GitHub App setup the Release workflow relies on is in
+[`docs/repo/release-app-setup.md`](docs/repo/release-app-setup.md).
 
 ## Every PR carries a changeset
 
@@ -52,7 +49,7 @@ Run the **Release** action (Actions → *Release* → *Run workflow*). It:
 
 ## Build & publish
 
-That push to `main` triggers the existing **Release** build pipeline
+That push to `main` triggers the **Publish** pipeline
 (`.github/workflows/release.yml`), which — seeing a new workspace version with no
 matching tag — builds every platform artifact, creates the `v<version>` tag and
 its GitHub Release, and uploads the assets:
