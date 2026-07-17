@@ -12,6 +12,7 @@ mod format;
 mod home;
 mod init;
 mod lsp;
+mod rc;
 mod reference;
 mod scripts;
 mod usage;

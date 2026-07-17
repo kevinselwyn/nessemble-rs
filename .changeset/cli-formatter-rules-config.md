@@ -1,0 +1,4 @@
+---
+nessemble: minor
+---
+Make `nessemble format` opinionated and configurable (Phases 2–3 of `plans/005-formatter.md`). The formatter now, by default, consolidates adjacent `.db`/`.dw`/`.color` data into eight values per line (honoring `; @fmt stride=N` hint comments), inserts a blank line after `RTS`/`RTI`, collapses runs of more than two blank lines, and normalizes a single trailing newline. Formatting stays cosmetic — the assembled ROM is unchanged (guarded by a byte-preservation test). Rules are tunable via an optional `.nessemblerc` JSON file (strict keys), discovered up the directory tree, with `--config`/`--no-config`, an `extensions` filter, `.nessembleignore` exclusions, and prettier-style per-glob `overrides`. Because the language server shares this engine, editor on-format output gains the same house style.

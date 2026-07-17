@@ -309,6 +309,136 @@ fn format_help_lists_options() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("--write"));
     assert!(text.contains("--check"));
+    assert!(text.contains("--config"));
+    assert!(text.contains("--no-config"));
+}
+
+#[test]
+fn format_applies_nessemblerc_data_per_line() {
+    let dir = std::env::temp_dir().join(format!("nessemble-rc-dpl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".nessemblerc"), r#"{"dataPerLine": 2}"#).unwrap();
+    let file = dir.join("d.asm");
+    std::fs::write(&file, ".db $01\n.db $02\n.db $03\n").unwrap();
+
+    // dataPerLine=2 → two values per consolidated line.
+    let out = bin()
+        .args(["format", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        ".db $01, $02\n.db $03\n"
+    );
+
+    // --no-config ignores it and uses the default (eight per line → one line).
+    let out = bin()
+        .args(["format", "--no-config", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        ".db $01, $02, $03\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn format_explicit_config_file() {
+    let dir = std::env::temp_dir().join(format!("nessemble-rc-explicit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("my.json");
+    std::fs::write(&cfg, r#"{"dataPerLine": 1}"#).unwrap();
+    let file = dir.join("d.asm");
+    std::fs::write(&file, ".db $01\n.db $02\n").unwrap();
+
+    let out = bin()
+        .args([
+            "format",
+            "--config",
+            cfg.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), ".db $01\n.db $02\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn format_rejects_unknown_config_key() {
+    let dir = std::env::temp_dir().join(format!("nessemble-rc-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".nessemblerc"), r#"{"dataPerline": 2}"#).unwrap();
+    let file = dir.join("d.asm");
+    std::fs::write(&file, ".db $01\n").unwrap();
+
+    let out = bin()
+        .args(["format", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("unknown field `dataPerline`"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn format_override_and_ignore_and_extensions() {
+    let dir = std::env::temp_dir().join(format!("nessemble-rc-ovr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor")).unwrap();
+    // Base dataPerLine=2; files under data/ get 4; vendor/ is ignored.
+    std::fs::write(
+        dir.join(".nessemblerc"),
+        r#"{"dataPerLine": 2, "overrides": [{"files": "data/**/*.asm", "options": {"dataPerLine": 4}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join(".nessembleignore"), "vendor/\n").unwrap();
+    std::fs::write(dir.join("root.asm"), ".db $01\n.db $02\n.db $03\n").unwrap();
+    std::fs::write(
+        dir.join("data/t.asm"),
+        ".db $01\n.db $02\n.db $03\n.db $04\n.db $05\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("vendor/v.asm"), ".db $09\n.db $08\n").unwrap();
+
+    let out = bin()
+        .args(["format", "--write", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let reported = String::from_utf8(out.stdout).unwrap();
+    // vendor/ is ignored — never reported.
+    assert!(!reported.contains("vendor"));
+
+    // Base config: two per line.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("root.asm")).unwrap(),
+        ".db $01, $02\n.db $03\n"
+    );
+    // Override under data/: four per line.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("data/t.asm")).unwrap(),
+        ".db $01, $02, $03, $04\n.db $05\n"
+    );
+    // Ignored file is untouched.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("vendor/v.asm")).unwrap(),
+        ".db $09\n.db $08\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Path to a corpus directory for a scripting example/error case.
