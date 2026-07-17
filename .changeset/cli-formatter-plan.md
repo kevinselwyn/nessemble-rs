@@ -1,4 +1,4 @@
 ---
-nessemble: none
+nessemble: minor
 ---
-Add `plans/005-formatter.md`, a planning document for a prettier-style built-in `nessemble format` subcommand and an optional `.nessemblerc` JSON config, and implement its Phase 0: a `FormatOptions` seam in `nessemble-core::tooling` (`format_with`, with `format` delegating to the defaults). No user-facing behavior change — the CLI has no `format` command yet and the language server's formatting output is unchanged (parity 122/122).
+Add a configurable formatting API to `nessemble-core::tooling`: `format_with(source, &FormatOptions)` with `FormatOptions` (`indent_style`, `indent_width`, `comma_spacing`) and `IndentStyle`. The existing `format` now delegates to it with default options, so output is unchanged (parity 122/122, language server formatting identical). This is Phase 0 of the built-in `nessemble format` command specified in `plans/005-formatter.md`.

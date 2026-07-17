@@ -439,6 +439,8 @@ details within each phase.*
 
 ---
 
-*This plan changes no code. On approval, implementation proceeds Phase 0 → 5,
-each phase landing with tests, and the whole feature carried by a single `minor`
-changeset.*
+*Phase 0 (the `FormatOptions` seam) is implemented; Phases 1 → 5 follow, each
+landing with tests. Phase 0 carries a `minor` changeset for the new
+`nessemble-core::tooling` public API (`format_with` / `FormatOptions` /
+`IndentStyle`); the later phases add their own changesets as user-facing surface
+lands.*
