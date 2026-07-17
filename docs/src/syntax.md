@@ -511,6 +511,17 @@ Output:
 00000002
 ```
 
+A trailing comma continues the list onto the next line, so a long run of bytes
+can be wrapped across several indented lines:
+
+```nessemble
+.db $00, $01, $02, $03,
+    $04, $05, $06, $07
+```
+
+The same line-continuation rule applies to every comma-separated data directive
+(`.dw`, `.fill`, `.color`, `.hibytes`, `.lobytes`, and `.defchr`).
+
 
 ### .defchr
 

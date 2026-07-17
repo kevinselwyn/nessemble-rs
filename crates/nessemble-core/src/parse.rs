@@ -412,6 +412,16 @@ impl Parser {
             }
             if matches!(self.peek(), Some(Tok::Comma)) {
                 self.pos += 1;
+                // A trailing comma continues the argument list onto the next
+                // (indented) line, same as the built-in data directives. A comma
+                // with nothing after it (end of input or a blank/comment-only
+                // line) ends the list.
+                while matches!(self.peek(), Some(Tok::Endl | Tok::Indent)) {
+                    self.pos += 1;
+                }
+                if matches!(self.peek(), Some(Tok::Endl) | None) {
+                    break;
+                }
             } else {
                 break;
             }
@@ -501,7 +511,13 @@ impl Parser {
         let mut out = vec![self.parse_expr()?];
         while matches!(self.peek(), Some(Tok::Comma)) {
             self.pos += 1;
-            // Allow a trailing comma / line continuation to simply stop.
+            // A trailing comma continues the list onto the next line: skip the
+            // line break and the following indentation, then keep reading terms
+            // (same rule as `.defchr`). A comma with nothing after it — end of
+            // input, or a blank/comment-only line — simply ends the list.
+            while matches!(self.peek(), Some(Tok::Endl | Tok::Indent)) {
+                self.pos += 1;
+            }
             if matches!(self.peek(), Some(Tok::Endl) | None) {
                 break;
             }
@@ -616,5 +632,129 @@ fn strip_quotes(s: &str) -> String {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn first_stmt(src: &str) -> Stmt {
+        let toks = Lexer::new(src).tokenize();
+        let lines = parse(toks).expect("parse ok");
+        lines.into_iter().next().expect("one line").stmt
+    }
+
+    fn db_list(src: &str) -> Vec<Expr> {
+        match first_stmt(src) {
+            Stmt::Pseudo(Pseudo::Db(v)) => v,
+            other => panic!("expected .db, got {other:?}"),
+        }
+    }
+
+    fn nums(vals: &[i64]) -> Vec<Expr> {
+        vals.iter().map(|v| Expr::Num(*v)).collect()
+    }
+
+    #[test]
+    fn db_trailing_comma_continues_next_line() {
+        // The requested case: a trailing comma continues the operand list onto
+        // the following (indented) line.
+        let src = "  .db $00, $01, $02, $03,\n      $04, $05, $06, $07\n";
+        assert_eq!(db_list(src), nums(&[0, 1, 2, 3, 4, 5, 6, 7]));
+    }
+
+    #[test]
+    fn db_continuation_matches_single_line() {
+        let multi = db_list("  .db $00, $01, $02, $03,\n      $04, $05, $06, $07\n");
+        let single = db_list("  .db $00, $01, $02, $03, $04, $05, $06, $07\n");
+        assert_eq!(multi, single);
+    }
+
+    #[test]
+    fn db_continuation_spans_several_lines() {
+        let src = ".db $01,\n$02,\n$03\n";
+        assert_eq!(db_list(src), nums(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn db_trailing_comma_before_comment_continues() {
+        // A comment after the trailing comma must not defeat continuation
+        // (comments are stripped by the lexer, leaving Comma then Endl).
+        let src = "  .db $00, $01,   ; low half\n      $02, $03      ; high half\n";
+        assert_eq!(db_list(src), nums(&[0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn dw_continuation_continues_next_line() {
+        // The same rule applies to every parse_expr_list directive (.dw here).
+        let src = "  .dw $1234, $5678,\n      $9ABC\n";
+        match first_stmt(src) {
+            Stmt::Pseudo(Pseudo::Dw(v)) => assert_eq!(v, nums(&[0x1234, 0x5678, 0x9ABC])),
+            other => panic!("expected .dw, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn db_trailing_comma_at_eof_stops() {
+        // A trailing comma with nothing after it simply ends the list.
+        assert_eq!(db_list(".db $00, $01,\n"), nums(&[0, 1]));
+    }
+
+    #[test]
+    fn db_no_continuation_still_one_line() {
+        assert_eq!(db_list(".db $00, $01\n.db $02\n"), nums(&[0, 1]));
+    }
+
+    fn custom_args(src: &str) -> (String, Vec<CustomArg>) {
+        match first_stmt(src) {
+            Stmt::Pseudo(Pseudo::Custom(name, args)) => (name, args),
+            other => panic!("expected custom pseudo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_pseudo_continues_next_line() {
+        // A custom pseudo (e.g. `.metasprite`) wraps one entry per line via a
+        // trailing comma, matching the built-in data directives.
+        let src = "    .metasprite $FE,$39,$01,$F2,\n                $FE,$3A,$01,$12\n";
+        let (name, args) = custom_args(src);
+        assert_eq!(name, "metasprite");
+        let ints: Vec<i64> = args
+            .iter()
+            .map(|a| match a {
+                CustomArg::Int(Expr::Num(n)) => *n,
+                other => panic!("expected int arg, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ints, vec![0xFE, 0x39, 0x01, 0xF2, 0xFE, 0x3A, 0x01, 0x12]);
+    }
+
+    #[test]
+    fn custom_pseudo_continuation_matches_single_line() {
+        let (_, multi) = custom_args("    .foo $01, $02,\n         $03, $04\n");
+        let (_, single) = custom_args("    .foo $01, $02, $03, $04\n");
+        assert_eq!(multi, single);
+    }
+
+    #[test]
+    fn custom_pseudo_string_args_continue() {
+        // String operands (quoted) continue across lines too.
+        let (name, args) = custom_args("    .text \"line one\",\n          \"line two\"\n");
+        assert_eq!(name, "text");
+        assert_eq!(
+            args,
+            vec![
+                CustomArg::Str("line one".to_string()),
+                CustomArg::Str("line two".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_pseudo_trailing_comma_at_eof_stops() {
+        let (_, args) = custom_args("    .foo $01, $02,\n");
+        assert_eq!(args.len(), 2);
     }
 }
