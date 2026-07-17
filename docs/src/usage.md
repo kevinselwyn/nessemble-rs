@@ -161,6 +161,7 @@ below, so a project with no `.nessemblerc` still gets fully-formatted output.
   "indentWidth": 4,
   "commaSpacing": true,
   "finalNewline": true,
+  "indentDirectives": false,
   "dataPerLine": 8,
   "respectStrideHints": true,
   "blankLineAfterReturn": true,
@@ -178,6 +179,7 @@ below, so a project with no `.nessemblerc` still gets fully-formatted output.
 | `indentWidth` | `4` | Spaces per indent level (space style only). |
 | `commaSpacing` | `true` | `", "` between values; `false` for tight commas. |
 | `finalNewline` | `true` | Ensure the file ends in exactly one newline. |
+| `indentDirectives` | `false` | Indent directive lines (`.db`, `.dw`, `.include`, …) to block depth like instructions. `false` pins them to column 0 (house style); `true` suits codebases that indent data under labels. Labels and constants stay at column 0 either way. |
 | `dataPerLine` | `8` | Values per consolidated `.db`/`.dw`/`.color` line; `0` disables consolidation. |
 | `respectStrideHints` | `true` | Honor `; @fmt stride=N[,N,...]` comments (see below). |
 | `blankLineAfterReturn` | `true` | Insert one blank line after every `RTS`/`RTI`. |

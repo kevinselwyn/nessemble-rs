@@ -27,6 +27,7 @@ struct RcOptions {
     indent_width: Option<usize>,
     comma_spacing: Option<bool>,
     final_newline: Option<bool>,
+    indent_directives: Option<bool>,
     data_per_line: Option<usize>,
     respect_stride_hints: Option<bool>,
     blank_line_after_return: Option<bool>,
@@ -69,6 +70,9 @@ impl RcOptions {
         }
         if let Some(b) = self.final_newline {
             base.final_newline = b;
+        }
+        if let Some(b) = self.indent_directives {
+            base.indent_directives = b;
         }
         if let Some(n) = self.data_per_line {
             base.data_per_line = n;
@@ -430,6 +434,15 @@ mod tests {
         assert_eq!(base.indent_style, IndentStyle::Tab);
         assert_eq!(base.data_per_line, 4);
         assert!(!base.blank_line_after_return);
+    }
+
+    #[test]
+    fn indent_directives_maps_onto_format_options() {
+        let mut base = FormatOptions::default();
+        assert!(!base.indent_directives);
+        let rc: RcConfig = serde_json::from_str(r#"{"indentDirectives":true}"#).unwrap();
+        rc.options.apply(&mut base).unwrap();
+        assert!(base.indent_directives);
     }
 
     #[test]
