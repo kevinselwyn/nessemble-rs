@@ -736,10 +736,10 @@ fn flush_hint(
 }
 
 /// Consolidate adjacent `.db`/`.dw`/`.color` lines into `data_per_line`-value
-/// lines, honoring `; @fmt stride=N` hints. Mirrors the reference (thrilla)
-/// formatter's grouping semantics: a directive-type change, a label/constant,
-/// an instruction, a blank line, or a trailing comment all flush the current
-/// group; hinted blocks buffer values and re-flow them by their strides.
+/// lines, honoring `; @fmt stride=N` hints. Grouping semantics: a directive-type
+/// change, a label/constant, an instruction, a blank line, or a trailing comment
+/// all flush the current group; hinted blocks buffer values and re-flow them by
+/// their strides.
 fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
     if opts.data_per_line == 0 {
         return lines.to_vec();

@@ -617,9 +617,9 @@ mod tests {
 
     #[test]
     fn rhai_stdlib_supports_the_refactor_helpers() {
-        // The thrilla refactor leans on stock Rhai (no host builtin needed) for
-        // abs(), array `+=` / `extract`, and string indexing. Guard those here so
-        // a feature-flag change that drops them is caught in this crate.
+        // Some custom pseudo-op scripts lean on stock Rhai (no host builtin
+        // needed) for abs(), array `+=` / `extract`, and string indexing. Guard
+        // those here so a feature-flag change that drops them is caught.
         let src = r#"
             fn custom(ints, texts) {
                 let out = [];

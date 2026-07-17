@@ -26,10 +26,12 @@ Commands:
   reference [<category>] [<term>]  get reference info about assembly terms
   config [<key>] [<val>]           list/get/set config info
   lsp                              run the language server (stdio)
+  format [<opt> ...] <path> ...    format assembly source
 ```
 
 The `lsp` command starts the built-in [Language Server](editor.md) for use with
-LSP-capable editors.
+LSP-capable editors. The `format` command reformats assembly source (§
+[format](#format-opt--path-)).
 
 ## Options
 
@@ -116,3 +118,106 @@ LDA`).
 Gets or sets configuration stored in `~/.nessemble/config`. With no arguments it
 lists all keys; with a `<key>` it prints that value; with a `<key>` and `<val>`
 it sets the key.
+
+### format [&lt;opt&gt; ...] &lt;path&gt; ...
+
+Reformats nessemble assembly source in an opinionated, [Prettier][prettier]-style
+way: consistent indentation and comma spacing, `.db`/`.dw`/`.color` data
+consolidated a fixed number of values per line, a blank line after each
+`RTS`/`RTI`, collapsed runs of blank lines, and a normalized final newline.
+Formatting is **cosmetic only** — the assembled ROM is never changed.
+
+```text
+nessemble format path/to/file.asm       # print formatted source to stdout
+nessemble format --write path/to/dir    # rewrite files in place
+nessemble format --check path/to/dir    # CI gate: exit non-zero if unformatted
+```
+
+- A single file with no flags prints the formatted result to `stdout`, leaving
+  the file untouched.
+- `-w`, `--write` rewrites each changed file in place and prints its path.
+- `-c`, `--check` writes nothing; it lists files that are not already formatted
+  and exits non-zero — the gate for CI.
+- A directory is walked recursively (for the configured extensions, `.asm` by
+  default) and requires `--write` or `--check`.
+- `--config <file>` uses `<file>` as the [`.nessemblerc`](#nessemblerc); 
+  `--no-config` ignores any `.nessemblerc` and uses built-in defaults.
+
+The editor [Language Server](editor.md)'s "format document" action runs this same
+formatter, so editors and the CLI produce identical output.
+
+## .nessemblerc
+
+Formatting is configurable, Prettier-style, via an optional `.nessemblerc` (or
+`.nessemblerc.json`) file discovered by walking up from the file or directory
+being formatted. It is JSON; every key is optional and takes the default shown
+below, so a project with no `.nessemblerc` still gets fully-formatted output.
+**Unknown keys are rejected** (to catch typos early).
+
+```json
+{
+  "extensions": [".asm"],
+  "indentStyle": "space",
+  "indentWidth": 4,
+  "commaSpacing": true,
+  "finalNewline": true,
+  "dataPerLine": 8,
+  "respectStrideHints": true,
+  "blankLineAfterReturn": true,
+  "maxConsecutiveBlankLines": 2,
+  "mnemonicCase": "preserve",
+  "hexDigitCase": "preserve",
+  "overrides": []
+}
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `extensions` | `[".asm"]` | File extensions formatted during a directory walk. |
+| `indentStyle` | `"space"` | Instruction indent: `"space"` or `"tab"`. |
+| `indentWidth` | `4` | Spaces per indent level (space style only). |
+| `commaSpacing` | `true` | `", "` between values; `false` for tight commas. |
+| `finalNewline` | `true` | Ensure the file ends in exactly one newline. |
+| `dataPerLine` | `8` | Values per consolidated `.db`/`.dw`/`.color` line; `0` disables consolidation. |
+| `respectStrideHints` | `true` | Honor `; @fmt stride=N[,N,...]` comments (see below). |
+| `blankLineAfterReturn` | `true` | Insert one blank line after every `RTS`/`RTI`. |
+| `maxConsecutiveBlankLines` | `2` | Collapse longer runs of blank lines down to this. |
+| `mnemonicCase` | `"preserve"` | Case the instruction mnemonic: `"preserve"`, `"lower"`, or `"upper"`. |
+| `hexDigitCase` | `"preserve"` | Case hex-digit letters (`$ab` vs `$AB`): `"preserve"`, `"lower"`, or `"upper"`. |
+| `overrides` | `[]` | Per-glob option overrides (see below). |
+
+Directive names (`.db`, `.DB`) are never re-cased — nessemble is case-sensitive
+about them.
+
+### Stride hints
+
+To override `dataPerLine` for one data block, place a `; @fmt stride=N` comment
+immediately before it. Multiple strides cycle in order and the last one repeats:
+
+```asm
+; @fmt stride=2
+    .db $01, $02
+    .db $03, $04
+```
+
+### Overrides
+
+`overrides` is an ordered list of `{ "files": <glob>, "options": { … } }`
+entries; for each formatted file, later matching entries layer their options on
+top of the base config. Globs support `*`, `**`, and `?`.
+
+```json
+{
+  "dataPerLine": 8,
+  "overrides": [
+    { "files": "src/data/**/*.asm", "options": { "dataPerLine": 16 } }
+  ]
+}
+```
+
+### .nessembleignore
+
+A `.nessembleignore` file (gitignore-style globs, one per line) excludes matching
+paths from directory walks. It is discovered the same way as `.nessemblerc`.
+
+[prettier]: https://prettier.io

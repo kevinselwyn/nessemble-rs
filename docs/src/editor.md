@@ -30,9 +30,12 @@ Once connected, the server provides:
 - **Completion** — instruction mnemonics, assembler directives, and the
   labels, constants, and macros defined in the current buffer. Typing `.`
   triggers directive completion.
-- **Formatting** — “format document” tidies indentation and comma spacing while
-  preserving comments, blank lines, and letter case. Formatting is lossless and
-  idempotent.
+- **Formatting** — “format document” applies the opinionated house style
+  (indentation, comma spacing, data-block consolidation, routine spacing) while
+  preserving comments. It runs the **same engine** as the
+  [`nessemble format`](usage.md#format-opt--path-) CLI command, so editors and
+  the command line produce identical output. Formatting is idempotent and never
+  changes the assembled ROM.
 - **Semantic highlighting** — tokens are classified (mnemonic, directive,
   number, string, comment, identifier, operator) for richer coloring than a
   regex grammar can offer.
