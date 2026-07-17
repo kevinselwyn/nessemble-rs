@@ -237,6 +237,12 @@ jobs:
     needs: version
     if: needs.version.outputs.exists == 'false'
     runs-on: ubuntu-latest
+    # Don't upload build-push-action's build-record (`.dockerbuild`) provenance
+    # artifact. The `release` job downloads *every* artifact in the run, so this
+    # blob — which it has no use for — ends up in its `download-artifact`, where
+    # it has failed to download and taken the whole release step down with it.
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: false
     permissions:
       contents: read
       packages: write
