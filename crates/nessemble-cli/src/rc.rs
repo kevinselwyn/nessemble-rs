@@ -14,12 +14,12 @@
 
 use std::path::{Path, PathBuf};
 
-use nessemble_core::tooling::{FormatOptions, IndentStyle};
+use nessemble_core::tooling::{Case, FormatOptions, IndentStyle};
 use serde::Deserialize;
 
 /// The formatting options settable in a `.nessemblerc` or an `overrides` entry.
 /// Every field is optional; an absent field leaves the inherited value. Unknown
-/// keys are rejected. (Case-normalization keys arrive with Phase 4.)
+/// keys are rejected.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RcOptions {
@@ -31,6 +31,20 @@ struct RcOptions {
     respect_stride_hints: Option<bool>,
     blank_line_after_return: Option<bool>,
     max_consecutive_blank_lines: Option<usize>,
+    mnemonic_case: Option<String>,
+    hex_digit_case: Option<String>,
+}
+
+/// Parse a case keyword (`"preserve"`/`"lower"`/`"upper"`) for a named key.
+fn parse_case(key: &str, value: &str) -> Result<Case, String> {
+    match value {
+        "preserve" => Ok(Case::Preserve),
+        "lower" => Ok(Case::Lower),
+        "upper" => Ok(Case::Upper),
+        other => Err(format!(
+            "invalid {key} `{other}` (expected \"preserve\", \"lower\", or \"upper\")"
+        )),
+    }
 }
 
 impl RcOptions {
@@ -67,6 +81,12 @@ impl RcOptions {
         }
         if let Some(n) = self.max_consecutive_blank_lines {
             base.max_consecutive_blank_lines = n;
+        }
+        if let Some(s) = &self.mnemonic_case {
+            base.mnemonic_case = parse_case("mnemonicCase", s)?;
+        }
+        if let Some(s) = &self.hex_digit_case {
+            base.hex_digit_case = parse_case("hexDigitCase", s)?;
         }
         Ok(())
     }
@@ -415,6 +435,23 @@ mod tests {
     #[test]
     fn invalid_indent_style_is_an_error() {
         let rc: RcConfig = serde_json::from_str(r#"{"indentStyle":"wide"}"#).unwrap();
+        let mut base = FormatOptions::default();
+        assert!(rc.options.apply(&mut base).is_err());
+    }
+
+    #[test]
+    fn case_keys_map_onto_format_options() {
+        let rc: RcConfig =
+            serde_json::from_str(r#"{"mnemonicCase":"upper","hexDigitCase":"lower"}"#).unwrap();
+        let mut base = FormatOptions::default();
+        rc.options.apply(&mut base).unwrap();
+        assert_eq!(base.mnemonic_case, Case::Upper);
+        assert_eq!(base.hex_digit_case, Case::Lower);
+    }
+
+    #[test]
+    fn invalid_case_value_is_an_error() {
+        let rc: RcConfig = serde_json::from_str(r#"{"mnemonicCase":"title"}"#).unwrap();
         let mut base = FormatOptions::default();
         assert!(rc.options.apply(&mut base).is_err());
     }
