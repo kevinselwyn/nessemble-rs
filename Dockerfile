@@ -9,8 +9,11 @@
 # cp`/`COPY --from` are the intended ways to consume it.
 
 # --- build stage -----------------------------------------------------------
-# Pinned to the workspace's minimum supported Rust (rust-version = "1.83").
-FROM rust:1.83-slim-bookworm AS build
+# Latest stable Rust, matching the `stable` toolchain the rest of the release
+# pipeline builds with. (Not pinned to the workspace's `rust-version = "1.83"`:
+# transitive dependencies in the lockfile — e.g. moxcms via the `image` crate —
+# use edition 2024, which Cargo only understands from 1.85 on.)
+FROM rust:slim-bookworm AS build
 
 # musl-tools provides musl-gcc, the linker for the fully-static target.
 RUN apt-get update \
