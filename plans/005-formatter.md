@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for a Built-in Opinionated Formatter
 
-> Status: **Phases 0–4 done; Phase 5 (docs) pending.** This document specifies a
+> Status: **Complete — Phases 0–5 done.** This document specifies a
 > `nessemble format` subcommand (a prettier-style, opinionated formatter for
 > nessemble assembly) and an optional `.nessemblerc` JSON config, building on the
 > formatting engine that already backs the language server. All planning
@@ -11,9 +11,9 @@
 > on by default; **Phase 3** the `.nessemblerc` JSON config (discovery,
 > `--config`/`--no-config`, `extensions`, `.nessembleignore`, per-glob
 > `overrides`, strict keys); **Phase 4** opt-in case normalization
-> (`mnemonicCase`/`hexDigitCase`). Only user **docs** (Phase 5) remain. Parity
-> stays 122/122; byte preservation (including under case normalization) is
-> covered by tests (§9).
+> (`mnemonicCase`/`hexDigitCase`); **Phase 5** the user docs (`usage.md`,
+> `editor.md`). Parity stays 122/122; byte preservation (including under case
+> normalization) is covered by tests (§9).
 
 ---
 
@@ -90,9 +90,8 @@ Grounded in the current code, not aspirational:
 - **Not yet "opinionated."** `tooling::format` deliberately preserves structure.
   The prettier-like rules (consolidate `.db`/`.dw`/`.color`, blank line after
   `RTS`/`RTI`, collapse excess blank lines, optional case normalization) do not
-  exist here. They *do* exist, battle-tested, in the sibling **thrilla**
-  disassembly project's `utils/apps/format` TypeScript tool — this plan ports
-  their behavior into Rust (§6).
+  exist here. This plan adds them (§6), drawing on the well-worn conventions of
+  6502/NES disassembly source formatting.
 - **No configuration.** There is a `~/.nessemble/config` key/value store
   (`config` subcommand) for *global tool* settings, but nothing per-project and
   nothing that shapes formatting. `.nessemblerc` is new (§5).
@@ -122,8 +121,8 @@ nessemble format [options] <path>...
 - **A single file with no `-w`/`-c`** → print the formatted source to **stdout**
   (leaving the file untouched). Ideal for piping and editor "format selection".
 - **`--write`** → format each file in place; print the path of each file that
-  changed (mirrors the thrilla tool's `formatted <file>` line). Unchanged files
-  are silent.
+  changed (a `formatted <file>` line, like `gofmt -l`/`prettier --write`).
+  Unchanged files are silent.
 - **`--check`** → format in memory and compare; print each path that *would*
   change and exit `1` (the CI gate). No file is written.
 - **A directory** is walked recursively for files with a formattable extension
@@ -219,9 +218,8 @@ intended (§10 covers the version/behavior consequence).
 ## 6. Formatting rules (the opinions)
 
 The engine runs as an ordered pipeline of passes over the lossless lexeme
-stream, each gated by `FormatOptions`. Passes 1 and the comma/whitespace parts of
-Pass 0 already exist; the rest are ported from thrilla's `format.ts` (whose unit
-tests are a ready-made behavioral spec).
+stream, each gated by `FormatOptions`. The comma/whitespace parts of Pass 0
+already exist; the rest are new.
 
 **Pass 0 — Line normalization (exists today).** Re-indent (instructions →
 `indentWidth`; labels, directives, constant `NAME = …` lines, and anonymous `:`
@@ -230,7 +228,7 @@ comments/case/blank-lines. Comment-only lines keep their original indentation.
 
 **Pass 1 — Data-block consolidation** (`dataPerLine > 0`). Adjacent `.db` /
 `.dw` / `.color` directives with **no trailing comment** are merged and
-re-emitted `dataPerLine` values per line. Guards, matching thrilla:
+re-emitted `dataPerLine` values per line. Guards:
 
 - A **directive-type change** (`.db` → `.dw`) flushes the current group.
 - A line carrying a **trailing comment** is emitted verbatim and never merged
@@ -243,8 +241,7 @@ re-emitted `dataPerLine` values per line. Guards, matching thrilla:
 immediately before a block overrides `dataPerLine` for that block: strides are
 consumed in order and the final one repeats; a type change still forces a break.
 The hint stays active until a non-data/non-label line or two consecutive blank
-lines. (Byte-for-byte the thrilla semantics — same `parseHint`/`emitHintedRun`
-rules.)
+lines.
 
 **Pass 2 — Blank line after `RTS`/`RTI`** (`blankLineAfterReturn`). Insert one
 blank line after any line whose only instruction is `RTS` or `RTI` (optionally
@@ -358,13 +355,13 @@ workspace suite green, parity **122/122**.
 to `nessemble-core::tooling` behind new `FormatOptions` fields
 (`data_per_line`, `respect_stride_hints`, `blank_line_after_return`,
 `max_consecutive_blank_lines`, `final_newline`), on by default: `.db`/`.dw`/
-`.color` consolidation with `; @fmt stride=N` hints (thrilla grouping
-semantics — type-change/label/comment/blank flush), a blank line after
+`.color` consolidation with `; @fmt stride=N` hints (type-change/label/comment/
+blank flush), a blank line after
 `RTS`/`RTI`, blank-run collapsing, and a normalized final newline. `format`
 (the LSP entry point) now emits the full house style; its two format tests use
-inputs unaffected by the new passes, so they still pass. *Verified:* ported
-thrilla rule cases, idempotency across passes, and the **byte-preservation
-test** (assemble original vs. formatted → identical ROM), plus parity 122/122.
+inputs unaffected by the new passes, so they still pass. *Verified:* per-rule
+cases, idempotency across passes, and the **byte-preservation test** (assemble
+original vs. formatted → identical ROM), plus parity 122/122.
 
 **Phase 3 — `.nessemblerc` + discovery. — ✅ done.** Added
 `crates/nessemble-cli/src/rc.rs`: a `serde`-derived `RcConfig`/`RcOptions`
@@ -389,17 +386,19 @@ mnemonics and hex case-insensitively), covered by a dedicated byte-preservation
 test. *Verified:* mnemonic/hex mapping tests (including the label-named-like-a-
 mnemonic and register guards), idempotency, byte preservation, parity 122/122.
 
-**Phase 5 — Docs, changeset, CI.** `docs/src/usage.md` + a `.nessemblerc`
-reference; note in `docs/src/editor.md` that editor formatting shares the engine;
-a `minor` **changeset** (new feature); optional `nessemble format --check` step
-in CI to keep the repo's own sample sources tidy.
+**Phase 5 — Docs. — ✅ done.** `docs/src/usage.md` gains a `format` command
+section and a full `.nessemblerc` reference (option table, stride hints,
+`overrides`, `.nessembleignore`); `docs/src/editor.md` now notes that the
+editor's "format document" runs the same engine as the CLI. The optional
+`nessemble format --check` CI step is deferred — the repo's corpus files are
+byte-exact golden fixtures, so gating them on the formatter is left as a separate
+decision.
 
 ## 9. Testing strategy
 
 - **Core unit tests** (in `tooling.rs`, alongside the existing ones): one per
-  pass, ported from thrilla's `format.test.ts` (consolidation, type-change
-  flush, comment pinning, stride hints, RTS/RTI spacing, blank collapsing, case
-  normalization).
+  pass (consolidation, type-change flush, comment pinning, stride hints,
+  RTS/RTI spacing, blank collapsing, case normalization).
 - **Idempotency**: `format_with(format_with(x, o), o) == format_with(x, o)`
   across a matrix of option sets.
 - **Default-parity golden test**: `FormatOptions::default()` with the structural
@@ -408,7 +407,7 @@ in CI to keep the repo's own sample sources tidy.
 - **Byte-preservation (the load-bearing test)**: for a corpus of sample sources,
   assemble the original and the formatted output and assert **identical ROMs**
   (nessemble-core's existing `tests/corpus.rs` harness is the model). This is the
-  formatter's analogue of thrilla's `make verify` MD5 check.
+  formatter's ROM-equivalence safety net.
 - **CLI integration tests** (`crates/nessemble-cli/tests/`): tempdir fixtures for
   single-file stdout, `--write` changed/unchanged, `--check` exit codes,
   recursive directory formatting, the `extensions` filter, `.nessembleignore`
