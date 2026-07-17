@@ -107,6 +107,52 @@
     return node;
   }
 
+  // Toolbar icons, as the inner markup of a 24×24 stroke SVG (Feather-style).
+  // They inherit the button's text color via `stroke="currentColor"` and are
+  // sized in CSS. Kept as strings so a button's glyph can be swapped in place
+  // (the toggle flips between `eye`/`eyeOff`).
+  var ICONS = {
+    reset:
+      '<polyline points="1 4 1 10 7 10"/>' +
+      '<path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
+    clear:
+      '<polyline points="3 6 5 6 21 6"/>' +
+      '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>' +
+      '<line x1="10" y1="11" x2="10" y2="17"/>' +
+      '<line x1="14" y1="11" x2="14" y2="17"/>',
+    eye:
+      '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
+      '<circle cx="12" cy="12" r="3"/>',
+    eyeOff:
+      '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>' +
+      '<line x1="1" y1="1" x2="23" y2="23"/>',
+    download:
+      '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+      '<polyline points="7 10 12 15 17 10"/>' +
+      '<line x1="12" y1="15" x2="12" y2="3"/>',
+    code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+  };
+
+  function svgIcon(paths) {
+    return (
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+      'aria-hidden="true" focusable="false">' +
+      paths +
+      "</svg>"
+    );
+  }
+
+  // An icon-only toolbar control (`<button>` or `<a>`): the glyph is decorative,
+  // so the accessible name and hover tooltip both come from `label`.
+  function iconBtn(tag, className, iconKey, label) {
+    var node = el(tag, className);
+    node.innerHTML = svgIcon(ICONS[iconKey]);
+    node.title = label;
+    node.setAttribute("aria-label", label);
+    return node;
+  }
+
   // Build the CodeMirror decorations for `text` from the assembler's `tokenize`
   // output — a flat `[start, len, class, …]` array of UTF-16 offsets, which map
   // 1:1 onto CodeMirror document positions. Returns an empty set until the wasm
@@ -241,19 +287,38 @@
       var bar = el("div", "na-toolbar");
       this._assembleBtn = el("button", "na-btn na-primary", LABEL_ASSEMBLE);
       this._assembleBtn.type = "button";
-      var reset = el("button", "na-btn", "Reset");
+      var reset = iconBtn("button", "na-btn na-icon", "reset", "Reset");
       reset.type = "button";
-      var clear = el("button", "na-btn", "Clear");
+      var clear = iconBtn("button", "na-btn na-icon", "clear", "Clear");
       clear.type = "button";
+      var format = iconBtn("button", "na-btn na-icon", "code", "Format code");
+      format.type = "button";
       // Collapses/expands the byte output; only shown once there are bytes.
-      this._toggle = el("button", "na-btn na-toggle", "Hide bytes");
+      this._toggle = iconBtn(
+        "button",
+        "na-btn na-icon na-toggle",
+        "eyeOff",
+        "Hide output"
+      );
       this._toggle.type = "button";
       this._toggle.hidden = true;
-      this._download = el("a", "na-btn na-download", "Download");
+      this._download = iconBtn(
+        "a",
+        "na-btn na-icon na-download",
+        "download",
+        "Download"
+      );
       this._download.setAttribute("download", "assemble.rom");
       this._download.hidden = true;
 
-      bar.append(this._assembleBtn, reset, clear, this._toggle, this._download);
+      bar.append(
+        this._assembleBtn,
+        reset,
+        clear,
+        format,
+        this._toggle,
+        this._download
+      );
 
       this._output = el("pre", "na-output");
       this._output.hidden = true;
@@ -268,6 +333,12 @@
       clear.addEventListener("click", () => {
         this._setDoc("");
         this._clearOutput();
+      });
+      // Reformat the current source in place with `nessemble format` (via wasm).
+      format.addEventListener("click", () => {
+        loadWasm().then((mod) => {
+          this._setDoc(mod.format(this._value()));
+        });
       });
       this._toggle.addEventListener("click", () => {
         this._output.hidden = !this._output.hidden;
@@ -346,10 +417,15 @@
       }
     }
 
-    // Reflect the current output visibility on the toggle button's label.
+    // Reflect the current output visibility on the toggle button: an `eye` icon
+    // (labelled "Show output") when the bytes are hidden, an `eyeOff` icon
+    // ("Hide output") when they're shown.
     _updateToggle() {
       var hidden = this._output.hidden;
-      this._toggle.textContent = hidden ? "Show bytes" : "Hide bytes";
+      var label = hidden ? "Show output" : "Hide output";
+      this._toggle.innerHTML = svgIcon(hidden ? ICONS.eye : ICONS.eyeOff);
+      this._toggle.title = label;
+      this._toggle.setAttribute("aria-label", label);
       this._toggle.setAttribute("aria-expanded", hidden ? "false" : "true");
     }
 

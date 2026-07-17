@@ -1,10 +1,11 @@
 //! WebAssembly bindings for the nessemble-rs assembler.
 //!
-//! Exposes a single [`assemble`] function that turns 6502/NES assembly source
-//! into a ROM entirely client-side, for the in-browser assembler component. It
-//! wraps [`nessemble_core::assemble_with`] and runs custom pseudo-op scripts via
+//! The centerpiece is [`assemble`], which turns 6502/NES assembly source into a
+//! ROM entirely client-side, for the in-browser assembler component. It wraps
+//! [`nessemble_core::assemble_with`] and runs custom pseudo-op scripts via
 //! [`nessemble_script`] (built without filesystem access — see the crate's `fs`
-//! feature).
+//! feature). Alongside it, [`tokenize`]/[`token_classes`] drive the editor's
+//! syntax highlighting and [`format()`] reformats source in the editor.
 //!
 //! # Options (`opts_json`)
 //!
@@ -206,6 +207,16 @@ pub fn token_classes() -> Vec<String> {
     .collect()
 }
 
+/// Reformat `source` with nessemble's default formatter and return the result —
+/// the same transform the CLI's `nessemble format` and the language server apply
+/// (indent normalization, comma spacing, trailing-whitespace trim, …). It never
+/// fails: unparsable input is returned reformatted as best it can be.
+#[must_use]
+#[wasm_bindgen]
+pub fn format(source: &str) -> String {
+    tooling::format(source)
+}
+
 /// Format a core diagnostic for display (`file: line N: message`, or just the
 /// message for file-less diagnostics).
 fn format_diag(diag: &Diag) -> String {
@@ -326,6 +337,18 @@ mod tests {
                 4, 3, 1, // nop → instruction
             ]
         );
+    }
+
+    #[test]
+    fn format_reindents_source() {
+        // A label stays in column 0; an instruction is normalized to the default
+        // indent. `format` mirrors `tooling::format`, so this just checks the
+        // export is wired up.
+        assert_eq!(
+            format("label:\nlda #$00\n"),
+            tooling::format("label:\nlda #$00\n")
+        );
+        assert!(format("lda #$00\n").starts_with(' '));
     }
 
     #[test]

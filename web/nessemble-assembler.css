@@ -187,6 +187,21 @@ html.ayu,
   background: rgba(127, 127, 127, 0.15);
 }
 
+/* Icon-only controls (Reset, Clear, Format, the byte toggle, Download): a
+   square button whose glyph inherits the button text color. */
+.na-btn.na-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3em;
+}
+
+.na-btn.na-icon svg {
+  display: block;
+  width: 1.15em;
+  height: 1.15em;
+}
+
 .na-btn:disabled {
   opacity: 0.6;
   cursor: default;
