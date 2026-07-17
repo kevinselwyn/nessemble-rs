@@ -260,16 +260,71 @@ fn utf16_len(s: &str) -> u32 {
     s.encode_utf16().count() as u32
 }
 
-/// Indent applied to instruction lines (labels, directives, and constant
-/// definitions stay at column 0), matching the corpus house style.
-const INDENT: &str = "    ";
+/// How instruction lines are indented (labels, directives, and constant
+/// definitions always stay at column 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndentStyle {
+    /// Indent with spaces (`indent_width` per level).
+    Space,
+    /// Indent with a single tab per level.
+    Tab,
+}
 
-/// Reformat nessemble assembly source: normalize leading indentation, tidy
-/// spacing around commas, and trim trailing whitespace, while **preserving
-/// comments, other internal spacing, blank lines, and identifier case**. The
-/// transform is idempotent.
+/// Options controlling [`format_with`].
+///
+/// [`FormatOptions::default`] reproduces the corpus house style used by
+/// [`format`] — a four-space instruction indent and `", "` between
+/// comma-separated operands/data values — so zero-config callers (the language
+/// server) get today's behavior unchanged. Later phases of the formatter plan
+/// (`plans/005-formatter.md`) grow this struct with the opinionated structural
+/// rules; Phase 0 introduces only the seam and the options the current pass
+/// already implements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatOptions {
+    /// Indent instruction lines with spaces or a tab.
+    pub indent_style: IndentStyle,
+    /// Number of spaces per indent level (ignored for [`IndentStyle::Tab`]).
+    pub indent_width: usize,
+    /// Put exactly one space after each operand/data comma (never one before).
+    /// When `false`, commas are tight (`$01,$02`).
+    pub comma_spacing: bool,
+}
+
+impl Default for FormatOptions {
+    fn default() -> Self {
+        Self {
+            indent_style: IndentStyle::Space,
+            indent_width: 4,
+            comma_spacing: true,
+        }
+    }
+}
+
+impl FormatOptions {
+    /// The leading indent string applied to an instruction line.
+    fn indent_unit(&self) -> String {
+        match self.indent_style {
+            IndentStyle::Space => " ".repeat(self.indent_width),
+            IndentStyle::Tab => "\t".to_string(),
+        }
+    }
+}
+
+/// Reformat nessemble assembly source with the default [`FormatOptions`].
+///
+/// Equivalent to [`format_with`] with [`FormatOptions::default`]; retained as the
+/// zero-config entry point the language server calls.
 #[must_use]
 pub fn format(source: &str) -> String {
+    format_with(source, &FormatOptions::default())
+}
+
+/// Reformat nessemble assembly source under `opts`: normalize leading
+/// indentation, tidy spacing around commas, and trim trailing whitespace, while
+/// **preserving comments, other internal spacing, blank lines, and identifier
+/// case**. The transform is idempotent.
+#[must_use]
+pub fn format_with(source: &str, opts: &FormatOptions) -> String {
     let lexemes = lex(source);
 
     // Split into physical lines (a `Newline` ends a line; a trailing newline
@@ -285,7 +340,11 @@ pub fn format(source: &str) -> String {
     }
     lines.push(current);
 
-    let formatted: Vec<String> = lines.iter().map(|line| format_line(source, line)).collect();
+    let indent = opts.indent_unit();
+    let formatted: Vec<String> = lines
+        .iter()
+        .map(|line| format_line(source, line, opts, &indent))
+        .collect();
     formatted.join("\n")
 }
 
@@ -297,7 +356,7 @@ fn is_punct(source: &str, lx: &Lexeme, s: &str) -> bool {
     lx.kind == LexKind::Punct && text(source, lx) == s
 }
 
-fn format_line(source: &str, line: &[Lexeme]) -> String {
+fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str) -> String {
     let first_sig = line.iter().position(|l| l.kind != LexKind::Whitespace);
     let Some(first_sig) = first_sig else {
         // Blank or whitespace-only line.
@@ -321,10 +380,15 @@ fn format_line(source: &str, line: &[Lexeme]) -> String {
             .to_string();
     }
 
-    let indent = indent_for(source, &sig);
+    let lead = if is_indented(source, &sig) {
+        indent
+    } else {
+        ""
+    };
 
     // Reconstruct from the first to the last significant lexeme, preserving
-    // internal whitespace except around commas (no space before, one after).
+    // internal whitespace except around commas (no space before, one after when
+    // `comma_spacing`, else tight).
     let last_sig = line
         .iter()
         .rposition(|l| l.kind != LexKind::Whitespace)
@@ -341,7 +405,7 @@ fn format_line(source: &str, line: &[Lexeme]) -> String {
             }
         } else if is_punct(source, lx, ",") {
             body.push(',');
-            if k != body_lexemes.len() - 1 {
+            if opts.comma_spacing && k != body_lexemes.len() - 1 {
                 body.push(' ');
             }
         } else {
@@ -349,27 +413,24 @@ fn format_line(source: &str, line: &[Lexeme]) -> String {
         }
     }
 
-    format!("{indent}{body}").trim_end().to_string()
+    format!("{lead}{body}").trim_end().to_string()
 }
 
-/// Leading indent for a line, from its significant lexemes: labels
-/// (`name:` / `:`), constant definitions (`name = …`), and directives sit at
-/// column 0; everything else (instructions) is indented.
-fn indent_for(source: &str, sig: &[&Lexeme]) -> &'static str {
+/// Whether a line is an indented instruction line, from its significant
+/// lexemes: labels (`name:` / `:`), constant definitions (`name = …`), and
+/// directives sit at column 0 (returns `false`); everything else (instructions)
+/// is indented (returns `true`).
+fn is_indented(source: &str, sig: &[&Lexeme]) -> bool {
     let first = sig[0];
     match first.kind {
-        LexKind::Directive => "",
+        LexKind::Directive => false,
         LexKind::Ident => {
             let is_label = sig.get(1).is_some_and(|l| is_punct(source, l, ":"));
             let is_const = sig.get(1).is_some_and(|l| is_punct(source, l, "="));
-            if is_label || is_const {
-                ""
-            } else {
-                INDENT
-            }
+            !(is_label || is_const)
         }
-        LexKind::Punct if is_punct(source, first, ":") => "",
-        _ => INDENT,
+        LexKind::Punct if is_punct(source, first, ":") => false,
+        _ => true,
     }
 }
 
@@ -452,6 +513,62 @@ mod tests {
     fn format_preserves_trailing_newline_presence() {
         assert_eq!(format("nop"), "    nop");
         assert_eq!(format("nop\n"), "    nop\n");
+    }
+
+    #[test]
+    fn format_with_default_matches_format() {
+        // The seam is a no-op refactor: default options reproduce `format`.
+        let src = "start:\n  LDX #$08\n.db 1,2,  3   \n; end\n";
+        assert_eq!(format_with(src, &FormatOptions::default()), format(src));
+    }
+
+    #[test]
+    fn format_with_custom_indent_width() {
+        let opts = FormatOptions {
+            indent_width: 2,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            format_with("label:\nlda #$00\n", &opts),
+            "label:\n  lda #$00\n"
+        );
+    }
+
+    #[test]
+    fn format_with_tab_indent() {
+        let opts = FormatOptions {
+            indent_style: IndentStyle::Tab,
+            ..FormatOptions::default()
+        };
+        // Instructions indented by a tab; the label stays at column 0.
+        assert_eq!(
+            format_with("label:\nlda #$00\n", &opts),
+            "label:\n\tlda #$00\n"
+        );
+    }
+
+    #[test]
+    fn format_with_tight_commas() {
+        let opts = FormatOptions {
+            comma_spacing: false,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            format_with(".db $01, $02 , $03\n", &opts),
+            ".db $01,$02,$03\n"
+        );
+    }
+
+    #[test]
+    fn format_with_is_idempotent_for_custom_options() {
+        let opts = FormatOptions {
+            indent_style: IndentStyle::Tab,
+            indent_width: 2,
+            comma_spacing: false,
+        };
+        let src = "start:\n      LDX #$08\n.db 1, 2,  3   \n; end\n";
+        let once = format_with(src, &opts);
+        assert_eq!(format_with(&once, &opts), once);
     }
 
     #[test]

@@ -1,11 +1,13 @@
 # nessemble-rs: A Plan for a Built-in Opinionated Formatter
 
-> Status: **Draft — planning only.** No code has been written. This document
-> specifies a `nessemble format` subcommand (a prettier-style, opinionated
-> formatter for nessemble assembly) and an optional `.nessemblerc` JSON config,
-> building on the formatting engine that already backs the language server.
-> All planning decisions are settled (see [§11](#11-decisions)); implementation
-> awaits the go-ahead.
+> Status: **Phase 0 done; Phases 1–5 pending.** This document specifies a
+> `nessemble format` subcommand (a prettier-style, opinionated formatter for
+> nessemble assembly) and an optional `.nessemblerc` JSON config, building on the
+> formatting engine that already backs the language server. All planning
+> decisions are settled (see [§11](#11-decisions)). **Phase 0** — the
+> `FormatOptions` seam in `nessemble-core::tooling` (`format_with`, with `format`
+> delegating to the defaults) — is implemented in this PR with no behavior change
+> (parity 122/122, LSP output unchanged).
 
 ---
 
@@ -320,10 +322,15 @@ mdBook `SUMMARY.md` gets an entry if a standalone page is warranted.
 
 ## 8. Phased plan
 
-**Phase 0 — Options seam (pure refactor, no behavior change).** Introduce
-`FormatOptions` + `format_with`; make `format` delegate with defaults whose
-output is byte-identical to today. LSP untouched; existing `tooling` tests pass
-unchanged. *Exit:* green tests, zero output diff on the corpus.
+**Phase 0 — Options seam (pure refactor, no behavior change). — ✅ done.**
+Introduced `FormatOptions` (`indent_style`, `indent_width`, `comma_spacing`) +
+`IndentStyle` + `format_with` in `nessemble-core::tooling`; `format` now delegates
+to `format_with(source, &FormatOptions::default())`, whose output is
+byte-identical to before. The LSP (the sole `format` caller) is untouched; the
+struct grows with the opinionated options in Phases 2/4 rather than shipping
+fields that do nothing now. *Verified:* existing `tooling` tests pass unchanged,
+five new `format_with` tests (custom indent width/tabs, tight commas,
+default-parity, idempotency), full workspace suite green, and parity **122/122**.
 
 **Phase 1 — `nessemble format` subcommand (defaults only).** Add
 `format.rs`, dispatch arm, usage row, file/dir discovery, `--write` / `--check`
