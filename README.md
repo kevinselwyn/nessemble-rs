@@ -41,6 +41,34 @@ Download the latest release for your platform:
 
 Or build from source (see below).
 
+### Container image (for CI and coding agents)
+
+If you're an automated agent or a CI/Docker build that only needs the
+`nessemble` executable — not this source tree — pull it from the published
+container image instead of building the workspace. The image is a single
+statically-linked `linux/amd64` binary on `scratch` (no shell, no libc), so
+`docker cp` and `COPY --from` are the ways to consume it:
+
+```dockerfile
+# In your own Dockerfile — lift the binary into any image:
+COPY --from=ghcr.io/kevinselwyn/nessemble-rs:latest /nessemble /usr/local/bin/nessemble
+```
+
+```sh
+# Or extract it to the current directory without a Dockerfile:
+docker create --name nessemble ghcr.io/kevinselwyn/nessemble-rs:latest
+docker cp nessemble:/nessemble ./nessemble
+docker rm nessemble
+
+# Or run it directly, assembling files from the working directory:
+docker run --rm -v "$PWD:/work" -w /work \
+  ghcr.io/kevinselwyn/nessemble-rs:latest project.asm --output project.nes --format nes
+```
+
+Prefer a version tag (e.g. `:2.11.0`) over `:latest` for reproducible builds.
+See [Installation → Container image](docs/src/installation.md#container-image)
+for details.
+
 ## Getting started
 
 ```bash
