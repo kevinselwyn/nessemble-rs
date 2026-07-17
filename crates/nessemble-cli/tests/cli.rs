@@ -174,6 +174,143 @@ fn a_dropped_in_locale_localizes_output_end_to_end() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[test]
+fn format_prints_to_stdout_and_leaves_file_untouched() {
+    let dir = std::env::temp_dir().join(format!("nessemble-fmt-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("messy.asm");
+    let original = "label:\n      LDA #$00\n.db 1,2,  3\n";
+    std::fs::write(&file, original).unwrap();
+
+    let out = bin()
+        .args(["format", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "label:\n    LDA #$00\n.db 1, 2, 3\n"
+    );
+    // The file itself is not modified in stdout mode.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn format_check_exits_nonzero_and_lists_unformatted() {
+    let dir = std::env::temp_dir().join(format!("nessemble-fmt-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("messy.asm");
+    std::fs::write(&file, "label:\n      LDA #$00\n").unwrap();
+
+    let out = bin()
+        .args(["format", "--check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    // Non-zero exit, the differing path on stdout, and no write.
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("{}\n", file.display())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "label:\n      LDA #$00\n"
+    );
+
+    // An already-formatted file passes the check with exit 0 and no output.
+    std::fs::write(&file, "label:\n    LDA #$00\n").unwrap();
+    let out = bin()
+        .args(["format", "--check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8(out.stdout).unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn format_write_edits_in_place_and_reports_changed_files() {
+    let dir = std::env::temp_dir().join(format!("nessemble-fmt-write-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let a = dir.join("a.asm");
+    let b = dir.join("sub/b.asm");
+    let txt = dir.join("skip.txt");
+    std::fs::write(&a, "a:\n  NOP\n").unwrap();
+    std::fs::write(&b, "b:\n   RTS\n").unwrap();
+    std::fs::write(&txt, "not asm\n").unwrap();
+
+    // A directory is walked recursively for `.asm` files only.
+    let out = bin()
+        .args(["format", "--write", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let reported = String::from_utf8(out.stdout).unwrap();
+    assert!(reported.contains(&format!("formatted {}", a.display())));
+    assert!(reported.contains(&format!("formatted {}", b.display())));
+
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "a:\n    NOP\n");
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "b:\n    RTS\n");
+    // A non-`.asm` file is left alone.
+    assert_eq!(std::fs::read_to_string(&txt).unwrap(), "not asm\n");
+
+    // Re-running is a no-op: nothing changes, nothing is reported.
+    let out = bin()
+        .args(["format", "--write", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8(out.stdout).unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn format_directory_without_write_or_check_is_a_usage_error() {
+    let dir = std::env::temp_dir().join(format!("nessemble-fmt-diruse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.asm"), "a:\n  NOP\n").unwrap();
+
+    let out = bin()
+        .args(["format", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(129));
+    assert!(String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("requires --write or --check"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn format_missing_path_reports_error() {
+    let out = bin()
+        .args(["format", "/no/such/nessemble/file.asm"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("no such file or directory"));
+}
+
+#[test]
+fn format_help_lists_options() {
+    let out = bin().args(["format", "-h"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(129));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("--write"));
+    assert!(text.contains("--check"));
+}
+
 /// Path to a corpus directory for a scripting example/error case.
 fn corpus(group: &str, name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
