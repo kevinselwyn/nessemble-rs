@@ -108,6 +108,7 @@ files; you can develop it locally and run it from Cursor without publishing.
    ```json
    {
      "name": "nessemble",
+     "publisher": "local",
      "displayName": "nessemble",
      "version": "0.0.1",
      "engines": { "vscode": "^1.75.0" },
@@ -169,6 +170,33 @@ files; you can develop it locally and run it from Cursor without publishing.
    [`vsce`](https://github.com/microsoft/vscode-vsce) (`vsce package`) and
    install the resulting `.vsix` via the Extensions view's *Install from
    VSIX…* command.
+
+#### Format on save
+
+The server advertises document formatting, so once the extension is connected you
+can have VS Code / Cursor reformat on every save. Add this to your `settings.json`
+(User or Workspace):
+
+```json
+{
+  "[nessemble]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "local.nessemble"
+  }
+}
+```
+
+- The `[nessemble]` scope targets the language id the extension registers (the
+  `contributes.languages[].id` above). If you instead associated `.asm` with VS
+  Code's built-in `asm` language, use `"[asm]"`.
+- `editor.formatOnSave` performs the on-save formatting.
+- `editor.defaultFormatter` names the provider to use — the extension identifier,
+  `<publisher>.<name>`, which is `local.nessemble` for the `package.json` above.
+  Setting it avoids the "multiple/unknown formatter" prompt; without a `publisher`
+  field there is no stable id to point at.
+
+Because the server shares its engine with the CLI, saving a file produces exactly
+the same result as running `nessemble format --write` on it.
 
 Any other client that can spawn a stdio language server for `.asm`/`.s` files
 works the same way.
