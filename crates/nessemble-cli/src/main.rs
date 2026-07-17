@@ -8,6 +8,7 @@
 
 mod config;
 mod custom;
+mod format;
 mod home;
 mod init;
 mod lsp;
@@ -68,12 +69,22 @@ fn main() -> ExitCode {
         Parsed::Exit(code) => return ExitCode::from(code),
     };
 
-    ExitCode::from(dispatch(&args))
+    ExitCode::from(dispatch(&args, &exec))
 }
 
 /// Parse `argv` in the getopt permuting style: options may appear before or
 /// after positionals. `-h`/`-v`/`-L` print immediately and stop.
 fn parse(argv: &[String], exec: &str) -> Parsed {
+    // The `format` subcommand owns its own flags (`-w`, `--check`, ...), some of
+    // which collide with assemble-mode options (`-c`). When it leads, hand it
+    // everything that follows, raw, rather than running it through this parser.
+    if argv.get(1).map(String::as_str) == Some("format") {
+        let mut args = Args::default();
+        args.positionals.push("format".to_string());
+        args.positionals.extend(argv[2..].iter().cloned());
+        return Parsed::Run(args);
+    }
+
     let mut args = Args::default();
     let mut i = 1;
     while i < argv.len() {
@@ -219,10 +230,11 @@ fn usage_error(exec: &str) -> Parsed {
 }
 
 /// Dispatch a parsed command line: a leading subcommand, or assemble mode.
-fn dispatch(args: &Args) -> u8 {
+fn dispatch(args: &Args, exec: &str) -> u8 {
     if let Some(first) = args.positionals.first() {
         match first.as_str() {
             "init" => return init::run(&args.positionals[1..]),
+            "format" => return format::run(exec, &args.positionals[1..]),
             "lsp" => return lsp::run(),
             "scripts" => return scripts::run(),
             "reference" => {

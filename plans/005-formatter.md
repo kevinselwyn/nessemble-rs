@@ -1,13 +1,15 @@
 # nessemble-rs: A Plan for a Built-in Opinionated Formatter
 
-> Status: **Phase 0 done; Phases 1–5 pending.** This document specifies a
+> Status: **Phases 0–1 done; Phases 2–5 pending.** This document specifies a
 > `nessemble format` subcommand (a prettier-style, opinionated formatter for
 > nessemble assembly) and an optional `.nessemblerc` JSON config, building on the
 > formatting engine that already backs the language server. All planning
-> decisions are settled (see [§11](#11-decisions)). **Phase 0** — the
+> decisions are settled (see [§11](#11-decisions)). **Phase 0** landed the
 > `FormatOptions` seam in `nessemble-core::tooling` (`format_with`, with `format`
-> delegating to the defaults) — is implemented in this PR with no behavior change
-> (parity 122/122, LSP output unchanged).
+> delegating to the defaults). **Phase 1** ships the `nessemble format <path>...`
+> command (stdout / `--write` / `--check`, recursive `.asm` discovery), using the
+> default options. Both are behavior-preserving for existing paths (parity
+> 122/122, LSP output unchanged); the opinionated rules arrive in Phase 2.
 
 ---
 
@@ -332,10 +334,19 @@ fields that do nothing now. *Verified:* existing `tooling` tests pass unchanged,
 five new `format_with` tests (custom indent width/tabs, tight commas,
 default-parity, idempotency), full workspace suite green, and parity **122/122**.
 
-**Phase 1 — `nessemble format` subcommand (defaults only).** Add
-`format.rs`, dispatch arm, usage row, file/dir discovery, `--write` / `--check`
-/ stdout. Uses `FormatOptions::default()` (still just the whitespace tidy). Ship
-a usable command. *Exit:* CLI integration tests for stdout/write/check/dir.
+**Phase 1 — `nessemble format` subcommand (defaults only). — ✅ done.**
+Added `crates/nessemble-cli/src/format.rs`, a `format` dispatch arm, a usage-block
+row, recursive file/dir discovery (`.asm`), and `--write` / `--check` / stdout,
+all using `FormatOptions::default()` (still just the whitespace tidy). Because
+`format`'s own flags (`-w`; `-c` collides with assemble's `--check`) would trip
+the assemble-mode option parser, the parser hands everything after a leading
+`format` to the subcommand raw. Behavior: a single file prints to stdout and is
+left untouched; `--write` rewrites changed files in place and reports each;
+`--check` lists unformatted files and exits `1`; a directory requires
+`--write`/`--check`; `--write` and `--check` are mutually exclusive. *Verified:*
+six new CLI integration tests (stdout, check exit/list, recursive write +
+non-`.asm` skip + no-op re-run, directory-needs-flag, missing path, help), full
+workspace suite green, parity **122/122**.
 
 **Phase 2 — Opinionated structural rules.** Implement Passes 1–3 and 5
 (data consolidation + stride hints, blank-after-return, blank-line collapse,
