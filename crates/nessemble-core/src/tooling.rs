@@ -332,6 +332,13 @@ pub struct FormatOptions {
     /// Put exactly one space after each operand/data comma (never one before).
     /// When `false`, commas are tight (`$01,$02`).
     pub comma_spacing: bool,
+    /// Indent directive lines (`.db`, `.dw`, `.include`, …) to the same block
+    /// depth as instructions instead of pinning them to column 0. `false` (the
+    /// default, house style) keeps directives flush-left; `true` treats a
+    /// directive as a statement inside its block, matching codebases that indent
+    /// data under labels. Labels and constant definitions stay at column 0
+    /// regardless.
+    pub indent_directives: bool,
     /// Consolidate adjacent `.db`/`.dw`/`.color` lines to this many values per
     /// line. `0` disables consolidation (data lines are left as-is).
     pub data_per_line: usize,
@@ -360,6 +367,7 @@ impl Default for FormatOptions {
             indent_style: IndentStyle::Space,
             indent_width: 4,
             comma_spacing: true,
+            indent_directives: false,
             data_per_line: 8,
             respect_stride_hints: true,
             blank_line_after_return: true,
@@ -493,7 +501,7 @@ fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str
             .to_string();
     }
 
-    let instruction_line = is_indented(source, &sig);
+    let instruction_line = is_indented(source, &sig, opts);
     let lead = if instruction_line { indent } else { "" };
 
     // Reconstruct from the first to the last significant lexeme, preserving
@@ -548,22 +556,36 @@ fn cased_lexeme(source: &str, lx: &Lexeme, opts: &FormatOptions, is_mnemonic: bo
     }
 }
 
-/// Whether a line is an indented instruction line, from its significant
-/// lexemes: labels (`name:` / `:`), constant definitions (`name = …`), and
-/// directives sit at column 0 (returns `false`); everything else (instructions)
-/// is indented (returns `true`).
-fn is_indented(source: &str, sig: &[&Lexeme]) -> bool {
+/// Whether a line is an indented statement line, from its significant lexemes:
+/// named labels (`name:`), anonymous labels (`:`), and constant definitions
+/// (`name = …`) sit at column 0 (returns `false`); instructions are indented
+/// (returns `true`). Directives follow [`FormatOptions::indent_directives`]:
+/// pinned to column 0 by default, indented like instructions when enabled.
+fn is_indented(source: &str, sig: &[&Lexeme], opts: &FormatOptions) -> bool {
     let first = sig[0];
     match first.kind {
-        LexKind::Directive => false,
+        LexKind::Directive => opts.indent_directives,
         LexKind::Ident => {
-            let is_label = sig.get(1).is_some_and(|l| is_punct(source, l, ":"));
             let is_const = sig.get(1).is_some_and(|l| is_punct(source, l, "="));
-            !(is_label || is_const)
+            !(is_named_label(source, sig) || is_const)
         }
         LexKind::Punct if is_punct(source, first, ":") => false,
         _ => true,
     }
+}
+
+/// Whether `sig` (a line's significant lexemes, whitespace already filtered out)
+/// begins a named-label definition `name:` — an identifier followed by a `:`
+/// that ends the line (a trailing comment is allowed). A `:` followed by any
+/// other token is the `:+`/`:-` operand of a branch such as `BEQ :+`, not a
+/// label, so the line is an ordinary instruction. This mirrors the assembler's
+/// own rule (`parse.rs`: a label is `TEXT COLON` only when the colon ends the
+/// line) — keeping formatter and assembler in agreement so a format pass never
+/// changes the assembled bytes.
+fn is_named_label(source: &str, sig: &[&Lexeme]) -> bool {
+    sig.first().is_some_and(|l| l.kind == LexKind::Ident)
+        && sig.get(1).is_some_and(|l| is_punct(source, l, ":"))
+        && sig.get(2).is_none_or(|l| l.kind == LexKind::Comment)
 }
 
 // ── Pass 1: data-block consolidation ─────────────────────────────────────────
@@ -627,7 +649,8 @@ fn is_commented_data_line(line: &str) -> bool {
 }
 
 /// Whether a line is a named label (`name:`) or constant definition
-/// (`name = …`), matching the group-flush rule from the reference formatter.
+/// (`name = …`), matching the group-flush rule from the reference formatter. A
+/// `:+`/`:-` operand (`BEQ :+`) is not a label — see [`is_named_label`].
 fn is_label_or_constant(line: &str) -> bool {
     let lexemes = lex(line);
     let sig: Vec<&Lexeme> = lexemes
@@ -637,8 +660,7 @@ fn is_label_or_constant(line: &str) -> bool {
     if sig.first().is_none_or(|l| l.kind != LexKind::Ident) {
         return false;
     }
-    sig.get(1)
-        .is_some_and(|l| is_punct(line, l, ":") || is_punct(line, l, "="))
+    is_named_label(line, &sig) || sig.get(1).is_some_and(|l| is_punct(line, l, "="))
 }
 
 /// Parse a `; @fmt stride=N[,N,...]` hint comment into its stride list.
@@ -946,6 +968,35 @@ mod tests {
     }
 
     #[test]
+    fn format_indents_branch_with_anonymous_label_operand() {
+        // R2 regression: a branch whose operand is an anonymous-label reference
+        // (`:+`/`:-`/`:++`) is an instruction, not an anonymous-label
+        // definition, so it indents to block depth. Misclassifying it as a
+        // label de-indented it to column 0, which the assembler then parsed
+        // differently — corrupting the assembled bytes.
+        let src = "routine:\nBEQ :+\nBNE named\nBEQ :++\n:\nSTA <$02\n";
+        assert_eq!(
+            format(src),
+            "routine:\n    BEQ :+\n    BNE named\n    BEQ :++\n:\n    STA <$02\n"
+        );
+    }
+
+    #[test]
+    fn format_keeps_bare_anonymous_and_named_labels_at_column_0() {
+        // The anonymous-label definition (bare `:`) and named labels still sit
+        // at column 0; only the `:+`/`:-` *operand* form is an instruction.
+        let src = ":\n    LDA <$01\nloop:\n    BNE :-\n";
+        assert_eq!(format(src), ":\n    LDA <$01\nloop:\n    BNE :-\n");
+    }
+
+    #[test]
+    fn format_treats_labelled_colon_with_comment_as_label() {
+        // A colon that ends the line (only a trailing comment after it) is a
+        // named-label definition and stays flush-left.
+        assert_eq!(format("done:  ; exit\n"), "done:  ; exit\n");
+    }
+
+    #[test]
     fn format_normalizes_comma_spacing() {
         assert_eq!(format(".db $01,$02 , $03\n"), ".db $01, $02, $03\n");
     }
@@ -1021,6 +1072,38 @@ mod tests {
             format_with("label:\nlda #$00\n", &opts),
             "label:\n\tlda #$00\n"
         );
+    }
+
+    #[test]
+    fn format_with_indent_directives_indents_directive_lines() {
+        // R1 (opt-in): with indentDirectives on, directives carry the block's
+        // indent like instructions; labels and constants still sit at column 0.
+        let opts = FormatOptions {
+            indent_directives: true,
+            ..FormatOptions::default()
+        };
+        let src = "tbl:\n.db $01, $02\n.dw addr\n.include \"x.asm\"\nCOUNT = 5\n";
+        assert_eq!(
+            format_with(src, &opts),
+            "tbl:\n    .db $01, $02\n    .dw addr\n    .include \"x.asm\"\nCOUNT = 5\n"
+        );
+    }
+
+    #[test]
+    fn format_default_keeps_directives_at_column_0() {
+        // R1 default (house style): directives stay flush-left.
+        assert_eq!(format("tbl:\n.db $01, $02\n"), "tbl:\n.db $01, $02\n");
+    }
+
+    #[test]
+    fn format_with_indent_directives_is_idempotent() {
+        let opts = FormatOptions {
+            indent_directives: true,
+            ..FormatOptions::default()
+        };
+        let src = "tbl:\n.db $01, $02, $03\n.dw addr\nloop:\n    BNE :-\n";
+        let once = format_with(src, &opts);
+        assert_eq!(format_with(&once, &opts), once);
     }
 
     #[test]
@@ -1263,6 +1346,38 @@ table:
         assert_eq!(original, formatted);
         // And the formatter actually changed the layout (so the test has teeth).
         assert_ne!(format(src), src);
+    }
+
+    #[test]
+    fn formatting_preserves_assembled_bytes_with_anonymous_label_branches() {
+        // R2 regression at the assembler level: a branch to an anonymous label
+        // (`BNE :-`, `BEQ :+`) must survive a format pass byte-for-byte. The old
+        // classifier de-indented these to column 0, and the assembler parsed the
+        // de-indented form differently — silently changing the ROM. A branch
+        // here starts mis-indented so the formatter must re-indent it.
+        let src = "\
+start:
+    LDX #$05
+    LDA #$00
+:
+      STA $0200
+    DEX
+        BNE :-
+    BEQ :+
+    NOP
+:
+    RTS
+";
+        let opts = crate::Options::default();
+        let original = crate::assemble(src, &opts).expect("original assembles").rom;
+        let formatted = crate::assemble(&format(src), &opts)
+            .expect("formatted assembles")
+            .rom;
+        assert_eq!(original, formatted);
+        // The formatter re-indented the mis-indented lines, so it had teeth.
+        assert_ne!(format(src), src);
+        // And the branch is indented, not pinned to column 0.
+        assert!(format(src).contains("    BNE :-"));
     }
 
     #[test]
