@@ -163,12 +163,19 @@ fn dist() -> Result<(), String> {
     copy_dir(&root.join("docs"), &build_docs)?;
     let _ = std::fs::remove_dir_all(build_docs.join("book"));
     highlight_fences(&build_docs.join("src"))?;
+    // Reshape each flat chapter `foo.md` into `foo/index.md` so mdBook renders it
+    // to `foo/index.html`, served at the extensionless URL `/docs/foo/`. mdBook
+    // computes all assets, sidebar, nav, and the search index for the new depth;
+    // `clean_doc_urls` then trims `index.html` from the generated links so they
+    // read as `/docs/foo/` too.
+    directorify_chapters(&build_docs.join("src"))?;
     // Cache-bust before mdBook copies these into the book, so every docs page
     // requests the versioned asset URLs.
     cache_bust(&build_docs.join("theme/head.hbs"))?;
     cache_bust(&build_docs.join("src/nessemble/nessemble-assembler.js"))?;
     run_tool("mdbook", &["build", &build_docs.to_string_lossy()], None)?;
     copy_dir(&build_docs.join("book"), &site.join("docs"))?;
+    clean_doc_urls(&site.join("docs"))?;
 
     // Emit `llms.txt` at the docs root, derived from the book's own `SUMMARY.md`
     // and page leads so it can't drift from the actual page set as the docs
@@ -178,6 +185,136 @@ fn dist() -> Result<(), String> {
 
     println!("Built site at {}", site.display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Extensionless URLs (/docs/foo/ instead of /docs/foo.html)
+// ---------------------------------------------------------------------------
+
+/// Reshape each flat top-level chapter `foo.md` in `src` into `foo/index.md`
+/// (the introduction `index.md` and `SUMMARY.md` stay put), so mdBook renders it
+/// to `foo/index.html` — served at the extensionless URL `/docs/foo/`. The flat
+/// `foo.md` cross-references authored in the sources are rewritten to resolve
+/// against the new one-level-deeper layout.
+fn directorify_chapters(src: &Path) -> Result<(), String> {
+    // Chapters = top-level `*.md` other than `SUMMARY.md` and the introduction.
+    let mut chapters: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_file() && path.extension().is_some_and(|e| e == "md") {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name != "SUMMARY.md" && name != "index.md" {
+                if let Some(stem) = name.strip_suffix(".md") {
+                    chapters.push(stem.to_string());
+                }
+            }
+        }
+    }
+
+    // Files that stay at the root keep their depth (`in_chapter_dir = false`).
+    for name in ["SUMMARY.md", "index.md"] {
+        let path = src.join(name);
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            std::fs::write(&path, rewrite_chapter_links(&text, false))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Move each chapter one level deeper, rewriting its links for the new depth.
+    for stem in &chapters {
+        let from = src.join(format!("{stem}.md"));
+        let text = std::fs::read_to_string(&from).map_err(|e| e.to_string())?;
+        let dir = src.join(stem);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("index.md"), rewrite_chapter_links(&text, true))
+            .map_err(|e| e.to_string())?;
+        std::fs::remove_file(&from).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Rewrite the flat `](foo.md)` chapter links in `text` for the directorified
+/// layout. `in_chapter_dir` is true for a page that itself moved into `foo/`,
+/// so its links need an extra `../`.
+fn rewrite_chapter_links(text: &str, in_chapter_dir: bool) -> String {
+    let b = text.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < text.len() {
+        if b[i] == b']' && b.get(i + 1) == Some(&b'(') {
+            if let Some(rel) = text[i + 2..].find(')') {
+                let close = i + 2 + rel;
+                out.push_str("](");
+                out.push_str(&rewrite_link_target(&text[i + 2..close], in_chapter_dir));
+                out.push(')');
+                i = close + 1;
+                continue;
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Map a single link target to the directorified layout, preserving any
+/// `#fragment`. Only flat internal `foo.md` targets are touched; external links,
+/// anchors, and already-nested paths pass through unchanged.
+fn rewrite_link_target(target: &str, in_chapter_dir: bool) -> String {
+    let (path, frag) = match target.split_once('#') {
+        Some((p, f)) => (p, Some(f)),
+        None => (target, None),
+    };
+    // Only flat internal `foo.md` targets are rewritten; skip external links
+    // (`scheme:`) and already-nested/relative paths.
+    let stem = match path.strip_suffix(".md") {
+        Some(stem) if !stem.is_empty() && !path.contains('/') && !path.contains(':') => stem,
+        _ => return target.to_string(),
+    };
+    let new_path = match (stem, in_chapter_dir) {
+        // The introduction stays at the root of the book.
+        ("index", true) => "../index.md".to_string(),
+        ("index", false) => "index.md".to_string(),
+        (stem, true) => format!("../{stem}/index.md"),
+        (stem, false) => format!("{stem}/index.md"),
+    };
+    match frag {
+        Some(f) => format!("{new_path}#{f}"),
+        None => new_path,
+    }
+}
+
+/// Trim `index.html` out of the URLs mdBook generated, so the built links read
+/// as `/docs/foo/` rather than `/docs/foo/index.html`. Applied to every `.html`
+/// page and the search index under `dir`. `print.html`/`404.html` are real files
+/// and keep their names — only `index.html` segments are removed.
+fn clean_doc_urls(dir: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            clean_doc_urls(&path)?;
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let is_html = path.extension().is_some_and(|e| e == "html");
+        if is_html || name.starts_with("searchindex.") {
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            std::fs::write(&path, strip_index_html(&text)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove `index.html` from the quoted/anchored URLs in `text`. A bare
+/// `"index.html"` (a page's link to the introduction from the book root) becomes
+/// `"./"`; every `dir/index.html` becomes `dir/`.
+fn strip_index_html(text: &str) -> String {
+    text.replace("\"index.html#", "\"#")
+        .replace("\"index.html\"", "\"./\"")
+        .replace("index.html#", "#")
+        .replace("index.html\"", "\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -287,13 +424,16 @@ fn first_md_link(line: &str) -> Option<(String, String)> {
     }
 }
 
-/// Map a book-relative `.md` path to its absolute served URL (mdBook renders
-/// `foo.md` to `foo.html`).
+/// Map a book-relative `.md` path to its absolute served URL. Pages are served
+/// at extensionless directory URLs (`foo.md` → `foo/`, see `directorify_chapters`
+/// and `clean_doc_urls`); the introduction `index.md` is the docs root itself.
 fn md_to_url(file: &str) -> String {
-    let html = file
-        .strip_suffix(".md")
-        .map_or_else(|| file.to_string(), |stem| format!("{stem}.html"));
-    format!("{DOCS_BASE_URL}{html}")
+    let stem = file.strip_suffix(".md").unwrap_or(file);
+    if stem == "index" {
+        DOCS_BASE_URL.to_string()
+    } else {
+        format!("{DOCS_BASE_URL}{stem}/")
+    }
 }
 
 /// Derive a one-line description from a page's lead paragraph: the first prose
@@ -1014,12 +1154,64 @@ mod tests {
     }
 
     #[test]
-    fn md_to_url_rewrites_extension() {
+    fn md_to_url_builds_extensionless_dir_urls() {
         assert_eq!(
             md_to_url("installation.md"),
-            format!("{DOCS_BASE_URL}installation.html")
+            format!("{DOCS_BASE_URL}installation/")
         );
-        assert_eq!(md_to_url("index.md"), format!("{DOCS_BASE_URL}index.html"));
+        // The introduction is the docs root.
+        assert_eq!(md_to_url("index.md"), DOCS_BASE_URL);
+    }
+
+    #[test]
+    fn rewrite_link_target_directorifies_flat_links() {
+        // From the root (introduction / SUMMARY): foo.md -> foo/index.md.
+        assert_eq!(rewrite_link_target("usage.md", false), "usage/index.md");
+        assert_eq!(rewrite_link_target("index.md", false), "index.md");
+        // From inside a moved chapter dir: foo.md -> ../foo/index.md.
+        assert_eq!(rewrite_link_target("usage.md", true), "../usage/index.md");
+        assert_eq!(rewrite_link_target("index.md", true), "../index.md");
+        // Fragments are preserved.
+        assert_eq!(
+            rewrite_link_target("extending.md#filesystem-access", true),
+            "../extending/index.md#filesystem-access"
+        );
+        // External links and anchors are left alone.
+        assert_eq!(
+            rewrite_link_target("https://rhai.rs", true),
+            "https://rhai.rs"
+        );
+        assert_eq!(rewrite_link_target("#section", true), "#section");
+    }
+
+    #[test]
+    fn rewrite_chapter_links_only_touches_link_targets() {
+        let text = "See [Usage](usage.md) and [Rhai](https://rhai.rs).";
+        assert_eq!(
+            rewrite_chapter_links(text, true),
+            "See [Usage](../usage/index.md) and [Rhai](https://rhai.rs)."
+        );
+    }
+
+    #[test]
+    fn strip_index_html_cleans_urls() {
+        assert_eq!(
+            strip_index_html(r#"<a href="../syntax/index.html">x</a>"#),
+            r#"<a href="../syntax/">x</a>"#
+        );
+        assert_eq!(
+            strip_index_html(r#"<a href="usage/index.html#opts">x</a>"#),
+            r#"<a href="usage/#opts">x</a>"#
+        );
+        // A book-root link back to the introduction.
+        assert_eq!(
+            strip_index_html(r#"<a href="index.html">Home</a>"#),
+            r#"<a href="./">Home</a>"#
+        );
+        assert_eq!(
+            strip_index_html(r#"<a href="../index.html">Home</a>"#),
+            r#"<a href="../">Home</a>"#
+        );
     }
 
     #[test]
