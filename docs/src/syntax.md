@@ -88,13 +88,15 @@ Output:
 00000006
 ```
 
-```nessemble
+Try it:
+
+<nessemble-assembler>
     LDX #$08
 loop:
     DEX
     BNE loop
     BRK
-```
+</nessemble-assembler>
 
 ### Temporary
 
@@ -136,13 +138,15 @@ Output:
 00000006
 ```
 
-```nessemble
+Try it:
+
+<nessemble-assembler>
     LDX #$08
 :
     DEX
     BNE :-
     BRK
-```
+</nessemble-assembler>
 
 ## Mnemonics
 
@@ -424,12 +428,14 @@ The checksum is `b8 1f ee 86`.
 
 > Checksums may only be performed on preceding data.
 
-```nessemble
+Try it:
+
+<nessemble-assembler>
 start:
     LDA #$01
     STA <$02
     .checksum start
-```
+</nessemble-assembler>
 
 ### .chr
 
@@ -483,6 +489,11 @@ Output:
 Read more about the NES color palette
 [here](https://en.wikipedia.org/wiki/List_of_video_game_console_palettes#NES).
 
+Try it:
+
+<nessemble-assembler>
+.color $FF0000
+</nessemble-assembler>
 
 ### .db
 
@@ -510,6 +521,12 @@ Output:
 00000000  12 34                                             |.4|
 00000002
 ```
+
+Try it:
+
+<nessemble-assembler>
+.db $12, $34
+</nessemble-assembler>
 
 A trailing comma continues the list onto the next line, so a long run of bytes
 can be wrapped across several indented lines:
@@ -569,7 +586,9 @@ Output:
 Read more about PPU pattern tables
 [here](https://wiki.nesdev.com/w/index.php/PPU_pattern_tables).
 
-```nessemble
+Try it:
+
+<nessemble-assembler>
 .defchr 333333333,
         300000003,
         300000003,
@@ -578,7 +597,7 @@ Read more about PPU pattern tables
         300000003,
         300000003,
         333333333
-```
+</nessemble-assembler>
 
 ### .dw
 
@@ -607,6 +626,11 @@ Output:
 00000004
 ```
 
+Try it:
+
+<nessemble-assembler>
+.dw $1234, $45678
+</nessemble-assembler>
 
 ### .else
 
@@ -742,6 +766,11 @@ Output:
 00000010
 ```
 
+Try it:
+
+<nessemble-assembler>
+.fill 16
+</nessemble-assembler>
 
 ### .font
 
@@ -780,6 +809,11 @@ Output:
 Read more about PPU pattern tables
 [here](https://wiki.nesdev.com/w/index.php/PPU_pattern_tables).
 
+Try it:
+
+<nessemble-assembler>
+.font 'A', 'G'
+</nessemble-assembler>
 
 ### .hibytes
 
@@ -808,6 +842,11 @@ Output:
 00000002
 ```
 
+Try it:
+
+<nessemble-assembler>
+.hibytes $1234, $5678
+</nessemble-assembler>
 
 ### .if
 
@@ -1590,6 +1629,11 @@ Output:
 00000002
 ```
 
+Try it:
+
+<nessemble-assembler>
+.lobytes $1234, $5678
+</nessemble-assembler>
 
 ### .macro
 
@@ -1749,7 +1793,9 @@ Output:
 00000003
 ```
 
-```nessemble
+Try it:
+
+<nessemble-assembler>
 .rsset $0000
 
 label_01 .rs 1
@@ -1757,7 +1803,7 @@ label_02 .rs 2
 label_03 .rs 1
 
 .db label_01, label_02, label_03
-```
+</nessemble-assembler>
 
 ### .segment
 
@@ -1871,7 +1917,9 @@ Output:
 00000008
 ```
 
-```nessemble
+Try it:
+
+<nessemble-assembler>
 .macrodef TEST_MACRO
     LDA #$00
     STA $2005
@@ -1879,8 +1927,7 @@ Output:
 .endm
 
 .macro TEST_MACRO
-
-```
+</nessemble-assembler>
 
 ### Parameters
 
