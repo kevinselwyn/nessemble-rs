@@ -4,8 +4,8 @@
 > specifies a `nessemble format` subcommand (a prettier-style, opinionated
 > formatter for nessemble assembly) and an optional `.nessemblerc` JSON config,
 > building on the formatting engine that already backs the language server.
-> Decisions in [§11](#11-decisions) reflect the choices agreed so far;
-> everything else is open for discussion before implementation begins.
+> All planning decisions are settled (see [§11](#11-decisions)); implementation
+> awaits the go-ahead.
 
 ---
 
@@ -126,8 +126,10 @@ nessemble format [options] <path>...
 **Discovery & precedence for `.nessemblerc`:** for each input file, walk up from
 its directory to the filesystem root and use the nearest `.nessemblerc` /
 `.nessemblerc.json`; stop at the first one found. `--config F` overrides
-discovery for all inputs; `--no-config` disables it. (A future `.nessembleignore`
-and `overrides` globs are noted in §5/§9 but not required for v1.)
+discovery for all inputs; `--no-config` disables it. A **`.nessembleignore`**
+file (gitignore-style globs, discovered the same way) excludes matching paths
+from directory walks; per-glob **`overrides`** in the config refine options for
+matching files (both are v1 — §5).
 
 **Exit codes** reuse the CLI's existing constants: `0` success, `1`
 (`RETURN_EPERM`) for I/O / parse errors *and* for a failed `--check`. Usage
@@ -147,6 +149,9 @@ output.
 
 ```jsonc
 {
+  // ── Discovery ─────────────────────────────────────────────
+  "extensions": [".asm"],         // file extensions formatted in directory walks
+
   // ── Layout ────────────────────────────────────────────────
   "indentStyle": "space",        // "space" | "tab"
   "indentWidth": 4,               // columns per instruction indent (space mode)
@@ -163,23 +168,37 @@ output.
   "maxConsecutiveBlankLines": 2,  // collapse longer runs down to this
 
   // ── Case & literals (default: preserve) ───────────────────
+  // Directive names (".db", ".DB") are NOT normalized — nessemble directives
+  // are case-sensitive, so touching them could change legality.
   "mnemonicCase": "preserve",     // "preserve" | "lower" | "upper"
-  "directiveCase": "preserve",    // "preserve" | "lower" | "upper"  (the ".db" name)
   "hexDigitCase": "preserve",     // "preserve" | "lower" | "upper"  ($ab vs $AB)
 
-  // ── Optional per-glob overrides (prettier-style; may be v2) ─
+  // ── Per-glob overrides (prettier-style) ───────────────────
   "overrides": [
     { "files": "src/data/**/*.asm", "options": { "dataPerLine": 16 } }
   ]
 }
 ```
 
+**`extensions`** governs which files a directory walk formats (default `.asm`);
+explicit file arguments are always formatted regardless. **`.nessembleignore`**
+(gitignore-style globs, discovered by the same parent-dir walk as
+`.nessemblerc`) excludes matching paths from directory walks. **`overrides`** is
+a prettier-style ordered list of `{ files: <glob>, options: { … } }` entries; for
+each formatted file, later matching entries layer their options on top of the
+base config. Both ship in v1.
+
+**Strict keys.** An **unknown** key in `.nessemblerc` (or inside an `overrides`
+`options` block) is a **hard error** with the offending key and file path —
+never a silent no-op. This catches typos (`dataPerline`) early; the schema can
+be relaxed later if it proves too rigid.
+
 **Mapping to the engine.** The CLI owns a `serde`-derived `RcConfig` struct that
 deserializes the JSON, then maps it onto the plain `FormatOptions` that
 `nessemble-core::tooling` understands (§7). This keeps `serde` **out of core** —
 core stays dependency-light and the config schema stays a CLI concern. Unknown
-keys are rejected with a clear error (prettier warns; we can start strict and
-relax later — see §11).
+keys are rejected with a clear error (`#[serde(deny_unknown_fields)]`), per the
+strict-keys decision above.
 
 **Defaults = house style.** `FormatOptions::default()` encodes exactly the table
 above with the shown defaults. Because the LSP calls the engine with defaults,
@@ -227,8 +246,10 @@ of more than *N* consecutive blank lines to *N* (default 2).
 
 **Pass 4 — Case & literal normalization** (default **preserve**, opt-in).
 When configured, lower/upper-case mnemonics (`Ident` lexemes that name an opcode
-per the shared `MNEMONICS` set), directive names, and/or the hex digits of
-`Number` lexemes. Never touches identifiers/labels/strings/char literals.
+per the shared `MNEMONICS` set) and/or the hex digits of `Number` lexemes. Never
+touches identifiers/labels/strings/char literals — and **never directive names**,
+which nessemble treats case-sensitively (`.db` ≠ `.DB`), so normalizing them
+could change what assembles.
 
 **Pass 5 — Final newline** (`finalNewline`). Ensure the output ends in exactly
 one `\n` (the current formatter already preserves *presence*; this makes it a
@@ -259,8 +280,7 @@ pub struct FormatOptions {
     pub blank_line_after_return: bool,
     pub max_consecutive_blank_lines: usize,
     pub mnemonic_case: Case,           // Preserve | Lower | Upper
-    pub directive_case: Case,
-    pub hex_digit_case: Case,
+    pub hex_digit_case: Case,          // directive names are never re-cased
 }
 impl Default for FormatOptions { /* = the §5 defaults */ }
 
@@ -278,10 +298,14 @@ The passes reuse the existing `lex` + per-line splitting already in `format`.
 - Argument parsing (path list, `--write`, `--check`, `--config`, `--no-config`)
   in the same hand-rolled style as `main.rs`.
 - **File discovery**: a small recursive directory walk using `std::fs` (no
-  `walkdir`/`ignore` dependency for v1), filtering by configured `extensions`.
-- **Config**: a `serde`-derived `RcConfig` (deserialized with `serde_json`),
-  discovered by walking parent directories, then mapped to
-  `FormatOptions`. `--config`/`--no-config` short-circuit discovery.
+  `walkdir`/`ignore` dependency), filtering by the configured `extensions`
+  (default `.asm`) and skipping paths matched by a discovered `.nessembleignore`.
+- **Config**: a `serde`-derived `RcConfig` (deserialized with `serde_json`,
+  `deny_unknown_fields`), discovered by walking parent directories, then mapped
+  to `FormatOptions`; `overrides` globs layer per-file options on top.
+  `--config`/`--no-config` short-circuit discovery. Glob matching for
+  `overrides`/`.nessembleignore` uses a small dependency-free matcher (or a
+  minimal `glob`-style crate if warranted).
 - **Execution**: read → `tooling::format_with` → stdout / write-if-changed /
   check-and-collect. Aggregate a non-zero exit for `--check` differences and for
   any I/O error.
@@ -312,19 +336,21 @@ final newline) behind their `FormatOptions` flags, on by default. Port thrilla's
 `format.test.ts` cases to Rust. *Exit:* rule tests + idempotency + the
 byte-preservation corpus test (§9).
 
-**Phase 3 — `.nessemblerc`.** `RcConfig` + `serde_json` parsing, parent-dir
-discovery, `--config` / `--no-config`, mapping to `FormatOptions`, clear errors
-on malformed/unknown keys. *Exit:* config-discovery and precedence tests.
+**Phase 3 — `.nessemblerc` + discovery.** `RcConfig` + `serde_json` parsing
+(`deny_unknown_fields`), parent-dir discovery, `--config` / `--no-config`,
+mapping to `FormatOptions`, the `extensions` filter, `.nessembleignore`
+exclusion, and prettier-style `overrides` globs — all v1. Clear errors on
+malformed/unknown keys. *Exit:* config-discovery, precedence, ignore, and
+override tests.
 
 **Phase 4 — Case & literal normalization (Pass 4).** `mnemonicCase` /
-`directiveCase` / `hexDigitCase`, default preserve. *Exit:* case-mapping tests;
-idempotency holds with normalization on.
+`hexDigitCase`, default preserve (directive names are never re-cased). *Exit:*
+case-mapping tests; idempotency holds with normalization on.
 
-**Phase 5 — Docs, changeset, CI.** `docs/src/usage.md` + `.nessemblerc`
+**Phase 5 — Docs, changeset, CI.** `docs/src/usage.md` + a `.nessemblerc`
 reference; note in `docs/src/editor.md` that editor formatting shares the engine;
 a `minor` **changeset** (new feature); optional `nessemble format --check` step
-in CI to keep the repo's own sample sources tidy. `overrides` globs and
-`.nessembleignore` are considered here or deferred to a follow-up.
+in CI to keep the repo's own sample sources tidy.
 
 ## 9. Testing strategy
 
@@ -343,8 +369,9 @@ in CI to keep the repo's own sample sources tidy. `overrides` globs and
   formatter's analogue of thrilla's `make verify` MD5 check.
 - **CLI integration tests** (`crates/nessemble-cli/tests/`): tempdir fixtures for
   single-file stdout, `--write` changed/unchanged, `--check` exit codes,
-  recursive directory formatting, `.nessemblerc` discovery/precedence,
-  `--config`, `--no-config`, and malformed-config errors.
+  recursive directory formatting, the `extensions` filter, `.nessembleignore`
+  exclusion, `overrides` glob layering, `.nessemblerc` discovery/precedence,
+  `--config`, `--no-config`, and malformed / unknown-key config errors.
 
 ## 10. Risks & mitigations
 
@@ -362,11 +389,11 @@ in CI to keep the repo's own sample sources tidy. `overrides` globs and
   meaning in their line structure. *Mitigation:* comments pin structure (a
   commented line never merges), `; @fmt stride=N` hints give explicit control,
   and `dataPerLine: 0` disables consolidation per project/override.
-- **Directive-name case matching.** The lossless lexer keeps the directive name
-  verbatim; the assembler's own acceptance of `.DB` vs `.db` governs what is
-  legal. *Mitigation:* match data directives case-insensitively for detection
-  but leave the emitted name to `directiveCase` (default preserve), so we never
-  change legality.
+- **Directive-name casing.** nessemble directives are **case-sensitive**
+  (`.db` ≠ `.DB`), so re-casing a directive name could change what assembles.
+  *Mitigation:* there is **no** directive-case option — directive names are
+  always emitted verbatim. (Detection of *which* directive a line is may still
+  match case-insensitively, but the emitted text is never altered.)
 - **Config foot-guns.** Malformed JSON or unknown keys. *Mitigation:* fail loudly
   with a path + reason and a non-zero exit; never silently format with a
   half-parsed config.
@@ -383,21 +410,25 @@ in CI to keep the repo's own sample sources tidy. `overrides` globs and
 3. **Rule scope** — adopt **all** of: `.db`/`.dw`/`.color` consolidation
    (+ `; @fmt stride=N` hints), blank line after `RTS`/`RTI`, collapse excess
    blank lines, and **case/literal normalization** (the last **off by default**,
-   opt-in via config).
+   opt-in via config). Case normalization covers **mnemonics and hex digits
+   only** — directive names are never re-cased, because nessemble directives are
+   case-sensitive.
 4. **One engine** — extend `nessemble-core::tooling` via a `FormatOptions` seam;
    the LSP and the CLI share it, and the defaults *are* the house style.
 5. **Core stays dependency-light** — `serde` config lives in the **CLI**, mapped
    onto a plain `FormatOptions` in core.
+6. **`overrides` + `.nessembleignore` ship in v1** — prettier-style per-glob
+   option layering and gitignore-style exclusion are part of the first release,
+   not a follow-up.
+7. **Strict config keys** — unknown `.nessemblerc` keys are a **hard error**
+   (`deny_unknown_fields`), not silently ignored.
+8. **No `--stdout` flag** — a single file already prints to stdout by default;
+   an explicit `--stdout` is unnecessary.
+9. **`extensions` config** — directory walks format `.asm` by default,
+   overridable via the `extensions` key; explicit file arguments always format.
 
-**Open (to settle during implementation):**
-
-- Whether `overrides` (per-glob options) and `.nessembleignore` land in v1
-  (Phase 5) or a follow-up.
-- Strict vs. lenient handling of **unknown** `.nessemblerc` keys (start strict?).
-- Whether to add a `--stdout` flag to force stdout for a single file even
-  alongside other flags (probably unnecessary).
-- File-extension default set (`.asm` only, or also `.s`/`.inc`), configurable via
-  an `extensions` key.
+*All planning decisions are settled; remaining choices are implementation
+details within each phase.*
 
 ---
 
