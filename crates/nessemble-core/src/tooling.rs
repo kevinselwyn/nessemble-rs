@@ -272,13 +272,14 @@ pub enum IndentStyle {
 
 /// Options controlling [`format_with`].
 ///
-/// [`FormatOptions::default`] reproduces the corpus house style used by
-/// [`format`] — a four-space instruction indent and `", "` between
-/// comma-separated operands/data values — so zero-config callers (the language
-/// server) get today's behavior unchanged. Later phases of the formatter plan
-/// (`plans/005-formatter.md`) grow this struct with the opinionated structural
-/// rules; Phase 0 introduces only the seam and the options the current pass
-/// already implements.
+/// [`FormatOptions::default`] is the opinionated house style: a four-space
+/// instruction indent, `", "` between comma-separated values, `.db`/`.dw`/
+/// `.color` data consolidated to eight values per line, a blank line after
+/// `RTS`/`RTI`, runs of blank lines collapsed to two, and a single final
+/// newline. The language server calls [`format`] (defaults), so on-format output
+/// gains these rules too — one house style everywhere (see
+/// `plans/005-formatter.md` §5/§10). Case normalization is a later phase and is
+/// not represented here yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatOptions {
     /// Indent instruction lines with spaces or a tab.
@@ -288,6 +289,19 @@ pub struct FormatOptions {
     /// Put exactly one space after each operand/data comma (never one before).
     /// When `false`, commas are tight (`$01,$02`).
     pub comma_spacing: bool,
+    /// Consolidate adjacent `.db`/`.dw`/`.color` lines to this many values per
+    /// line. `0` disables consolidation (data lines are left as-is).
+    pub data_per_line: usize,
+    /// Honor `; @fmt stride=N[,N,...]` hint comments that override
+    /// [`Self::data_per_line`] for the following data block.
+    pub respect_stride_hints: bool,
+    /// Insert one blank line after every `RTS`/`RTI` (a routine boundary).
+    pub blank_line_after_return: bool,
+    /// Collapse runs of more than this many consecutive blank lines down to it.
+    pub max_consecutive_blank_lines: usize,
+    /// Ensure the output ends in exactly one `\n` (and no trailing blank lines).
+    /// When `false`, the original trailing-newline presence is preserved.
+    pub final_newline: bool,
 }
 
 impl Default for FormatOptions {
@@ -296,6 +310,22 @@ impl Default for FormatOptions {
             indent_style: IndentStyle::Space,
             indent_width: 4,
             comma_spacing: true,
+            data_per_line: 8,
+            respect_stride_hints: true,
+            blank_line_after_return: true,
+            max_consecutive_blank_lines: 2,
+            final_newline: true,
+        }
+    }
+}
+
+impl FormatOptions {
+    /// The separator emitted between consolidated data values.
+    fn comma_sep(&self) -> &'static str {
+        if self.comma_spacing {
+            ", "
+        } else {
+            ","
         }
     }
 }
@@ -319,16 +349,18 @@ pub fn format(source: &str) -> String {
     format_with(source, &FormatOptions::default())
 }
 
-/// Reformat nessemble assembly source under `opts`: normalize leading
-/// indentation, tidy spacing around commas, and trim trailing whitespace, while
-/// **preserving comments, other internal spacing, blank lines, and identifier
-/// case**. The transform is idempotent.
+/// Reformat nessemble assembly source under `opts`. Runs an ordered pass
+/// pipeline: line normalization (indent, comma spacing, trailing-whitespace
+/// trim; comments/case preserved), then — when enabled — `.db`/`.dw`/`.color`
+/// consolidation, a blank line after `RTS`/`RTI`, blank-run collapsing, and a
+/// normalized final newline. The transform is idempotent.
 #[must_use]
 pub fn format_with(source: &str, opts: &FormatOptions) -> String {
     let lexemes = lex(source);
 
     // Split into physical lines (a `Newline` ends a line; a trailing newline
-    // yields a final empty line, preserving whether the file ends in `\n`).
+    // yields a final empty line, so the split records whether the file ends in
+    // `\n`).
     let mut lines: Vec<Vec<Lexeme>> = Vec::new();
     let mut current: Vec<Lexeme> = Vec::new();
     for lx in lexemes {
@@ -340,12 +372,41 @@ pub fn format_with(source: &str, opts: &FormatOptions) -> String {
     }
     lines.push(current);
 
+    // Pass 0 — normalize each physical line.
     let indent = opts.indent_unit();
-    let formatted: Vec<String> = lines
+    let mut content: Vec<String> = lines
         .iter()
         .map(|line| format_line(source, line, opts, &indent))
         .collect();
-    formatted.join("\n")
+
+    // The split appends a trailing empty line iff the source ended in a
+    // newline; peel it off so the passes see only real content lines, and
+    // remember it for reassembly.
+    let had_trailing_newline = source.ends_with('\n') || source.ends_with('\r');
+    if had_trailing_newline {
+        content.pop();
+    }
+
+    // Passes 1–3 — the opinionated structural rules.
+    content = consolidate_data(&content, opts);
+    content = blank_line_after_return(content, opts);
+    content = collapse_blank_lines(content, opts);
+
+    // Reassemble, applying Pass 5 (final newline) or preserving the original
+    // trailing-newline presence.
+    let body = content.join("\n");
+    if opts.final_newline {
+        let trimmed = body.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("{trimmed}\n")
+        }
+    } else if had_trailing_newline {
+        format!("{body}\n")
+    } else {
+        body
+    }
 }
 
 fn text<'a>(source: &'a str, lx: &Lexeme) -> &'a str {
@@ -434,6 +495,339 @@ fn is_indented(source: &str, sig: &[&Lexeme]) -> bool {
     }
 }
 
+// ── Pass 1: data-block consolidation ─────────────────────────────────────────
+
+/// Whether `name` is a consolidatable data directive (case-insensitively).
+fn is_data_directive(name: &str) -> bool {
+    name.eq_ignore_ascii_case("db")
+        || name.eq_ignore_ascii_case("dw")
+        || name.eq_ignore_ascii_case("color")
+}
+
+/// Parse a `.db`/`.dw`/`.color` line with **no** trailing comment into its
+/// directive name (without the dot), leading indent, and comma-separated
+/// values. Returns `None` for anything else — including a data line that
+/// carries a comment (comments pin structure, so such a line is never merged).
+fn parse_data_line(line: &str) -> Option<(String, String, Vec<String>)> {
+    let lexemes = lex(line);
+    let first = lexemes
+        .iter()
+        .find(|l| !matches!(l.kind, LexKind::Whitespace | LexKind::Newline))?;
+    if first.kind != LexKind::Directive {
+        return None;
+    }
+    let name = line[first.start..first.end].strip_prefix('.')?;
+    if !is_data_directive(name) {
+        return None;
+    }
+    if lexemes.iter().any(|l| l.kind == LexKind::Comment) {
+        return None;
+    }
+    let indent = line[..first.start].to_string();
+    let args = line[first.end..].trim();
+    let values: Vec<String> = args
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), indent, values))
+}
+
+/// Whether a line is a `.db`/`.dw`/`.color` directive carrying a trailing
+/// comment (the "pinned" data line that is emitted verbatim, never merged).
+fn is_commented_data_line(line: &str) -> bool {
+    let lexemes = lex(line);
+    let Some(first) = lexemes
+        .iter()
+        .find(|l| !matches!(l.kind, LexKind::Whitespace | LexKind::Newline))
+    else {
+        return false;
+    };
+    if first.kind != LexKind::Directive {
+        return false;
+    }
+    let Some(name) = line[first.start..first.end].strip_prefix('.') else {
+        return false;
+    };
+    is_data_directive(name) && lexemes.iter().any(|l| l.kind == LexKind::Comment)
+}
+
+/// Whether a line is a named label (`name:`) or constant definition
+/// (`name = …`), matching the group-flush rule from the reference formatter.
+fn is_label_or_constant(line: &str) -> bool {
+    let lexemes = lex(line);
+    let sig: Vec<&Lexeme> = lexemes
+        .iter()
+        .filter(|l| !matches!(l.kind, LexKind::Whitespace | LexKind::Newline))
+        .collect();
+    if sig.first().is_none_or(|l| l.kind != LexKind::Ident) {
+        return false;
+    }
+    sig.get(1)
+        .is_some_and(|l| is_punct(line, l, ":") || is_punct(line, l, "="))
+}
+
+/// Parse a `; @fmt stride=N[,N,...]` hint comment into its stride list.
+fn parse_hint(line: &str) -> Option<Vec<usize>> {
+    let rest = line.trim().strip_prefix(';')?.trim_start();
+    let rest = rest.strip_prefix("@fmt")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let rest = rest.trim_start().strip_prefix("stride=")?;
+    let spec: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .collect();
+    // After the stride spec, only whitespace or a trailing comment may follow.
+    let tail = rest[spec.len()..].trim_start();
+    if !tail.is_empty() && !tail.starts_with(';') {
+        return None;
+    }
+    let strides: Vec<usize> = spec
+        .split(',')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if strides.is_empty() {
+        None
+    } else {
+        Some(strides)
+    }
+}
+
+/// A single buffered value under an active stride hint: `(directive, indent,
+/// value)`.
+type HintValue = (String, String, String);
+
+/// Emit `values` as lines using `strides` starting at `start_idx`. A directive
+/// change forces a break (consuming a stride slot); the final stride repeats
+/// once the list is exhausted. Returns the emitted lines and the next stride
+/// index (so a later run continues the cycle).
+fn emit_hinted_run(
+    values: &[HintValue],
+    strides: &[usize],
+    start_idx: usize,
+    sep: &str,
+) -> (Vec<String>, usize) {
+    let mut out = Vec::new();
+    let mut si = start_idx;
+    let mut i = 0;
+    while i < values.len() {
+        let stride = strides[si.min(strides.len() - 1)].max(1);
+        let cur_type = &values[i].0;
+        let indent = &values[i].1;
+        let mut batch: Vec<&str> = Vec::new();
+        let mut j = i;
+        while j < values.len() && j - i < stride && &values[j].0 == cur_type {
+            batch.push(&values[j].2);
+            j += 1;
+        }
+        out.push(format!("{indent}.{cur_type} {}", batch.join(sep)));
+        si += 1;
+        i = j;
+    }
+    (out, si)
+}
+
+/// Emit an accumulated ungrouped data run as `per`-value lines.
+fn flush_group(
+    out: &mut Vec<String>,
+    group: &mut Option<(String, String, Vec<String>)>,
+    per: usize,
+    sep: &str,
+) {
+    if let Some((dir, indent, values)) = group.take() {
+        for chunk in values.chunks(per) {
+            out.push(format!("{indent}.{dir} {}", chunk.join(sep)));
+        }
+    }
+}
+
+/// Emit the buffered hint values and advance the stride index.
+fn flush_hint(
+    out: &mut Vec<String>,
+    buffer: &mut Vec<HintValue>,
+    strides: &[usize],
+    stride_idx: &mut usize,
+    sep: &str,
+) {
+    if buffer.is_empty() {
+        return;
+    }
+    let (lines, next) = emit_hinted_run(buffer, strides, *stride_idx, sep);
+    out.extend(lines);
+    *stride_idx = next;
+    buffer.clear();
+}
+
+/// Consolidate adjacent `.db`/`.dw`/`.color` lines into `data_per_line`-value
+/// lines, honoring `; @fmt stride=N` hints. Mirrors the reference (thrilla)
+/// formatter's grouping semantics: a directive-type change, a label/constant,
+/// an instruction, a blank line, or a trailing comment all flush the current
+/// group; hinted blocks buffer values and re-flow them by their strides.
+fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
+    if opts.data_per_line == 0 {
+        return lines.to_vec();
+    }
+    let per = opts.data_per_line;
+    let sep = opts.comma_sep();
+    let hints_on = opts.respect_stride_hints;
+
+    let mut out: Vec<String> = Vec::new();
+    let mut group: Option<(String, String, Vec<String>)> = None;
+    let mut hint_strides: Option<Vec<usize>> = None;
+    let mut stride_idx = 0usize;
+    let mut hint_buffer: Vec<HintValue> = Vec::new();
+    let mut consecutive_blanks = 0usize;
+
+    for line in lines {
+        if hints_on {
+            if let Some(strides) = parse_hint(line) {
+                flush_group(&mut out, &mut group, per, sep);
+                if let Some(hs) = hint_strides.clone() {
+                    flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+                }
+                hint_strides = Some(strides);
+                stride_idx = 0;
+                consecutive_blanks = 0;
+                out.push(line.clone());
+                continue;
+            }
+        }
+
+        if line.trim().is_empty() {
+            consecutive_blanks += 1;
+            if let Some(hs) = hint_strides.clone() {
+                flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+                if consecutive_blanks >= 2 {
+                    hint_strides = None;
+                    stride_idx = 0;
+                }
+            } else {
+                flush_group(&mut out, &mut group, per, sep);
+            }
+            out.push(line.clone());
+            continue;
+        }
+
+        let prev_blanks = consecutive_blanks;
+        consecutive_blanks = 0;
+
+        if let Some((dir, indent, values)) = parse_data_line(line) {
+            if hint_strides.is_some() {
+                for v in values {
+                    hint_buffer.push((dir.clone(), indent.clone(), v));
+                }
+            } else {
+                match &mut group {
+                    Some((gdir, _, gvals)) if *gdir == dir => gvals.extend(values),
+                    _ => {
+                        flush_group(&mut out, &mut group, per, sep);
+                        group = Some((dir, indent, values));
+                    }
+                }
+            }
+            continue;
+        }
+
+        // A non-mergeable line. Flush appropriately, then emit it verbatim.
+        if is_commented_data_line(line) {
+            // A pinned data line: flush but keep any active hint alive.
+            if let Some(hs) = hint_strides.clone() {
+                flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+            } else {
+                flush_group(&mut out, &mut group, per, sep);
+            }
+        } else if is_label_or_constant(line) && prev_blanks == 0 {
+            // A label/constant butting against data flushes but keeps the hint.
+            if let Some(hs) = hint_strides.clone() {
+                flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+            } else {
+                flush_group(&mut out, &mut group, per, sep);
+            }
+        } else if let Some(hs) = hint_strides.clone() {
+            flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+            hint_strides = None;
+            stride_idx = 0;
+        } else {
+            flush_group(&mut out, &mut group, per, sep);
+        }
+        out.push(line.clone());
+    }
+
+    flush_group(&mut out, &mut group, per, sep);
+    if let Some(hs) = hint_strides.clone() {
+        flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+    }
+    out
+}
+
+// ── Pass 2: blank line after RTS / RTI ───────────────────────────────────────
+
+/// Whether a line's only instruction is `RTS`/`RTI` (an optional trailing
+/// comment is allowed).
+fn is_return_line(line: &str) -> bool {
+    let lexemes = lex(line);
+    let sig: Vec<&Lexeme> = lexemes
+        .iter()
+        .filter(|l| !matches!(l.kind, LexKind::Whitespace | LexKind::Newline))
+        .collect();
+    let Some(first) = sig.first() else {
+        return false;
+    };
+    if first.kind != LexKind::Ident {
+        return false;
+    }
+    let m = &line[first.start..first.end];
+    if !(m.eq_ignore_ascii_case("rts") || m.eq_ignore_ascii_case("rti")) {
+        return false;
+    }
+    sig[1..].iter().all(|l| l.kind == LexKind::Comment)
+}
+
+/// Insert one blank line after each `RTS`/`RTI` that is followed by a
+/// non-blank line.
+fn blank_line_after_return(mut lines: Vec<String>, opts: &FormatOptions) -> Vec<String> {
+    if !opts.blank_line_after_return {
+        return lines;
+    }
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    for i in 0..lines.len() {
+        let is_return = is_return_line(&lines[i]);
+        let next_nonblank = lines.get(i + 1).is_some_and(|next| !next.trim().is_empty());
+        out.push(std::mem::take(&mut lines[i]));
+        if is_return && next_nonblank {
+            out.push(String::new());
+        }
+    }
+    out
+}
+
+// ── Pass 3: collapse blank-line runs ─────────────────────────────────────────
+
+/// Collapse runs of more than `max_consecutive_blank_lines` blank lines.
+fn collapse_blank_lines(lines: Vec<String>, opts: &FormatOptions) -> Vec<String> {
+    let max = opts.max_consecutive_blank_lines;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut blanks = 0usize;
+    for line in lines {
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks <= max {
+                out.push(line);
+            }
+        } else {
+            blanks = 0;
+            out.push(line);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,9 +904,20 @@ mod tests {
     }
 
     #[test]
-    fn format_preserves_trailing_newline_presence() {
-        assert_eq!(format("nop"), "    nop");
+    fn format_ensures_a_final_newline_by_default() {
+        // Pass 5 (finalNewline, default on) adds the missing trailing newline.
+        assert_eq!(format("nop"), "    nop\n");
         assert_eq!(format("nop\n"), "    nop\n");
+    }
+
+    #[test]
+    fn format_with_final_newline_off_preserves_presence() {
+        let opts = FormatOptions {
+            final_newline: false,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format_with("nop", &opts), "    nop");
+        assert_eq!(format_with("nop\n", &opts), "    nop\n");
     }
 
     #[test]
@@ -565,10 +970,150 @@ mod tests {
             indent_style: IndentStyle::Tab,
             indent_width: 2,
             comma_spacing: false,
+            ..FormatOptions::default()
         };
         let src = "start:\n      LDX #$08\n.db 1, 2,  3   \n; end\n";
         let once = format_with(src, &opts);
         assert_eq!(format_with(&once, &opts), once);
+    }
+
+    // ── Pass 1: data consolidation ──────────────────────────────────────────
+
+    #[test]
+    fn consolidates_adjacent_db_into_eight_per_line() {
+        let src = ".db $01, $02\n.db $03, $04\n.db $05, $06, $07, $08, $09\n";
+        assert_eq!(
+            format(src),
+            ".db $01, $02, $03, $04, $05, $06, $07, $08\n.db $09\n"
+        );
+    }
+
+    #[test]
+    fn does_not_merge_db_and_dw() {
+        assert_eq!(format(".db $01\n.dw $8000\n"), ".db $01\n.dw $8000\n");
+    }
+
+    #[test]
+    fn a_commented_data_line_is_never_merged() {
+        let src = ".db $01\n.db $02 ; note\n.db $03\n";
+        assert_eq!(format(src), ".db $01\n.db $02 ; note\n.db $03\n");
+    }
+
+    #[test]
+    fn a_label_between_data_flushes_the_group() {
+        let src = ".db $01\n.db $02\nlbl:\n.db $03\n.db $04\n";
+        assert_eq!(format(src), ".db $01, $02\nlbl:\n.db $03, $04\n");
+    }
+
+    #[test]
+    fn stride_hint_overrides_data_per_line() {
+        let src = "; @fmt stride=2\n.db $01, $02, $03, $04\n";
+        assert_eq!(format(src), "; @fmt stride=2\n.db $01, $02\n.db $03, $04\n");
+    }
+
+    #[test]
+    fn stride_hint_last_value_repeats() {
+        let src = "; @fmt stride=2,1\n.db $01, $02, $03, $04\n";
+        assert_eq!(
+            format(src),
+            "; @fmt stride=2,1\n.db $01, $02\n.db $03\n.db $04\n"
+        );
+    }
+
+    #[test]
+    fn data_per_line_zero_disables_consolidation() {
+        let opts = FormatOptions {
+            data_per_line: 0,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            format_with(".db $01\n.db $02\n", &opts),
+            ".db $01\n.db $02\n"
+        );
+    }
+
+    #[test]
+    fn consolidation_respects_tight_commas() {
+        let opts = FormatOptions {
+            comma_spacing: false,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format_with(".db $01\n.db $02\n", &opts), ".db $01,$02\n");
+    }
+
+    // ── Pass 2: blank line after RTS / RTI ──────────────────────────────────
+
+    #[test]
+    fn inserts_blank_line_after_rts() {
+        assert_eq!(
+            format("    RTS\n    LDA #$00\n"),
+            "    RTS\n\n    LDA #$00\n"
+        );
+    }
+
+    #[test]
+    fn no_double_blank_after_rts_when_one_follows() {
+        assert_eq!(
+            format("    RTS\n\n    LDA #$00\n"),
+            "    RTS\n\n    LDA #$00\n"
+        );
+    }
+
+    #[test]
+    fn inserts_blank_after_rti_too() {
+        assert!(format("    RTI\n    NOP\n").contains("RTI\n\n"));
+    }
+
+    // ── Pass 3: collapse blank-line runs ────────────────────────────────────
+
+    #[test]
+    fn collapses_more_than_two_blank_lines() {
+        assert_eq!(format("    NOP\n\n\n\n    NOP\n"), "    NOP\n\n\n    NOP\n");
+    }
+
+    #[test]
+    fn keeps_exactly_two_blank_lines() {
+        assert_eq!(format("    NOP\n\n\n    NOP\n"), "    NOP\n\n\n    NOP\n");
+    }
+
+    #[test]
+    fn structural_passes_are_idempotent() {
+        let src = "start:\n.db $01\n.db $02\n.db $03\n.db $04\n.db $05\n.db $06\n.db $07\n.db $08\n.db $09\n    RTS\n    NOP\n\n\n\n; end\n";
+        let once = format(src);
+        assert_eq!(format(&once), once);
+    }
+
+    #[test]
+    fn formatting_preserves_assembled_bytes() {
+        // The load-bearing safety property: formatting is cosmetic, so the
+        // assembled ROM of the formatted source is identical to the original's.
+        let src = "\
+start:
+    LDA #$01
+    STA $2000
+.db $01
+.db $02
+.db $03
+.db $04
+.db $05
+.db $06
+.db $07
+.db $08
+.db $09
+    RTS
+table:
+.dw $8000
+.dw $C000
+.color $0F, $00, $10, $30
+";
+        let opts = crate::Options::default();
+        let original = crate::assemble(src, &opts).expect("original assembles").rom;
+        let formatted = crate::assemble(&format(src), &opts)
+            .expect("formatted assembles")
+            .rom;
+        assert_eq!(original, formatted);
+        // And the formatter actually changed the layout (so the test has teeth).
+        assert_ne!(format(src), src);
     }
 
     #[test]

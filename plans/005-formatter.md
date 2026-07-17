@@ -1,15 +1,18 @@
 # nessemble-rs: A Plan for a Built-in Opinionated Formatter
 
-> Status: **Phases 0–1 done; Phases 2–5 pending.** This document specifies a
+> Status: **Phases 0–3 done; Phases 4–5 pending.** This document specifies a
 > `nessemble format` subcommand (a prettier-style, opinionated formatter for
 > nessemble assembly) and an optional `.nessemblerc` JSON config, building on the
 > formatting engine that already backs the language server. All planning
 > decisions are settled (see [§11](#11-decisions)). **Phase 0** landed the
-> `FormatOptions` seam in `nessemble-core::tooling` (`format_with`, with `format`
-> delegating to the defaults). **Phase 1** ships the `nessemble format <path>...`
-> command (stdout / `--write` / `--check`, recursive `.asm` discovery), using the
-> default options. Both are behavior-preserving for existing paths (parity
-> 122/122, LSP output unchanged); the opinionated rules arrive in Phase 2.
+> `FormatOptions` seam; **Phase 1** the `nessemble format <path>...` command;
+> **Phase 2** the opinionated structural rules (data consolidation + stride
+> hints, blank line after `RTS`/`RTI`, blank-run collapsing, final newline),
+> on by default; **Phase 3** the `.nessemblerc` JSON config (discovery,
+> `--config`/`--no-config`, `extensions`, `.nessembleignore`, per-glob
+> `overrides`, strict keys). Only **case normalization** (Phase 4) and **docs**
+> (Phase 5) remain. Parity stays 122/122; the byte-preservation property is now
+> a test (§9).
 
 ---
 
@@ -160,7 +163,6 @@ output.
   "indentStyle": "space",        // "space" | "tab"
   "indentWidth": 4,               // columns per instruction indent (space mode)
   "commaSpacing": true,           // ", " between operands/data values
-  "trimTrailingWhitespace": true,
   "finalNewline": true,           // ensure the file ends in exactly one "\n"
 
   // ── Data blocks (.db / .dw / .color) ──────────────────────
@@ -171,11 +173,11 @@ output.
   "blankLineAfterReturn": true,   // one blank line after RTS / RTI
   "maxConsecutiveBlankLines": 2,  // collapse longer runs down to this
 
-  // ── Case & literals (default: preserve) ───────────────────
-  // Directive names (".db", ".DB") are NOT normalized — nessemble directives
-  // are case-sensitive, so touching them could change legality.
-  "mnemonicCase": "preserve",     // "preserve" | "lower" | "upper"
-  "hexDigitCase": "preserve",     // "preserve" | "lower" | "upper"  ($ab vs $AB)
+  // ── Case & literals (Phase 4 — not yet accepted) ──────────
+  // "mnemonicCase" / "hexDigitCase" ("preserve" | "lower" | "upper") land with
+  // Phase 4; until then they are unknown keys and rejected. Directive names
+  // (".db", ".DB") are never normalized — nessemble directives are
+  // case-sensitive, so touching them could change legality.
 
   // ── Per-glob overrides (prettier-style) ───────────────────
   "overrides": [
@@ -183,6 +185,9 @@ output.
   ]
 }
 ```
+
+> **Trailing whitespace** is always trimmed (it is inherent to line
+> normalization, not a toggle), so there is no `trimTrailingWhitespace` key.
 
 **`extensions`** governs which files a directory walk formats (default `.asm`);
 explicit file arguments are always formatted regardless. **`.nessembleignore`**
@@ -348,18 +353,28 @@ six new CLI integration tests (stdout, check exit/list, recursive write +
 non-`.asm` skip + no-op re-run, directory-needs-flag, missing path, help), full
 workspace suite green, parity **122/122**.
 
-**Phase 2 — Opinionated structural rules.** Implement Passes 1–3 and 5
-(data consolidation + stride hints, blank-after-return, blank-line collapse,
-final newline) behind their `FormatOptions` flags, on by default. Port thrilla's
-`format.test.ts` cases to Rust. *Exit:* rule tests + idempotency + the
-byte-preservation corpus test (§9).
+**Phase 2 — Opinionated structural rules. — ✅ done.** Added Passes 1–3 and 5
+to `nessemble-core::tooling` behind new `FormatOptions` fields
+(`data_per_line`, `respect_stride_hints`, `blank_line_after_return`,
+`max_consecutive_blank_lines`, `final_newline`), on by default: `.db`/`.dw`/
+`.color` consolidation with `; @fmt stride=N` hints (thrilla grouping
+semantics — type-change/label/comment/blank flush), a blank line after
+`RTS`/`RTI`, blank-run collapsing, and a normalized final newline. `format`
+(the LSP entry point) now emits the full house style; its two format tests use
+inputs unaffected by the new passes, so they still pass. *Verified:* ported
+thrilla rule cases, idempotency across passes, and the **byte-preservation
+test** (assemble original vs. formatted → identical ROM), plus parity 122/122.
 
-**Phase 3 — `.nessemblerc` + discovery.** `RcConfig` + `serde_json` parsing
-(`deny_unknown_fields`), parent-dir discovery, `--config` / `--no-config`,
-mapping to `FormatOptions`, the `extensions` filter, `.nessembleignore`
-exclusion, and prettier-style `overrides` globs — all v1. Clear errors on
-malformed/unknown keys. *Exit:* config-discovery, precedence, ignore, and
-override tests.
+**Phase 3 — `.nessemblerc` + discovery. — ✅ done.** Added
+`crates/nessemble-cli/src/rc.rs`: a `serde`-derived `RcConfig`/`RcOptions`
+(camelCase, `deny_unknown_fields`) parsed with `serde_json`, mapped onto
+`FormatOptions`; parent-dir discovery of `.nessemblerc`/`.nessemblerc.json`;
+`--config` / `--no-config`; the `extensions` filter; `.nessembleignore`
+exclusion; and prettier-style `overrides` with a dependency-free `*`/`**`/`?`
+glob matcher. `serde`/`serde_json` are added as direct deps of `nessemble-cli`
+only (core stays dependency-free). *Verified:* 10 `rc` unit tests (globs,
+strict keys, mapping) + CLI integration tests (per-file `dataPerLine`,
+`--config`, `--no-config`, unknown-key error, override + ignore + extensions).
 
 **Phase 4 — Case & literal normalization (Pass 4).** `mnemonicCase` /
 `hexDigitCase`, default preserve (directive names are never re-cased). *Exit:*

@@ -27,6 +27,8 @@ nessemble-isa.workspace = true
 nessemble-i18n.workspace = true
 nessemble-script = { workspace = true, optional = true }
 nessemble-lsp = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
