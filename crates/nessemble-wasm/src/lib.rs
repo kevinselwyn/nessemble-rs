@@ -344,7 +344,10 @@ mod tests {
         // A label stays in column 0; an instruction is normalized to the default
         // indent. `format` mirrors `tooling::format`, so this just checks the
         // export is wired up.
-        assert_eq!(format("label:\nlda #$00\n"), tooling::format("label:\nlda #$00\n"));
+        assert_eq!(
+            format("label:\nlda #$00\n"),
+            tooling::format("label:\nlda #$00\n")
+        );
         assert!(format("lda #$00\n").starts_with(' '));
     }
 
