@@ -225,6 +225,13 @@ jobs:
   # uploads all artifacts, and uses the curated CHANGELOG.md section for this
   # version (written by `xtask changeset version`) as the release notes, plus
   # the static downloads/install boilerplate from .github/release-body.md.
+  #
+  # The release is created with the `nessemble-release[bot]` App token, not the
+  # default GITHUB_TOKEN: GitHub suppresses workflow-triggering events for
+  # anything the GITHUB_TOKEN does, so a release cut with it would never fire the
+  # `release: published` event the Pages pipeline listens for. The App is a
+  # distinct identity, so its release publishes normally and Pages deploys the
+  # docs for the new version. See ref/repo/release-app-setup.md.
   release:
     needs: [version, linux, windows, macos, wasm]
     if: needs.version.outputs.exists == 'false'
@@ -236,6 +243,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Mint a GitHub App token
+        # Create the release as the App (not GITHUB_TOKEN) so its
+        # `release: published` event triggers the Pages pipeline.
+        uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Assemble release notes
         env:
           VERSION: ${{ needs.version.outputs.version }}
@@ -266,6 +281,7 @@ jobs:
       - name: Create tagged release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ steps.app-token.outputs.token }}
           tag_name: v${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
           name: nessemble v${{ needs.version.outputs.version }}

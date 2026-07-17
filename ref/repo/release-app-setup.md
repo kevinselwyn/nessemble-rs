@@ -30,6 +30,13 @@ One mechanism solves two problems at once:
    other workflows, so the Publish pipeline (`release.yml`) would never fire. The
    App is a distinct identity, so its push triggers Publish normally.
 
+The same `GITHUB_TOKEN` limitation is why the Publish pipeline's `release` job
+also creates the GitHub Release with the App token: a release cut by
+`GITHUB_TOKEN` emits no workflow-triggering event, so the Pages pipeline
+(`pages.yml`, which listens for `release: published`) would never deploy. The App
+identity makes the release publish normally and Pages runs. Creating a release
+uses the App's **Contents: write** permission — no additional grant is needed.
+
 The App is granted **Contents: write** and nothing else — least privilege. It
 does not need Pull requests (the bump is a direct push, not a PR) or Workflows
 (the bump commit only touches `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and
