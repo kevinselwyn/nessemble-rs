@@ -1,5 +1,8 @@
 # Usage
 
+`nessemble` is driven from the command line. This page documents its options and
+subcommands.
+
 ```text
 Usage: nessemble [options] <infile.asm>
                  <command> [args]
