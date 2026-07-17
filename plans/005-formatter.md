@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for a Built-in Opinionated Formatter
 
-> Status: **Phases 0–3 done; Phases 4–5 pending.** This document specifies a
+> Status: **Phases 0–4 done; Phase 5 (docs) pending.** This document specifies a
 > `nessemble format` subcommand (a prettier-style, opinionated formatter for
 > nessemble assembly) and an optional `.nessemblerc` JSON config, building on the
 > formatting engine that already backs the language server. All planning
@@ -10,9 +10,10 @@
 > hints, blank line after `RTS`/`RTI`, blank-run collapsing, final newline),
 > on by default; **Phase 3** the `.nessemblerc` JSON config (discovery,
 > `--config`/`--no-config`, `extensions`, `.nessembleignore`, per-glob
-> `overrides`, strict keys). Only **case normalization** (Phase 4) and **docs**
-> (Phase 5) remain. Parity stays 122/122; the byte-preservation property is now
-> a test (§9).
+> `overrides`, strict keys); **Phase 4** opt-in case normalization
+> (`mnemonicCase`/`hexDigitCase`). Only user **docs** (Phase 5) remain. Parity
+> stays 122/122; byte preservation (including under case normalization) is
+> covered by tests (§9).
 
 ---
 
@@ -173,11 +174,11 @@ output.
   "blankLineAfterReturn": true,   // one blank line after RTS / RTI
   "maxConsecutiveBlankLines": 2,  // collapse longer runs down to this
 
-  // ── Case & literals (Phase 4 — not yet accepted) ──────────
-  // "mnemonicCase" / "hexDigitCase" ("preserve" | "lower" | "upper") land with
-  // Phase 4; until then they are unknown keys and rejected. Directive names
-  // (".db", ".DB") are never normalized — nessemble directives are
-  // case-sensitive, so touching them could change legality.
+  // ── Case & literals (default: preserve) ───────────────────
+  "mnemonicCase": "preserve",     // "preserve" | "lower" | "upper" (mnemonic only)
+  "hexDigitCase": "preserve",     // "preserve" | "lower" | "upper" ($ab vs $AB)
+  // Directive names (".db", ".DB") are never normalized — nessemble directives
+  // are case-sensitive, so touching them could change legality.
 
   // ── Per-glob overrides (prettier-style) ───────────────────
   "overrides": [
@@ -376,9 +377,17 @@ only (core stays dependency-free). *Verified:* 10 `rc` unit tests (globs,
 strict keys, mapping) + CLI integration tests (per-file `dataPerLine`,
 `--config`, `--no-config`, unknown-key error, override + ignore + extensions).
 
-**Phase 4 — Case & literal normalization (Pass 4).** `mnemonicCase` /
-`hexDigitCase`, default preserve (directive names are never re-cased). *Exit:*
-case-mapping tests; idempotency holds with normalization on.
+**Phase 4 — Case & literal normalization (Pass 4). — ✅ done.** Added a `Case`
+enum (`Preserve`/`Lower`/`Upper`) and `mnemonic_case`/`hex_digit_case` to
+`FormatOptions` (default preserve), applied in `format_line`: the mnemonic (only
+the first significant token of an *instruction* line, matched against the shared
+`MNEMONICS` set) is re-cased per `mnemonic_case`; the hex-digit letters of
+numeric literals per `hex_digit_case`. Labels, registers, identifiers, strings,
+and **directive names** are never touched. The `.nessemblerc` gains
+`mnemonicCase`/`hexDigitCase` keys. Both are byte-safe (nessemble matches
+mnemonics and hex case-insensitively), covered by a dedicated byte-preservation
+test. *Verified:* mnemonic/hex mapping tests (including the label-named-like-a-
+mnemonic and register guards), idempotency, byte preservation, parity 122/122.
 
 **Phase 5 — Docs, changeset, CI.** `docs/src/usage.md` + a `.nessemblerc`
 reference; note in `docs/src/editor.md` that editor formatting shares the engine;

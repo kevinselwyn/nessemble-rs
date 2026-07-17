@@ -270,6 +270,49 @@ pub enum IndentStyle {
     Tab,
 }
 
+/// How a token's letters are cased by the formatter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Case {
+    /// Leave the original case untouched.
+    Preserve,
+    /// Lower-case.
+    Lower,
+    /// Upper-case.
+    Upper,
+}
+
+impl Case {
+    /// Apply this casing to every ASCII letter in `s`.
+    fn apply(self, s: &str) -> String {
+        match self {
+            Case::Preserve => s.to_string(),
+            Case::Lower => s.to_ascii_lowercase(),
+            Case::Upper => s.to_ascii_uppercase(),
+        }
+    }
+
+    /// Apply this casing to only the hex-digit letters (`a`–`f`) of `s`, so a
+    /// `$AB` literal is re-cased without disturbing any prefix.
+    fn apply_hex(self, s: &str) -> String {
+        if self == Case::Preserve {
+            return s.to_string();
+        }
+        s.chars()
+            .map(|c| {
+                if matches!(c, 'a'..='f' | 'A'..='F') {
+                    match self {
+                        Case::Lower => c.to_ascii_lowercase(),
+                        Case::Upper => c.to_ascii_uppercase(),
+                        Case::Preserve => c,
+                    }
+                } else {
+                    c
+                }
+            })
+            .collect()
+    }
+}
+
 /// Options controlling [`format_with`].
 ///
 /// [`FormatOptions::default`] is the opinionated house style: a four-space
@@ -278,8 +321,8 @@ pub enum IndentStyle {
 /// `RTS`/`RTI`, runs of blank lines collapsed to two, and a single final
 /// newline. The language server calls [`format`] (defaults), so on-format output
 /// gains these rules too — one house style everywhere (see
-/// `plans/005-formatter.md` §5/§10). Case normalization is a later phase and is
-/// not represented here yet.
+/// `plans/005-formatter.md` §5/§10). Case normalization (mnemonics, hex digits)
+/// defaults to preserve, so it is opt-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatOptions {
     /// Indent instruction lines with spaces or a tab.
@@ -302,6 +345,13 @@ pub struct FormatOptions {
     /// Ensure the output ends in exactly one `\n` (and no trailing blank lines).
     /// When `false`, the original trailing-newline presence is preserved.
     pub final_newline: bool,
+    /// Case applied to instruction mnemonics (only the mnemonic token of an
+    /// instruction line; labels, constants, and registers are untouched).
+    pub mnemonic_case: Case,
+    /// Case applied to the hex-digit letters of numeric literals (`$ab` vs
+    /// `$AB`). Directive names are never re-cased (nessemble is case-sensitive
+    /// about them).
+    pub hex_digit_case: Case,
 }
 
 impl Default for FormatOptions {
@@ -315,6 +365,8 @@ impl Default for FormatOptions {
             blank_line_after_return: true,
             max_consecutive_blank_lines: 2,
             final_newline: true,
+            mnemonic_case: Case::Preserve,
+            hex_digit_case: Case::Preserve,
         }
     }
 }
@@ -441,21 +493,20 @@ fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str
             .to_string();
     }
 
-    let lead = if is_indented(source, &sig) {
-        indent
-    } else {
-        ""
-    };
+    let instruction_line = is_indented(source, &sig);
+    let lead = if instruction_line { indent } else { "" };
 
     // Reconstruct from the first to the last significant lexeme, preserving
     // internal whitespace except around commas (no space before, one after when
-    // `comma_spacing`, else tight).
+    // `comma_spacing`, else tight). Case normalization (Pass 4) is applied here:
+    // the mnemonic is the first significant token of an instruction line.
     let last_sig = line
         .iter()
         .rposition(|l| l.kind != LexKind::Whitespace)
         .unwrap();
     let body_lexemes = &line[first_sig..=last_sig];
     let mut body = String::new();
+    let mut seen_significant = false;
     for (k, lx) in body_lexemes.iter().enumerate() {
         if lx.kind == LexKind::Whitespace {
             let prev_comma = k > 0 && is_punct(source, &body_lexemes[k - 1], ",");
@@ -469,12 +520,32 @@ fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str
             if opts.comma_spacing && k != body_lexemes.len() - 1 {
                 body.push(' ');
             }
+            seen_significant = true;
         } else {
-            body.push_str(text(source, lx));
+            let is_mnemonic = instruction_line
+                && !seen_significant
+                && lx.kind == LexKind::Ident
+                && MNEMONICS.contains(&text(source, lx).to_ascii_lowercase());
+            body.push_str(&cased_lexeme(source, lx, opts, is_mnemonic));
+            seen_significant = true;
         }
     }
 
     format!("{lead}{body}").trim_end().to_string()
+}
+
+/// The text of `lx`, with Pass-4 case normalization applied: the instruction
+/// mnemonic per `mnemonic_case`, numeric-literal hex digits per `hex_digit_case`,
+/// everything else verbatim.
+fn cased_lexeme(source: &str, lx: &Lexeme, opts: &FormatOptions, is_mnemonic: bool) -> String {
+    let t = text(source, lx);
+    if is_mnemonic {
+        opts.mnemonic_case.apply(t)
+    } else if lx.kind == LexKind::Number {
+        opts.hex_digit_case.apply_hex(t)
+    } else {
+        t.to_string()
+    }
 }
 
 /// Whether a line is an indented instruction line, from its significant
@@ -1081,6 +1152,84 @@ mod tests {
         let src = "start:\n.db $01\n.db $02\n.db $03\n.db $04\n.db $05\n.db $06\n.db $07\n.db $08\n.db $09\n    RTS\n    NOP\n\n\n\n; end\n";
         let once = format(src);
         assert_eq!(format(&once), once);
+    }
+
+    // ── Pass 4: case & literal normalization ────────────────────────────────
+
+    #[test]
+    fn mnemonic_case_lowers_and_uppers_only_the_mnemonic() {
+        let lower = FormatOptions {
+            mnemonic_case: Case::Lower,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format_with("LDA #$00\n", &lower), "    lda #$00\n");
+        let upper = FormatOptions {
+            mnemonic_case: Case::Upper,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format_with("lda #$00\n", &upper), "    LDA #$00\n");
+    }
+
+    #[test]
+    fn mnemonic_case_leaves_labels_and_registers_alone() {
+        let upper = FormatOptions {
+            mnemonic_case: Case::Upper,
+            ..FormatOptions::default()
+        };
+        // A label named like a mnemonic is not an instruction — untouched.
+        assert_eq!(format_with("lda:\n", &upper), "lda:\n");
+        // The index register `x` in the operand is not the mnemonic.
+        assert_eq!(format_with("lda $10, x\n", &upper), "    LDA $10, x\n");
+    }
+
+    #[test]
+    fn hex_digit_case_normalizes_only_hex_letters() {
+        let upper = FormatOptions {
+            hex_digit_case: Case::Upper,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format_with(".db $ab, $0f\n", &upper), ".db $AB, $0F\n");
+        let lower = FormatOptions {
+            hex_digit_case: Case::Lower,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format_with(".db $AB, $0F\n", &lower), ".db $ab, $0f\n");
+    }
+
+    #[test]
+    fn case_normalization_defaults_to_preserve() {
+        assert_eq!(format("LDA #$aB\n"), "    LDA #$aB\n");
+    }
+
+    #[test]
+    fn case_normalization_is_idempotent() {
+        let opts = FormatOptions {
+            mnemonic_case: Case::Upper,
+            hex_digit_case: Case::Lower,
+            ..FormatOptions::default()
+        };
+        let once = format_with("lda #$AB\nsta $2000\n", &opts);
+        assert_eq!(format_with(&once, &opts), once);
+    }
+
+    #[test]
+    fn case_normalization_preserves_assembled_bytes() {
+        // Mnemonics assemble case-insensitively and hex is case-insensitive, so
+        // casing is cosmetic. (Instructions must be indented to parse as such.)
+        let src = "start:\n    lda #$ab\n    sta $2000\n.db $0f, $a0\n";
+        let opts = FormatOptions {
+            mnemonic_case: Case::Upper,
+            hex_digit_case: Case::Upper,
+            ..FormatOptions::default()
+        };
+        let base = crate::Options::default();
+        let original = crate::assemble(src, &base).expect("orig").rom;
+        let formatted = crate::assemble(&format_with(src, &opts), &base)
+            .expect("fmt")
+            .rom;
+        assert_eq!(original, formatted);
+        // The casing actually changed the text (so the test has teeth).
+        assert_ne!(format_with(src, &opts), format(src));
     }
 
     #[test]

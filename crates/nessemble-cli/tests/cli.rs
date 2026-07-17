@@ -347,6 +347,32 @@ fn format_applies_nessemblerc_data_per_line() {
 }
 
 #[test]
+fn format_applies_case_normalization_from_config() {
+    let dir = std::env::temp_dir().join(format!("nessemble-rc-case-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(".nessemblerc"),
+        r#"{"mnemonicCase": "upper", "hexDigitCase": "lower"}"#,
+    )
+    .unwrap();
+    let file = dir.join("d.asm");
+    std::fs::write(&file, "start:\n    lda #$AB\n").unwrap();
+
+    let out = bin()
+        .args(["format", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "start:\n    LDA #$ab\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn format_explicit_config_file() {
     let dir = std::env::temp_dir().join(format!("nessemble-rc-explicit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
