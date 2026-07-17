@@ -1,0 +1,12 @@
+# Keep the build context small and reproducible: build artifacts, VCS, and
+# generated output never belong in the image build.
+/target
+**/*.rs.bk
+.git
+.github
+.oracle
+docs/book/
+site/
+crates/nessemble-wasm/pkg/
+docs/src/nessemble/
+website/static/nessemble/
