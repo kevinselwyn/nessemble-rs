@@ -1,5 +1,5 @@
 ---
-nessemble: minor
+nessemble: patch
 ---
 Fix `nessemble format` corrupting assembled output on anonymous-label branches:
 a branch whose operand references an anonymous label (`BEQ :+`, `BNE :-`) was
