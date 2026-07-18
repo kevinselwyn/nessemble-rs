@@ -24,7 +24,6 @@ Commands:
   init [<arg> ...]                 initialize new project
   scripts                          install scripts
   reference [<category>] [<term>]  get reference info about assembly terms
-  config [<key>] [<val>]           list/get/set config info
   lsp                              run the language server (stdio)
   format [<opt> ...] <path> ...    format assembly source
 ```
@@ -112,12 +111,6 @@ Prints reference information from locally bundled data. With no arguments it
 lists the categories (`instructions`, `directives`); with a category it lists
 its entries; with a term it prints the details (e.g. `reference instructions
 LDA`).
-
-### config [&lt;key&gt;] [&lt;val&gt;]
-
-Gets or sets configuration stored in `~/.nessemble/config`. With no arguments it
-lists all keys; with a `<key>` it prints that value; with a `<key>` and `<val>`
-it sets the key.
 
 ### format [&lt;opt&gt; ...] &lt;path&gt; ...
 

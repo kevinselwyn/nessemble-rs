@@ -1,12 +1,11 @@
 //! `nessemble` command-line interface.
 //!
 //! Phase 6 completes the in-scope CLI: the assemble/check/coverage flags plus
-//! the `init`, `config`, `reference`, and `scripts` subcommands, matching the
+//! the `init`, `reference`, and `scripts` subcommands, matching the
 //! reference tool's usage/version/license text and exit codes. The out-of-scope
 //! options (`-d`/`-R`/`-s`/`-r`) and commands (registry/package/user) are
 //! omitted entirely — they are not parsed and appear nowhere in help.
 
-mod config;
 mod custom;
 mod format;
 mod home;
@@ -246,31 +245,10 @@ fn dispatch(args: &Args, exec: &str) -> u8 {
                 print!("{out}");
                 return code;
             }
-            "config" => return run_config(&args.positionals[1..]),
             _ => {}
         }
     }
     assemble_mode(args)
-}
-
-/// `config` / `config <key>` / `config <key> <val>`.
-fn run_config(rest: &[String]) -> u8 {
-    let result = match rest {
-        [] => config::list(),
-        [key] => config::get(key),
-        [key, val, ..] => config::set(key, val).map(|()| None),
-    };
-    match result {
-        Ok(Some(text)) => {
-            println!("{text}");
-            RETURN_OK
-        }
-        Ok(None) => RETURN_OK,
-        Err(e) => {
-            eprintln!("nessemble: {e}");
-            RETURN_EPERM
-        }
-    }
 }
 
 /// Assemble the input (a positional file, or stdin) into the output.
