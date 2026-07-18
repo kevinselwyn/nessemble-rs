@@ -1341,149 +1341,125 @@ impl Assembler {
         }
     }
 
-    fn opcode_byte(idx: Option<&Opcode>) -> u8 {
-        match idx {
-            Some(o) => o.opcode,
-            None => 0xFF, // matches C's (unsigned int)(-1) low byte
+    /// Resolve `mnem` in `mode` to its opcode byte, recording the reference
+    /// diagnostic and returning `None` when it can't be emitted: "unknown
+    /// opcode" if the mnemonic exists in no mode, or "invalid addressing mode"
+    /// if it exists but not in this one. Callers emit nothing on `None`.
+    fn resolve_opcode(&mut self, mnem: &str, mode: AddressingMode) -> Option<u8> {
+        if let Some(op) = self.get_opcode(mnem, mode) {
+            Some(op.opcode)
+        } else {
+            // Records "invalid addressing mode" (mnemonic exists elsewhere) or
+            // "unknown opcode" (it doesn't); the bool is unused here.
+            self.mnemonic_exists(mnem);
+            None
         }
+    }
+
+    /// Validate an `X`/`Y` index register and select the matching addressing
+    /// mode. Records an unknown-register error and returns `None` when `reg` is
+    /// neither `X` nor `Y`.
+    fn indexed_mode(
+        &mut self,
+        reg: char,
+        x: AddressingMode,
+        y: AddressingMode,
+    ) -> Option<AddressingMode> {
+        if !self.register_exists(reg, "XY") {
+            return None;
+        }
+        Some(if reg == 'X' { x } else { y })
     }
 
     fn exec_instruction(&mut self, instr: &Instruction) {
         let mnem = instr.mnemonic.clone();
         match instr.operand.clone() {
             Operand::Implied => {
-                let op = self.get_opcode(&mnem, AddressingMode::Implied);
-                if op.is_none() && !self.mnemonic_exists(&mnem) {
-                    return;
+                if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Implied) {
+                    self.write_byte(op);
                 }
-                if op.is_none() {
-                    // exists but wrong mode: error already recorded; do not emit.
-                    return;
-                }
-                self.write_byte(Self::opcode_byte(op));
             }
             Operand::Accumulator(reg) => {
-                let op = self.get_opcode(&mnem, AddressingMode::Accumulator);
                 if !self.register_exists(reg, "A") {
                     return;
                 }
-                if op.is_none() && !self.mnemonic_exists(&mnem) {
-                    return;
+                if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Accumulator) {
+                    self.write_byte(op);
                 }
-                if op.is_none() {
-                    return;
-                }
-                self.write_byte(Self::opcode_byte(op));
             }
             Operand::Immediate(e) => {
                 let value = self.eval(&e);
-                let op = self.get_opcode(&mnem, AddressingMode::Immediate);
-                if op.is_none() && !self.mnemonic_exists(&mnem) {
-                    return;
+                if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Immediate) {
+                    self.write_byte(op);
+                    self.write_byte((value & 0xFF) as u8);
                 }
-                if op.is_none() {
-                    return;
-                }
-                self.write_byte(Self::opcode_byte(op));
-                self.write_byte((value & 0xFF) as u8);
             }
             Operand::Indirect(e) => {
                 let value = self.eval(&e);
-                let op = self.get_opcode(&mnem, AddressingMode::Indirect);
-                if op.is_none() && !self.mnemonic_exists(&mnem) {
-                    return;
+                if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Indirect) {
+                    self.write_byte(op);
+                    self.write_byte((value & 0xFF) as u8);
+                    self.write_byte(((value >> 8) & 0xFF) as u8);
                 }
-                if op.is_none() {
-                    return;
-                }
-                self.write_byte(Self::opcode_byte(op));
-                self.write_byte((value & 0xFF) as u8);
-                self.write_byte(((value >> 8) & 0xFF) as u8);
             }
             Operand::IndirectIndexed(e, reg) => {
                 let value = self.eval(&e);
-                if !self.register_exists(reg, "XY") {
+                let Some(mode) =
+                    self.indexed_mode(reg, AddressingMode::IndirectX, AddressingMode::IndirectY)
+                else {
                     return;
-                }
-                let mode = if reg == 'X' {
-                    AddressingMode::IndirectX
-                } else {
-                    AddressingMode::IndirectY
                 };
-                let op = self.get_opcode(&mnem, mode);
-                if op.is_none() && !self.mnemonic_exists(&mnem) {
-                    return;
+                if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.write_byte(op);
+                    self.write_byte((value & 0xFF) as u8);
                 }
-                if op.is_none() {
-                    return;
-                }
-                self.write_byte(Self::opcode_byte(op));
-                self.write_byte((value & 0xFF) as u8);
             }
             Operand::ZeroPage(e) => {
                 let value = self.eval(&e);
+                // Mirrors the reference: zeropage emits without an existence
+                // check, falling back to the 0xFF sentinel for an unknown opcode
+                // (C's `(unsigned int)(-1)` low byte).
                 let op = self.get_opcode(&mnem, AddressingMode::ZeroPage);
-                // Mirrors reference: zeropage emits without an existence check.
-                self.write_byte(Self::opcode_byte(op));
+                self.write_byte(op.map_or(0xFF, |o| o.opcode));
                 self.write_byte((value & 0xFF) as u8);
             }
             Operand::ZeroPageIndexed(e, reg) => {
                 let value = self.eval(&e);
-                if !self.register_exists(reg, "XY") {
+                let Some(mode) =
+                    self.indexed_mode(reg, AddressingMode::ZeroPageX, AddressingMode::ZeroPageY)
+                else {
                     return;
-                }
-                let mode = if reg == 'X' {
-                    AddressingMode::ZeroPageX
-                } else {
-                    AddressingMode::ZeroPageY
                 };
-                let op = self.get_opcode(&mnem, mode);
-                if op.is_none() && !self.mnemonic_exists(&mnem) {
-                    return;
+                if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.write_byte(op);
+                    self.write_byte((value & 0xFF) as u8);
                 }
-                if op.is_none() {
-                    return;
-                }
-                self.write_byte(Self::opcode_byte(op));
-                self.write_byte((value & 0xFF) as u8);
             }
             Operand::Absolute(e) => {
                 let value = self.eval(&e);
-                let op = self.get_opcode(&mnem, AddressingMode::Absolute);
-                if op.is_none() {
-                    if self.get_opcode(&mnem, AddressingMode::Relative).is_some() {
-                        self.emit_relative(&mnem, value);
-                        return;
-                    }
-                    if !self.mnemonic_exists(&mnem) {
-                        return;
-                    }
-                    return;
+                if let Some(op) = self.get_opcode(&mnem, AddressingMode::Absolute) {
+                    self.write_byte(op.opcode);
+                    self.write_byte((value & 0xFF) as u8);
+                    self.write_byte(((value >> 8) & 0xFF) as u8);
+                } else if self.get_opcode(&mnem, AddressingMode::Relative).is_some() {
+                    self.emit_relative(&mnem, value);
+                } else {
+                    // Records "unknown opcode" / "invalid addressing mode".
+                    self.mnemonic_exists(&mnem);
                 }
-                self.write_byte(Self::opcode_byte(op));
-                self.write_byte((value & 0xFF) as u8);
-                self.write_byte(((value >> 8) & 0xFF) as u8);
             }
             Operand::AbsoluteIndexed(e, reg) => {
                 let value = self.eval(&e);
-                if !self.register_exists(reg, "XY") {
+                let Some(mode) =
+                    self.indexed_mode(reg, AddressingMode::AbsoluteX, AddressingMode::AbsoluteY)
+                else {
                     return;
-                }
-                let mode = if reg == 'X' {
-                    AddressingMode::AbsoluteX
-                } else {
-                    AddressingMode::AbsoluteY
                 };
-                let op = self.get_opcode(&mnem, mode);
-                if op.is_none() && !self.mnemonic_exists(&mnem) {
-                    return;
+                if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.write_byte(op);
+                    self.write_byte((value & 0xFF) as u8);
+                    self.write_byte(((value >> 8) & 0xFF) as u8);
                 }
-                if op.is_none() {
-                    return;
-                }
-                self.write_byte(Self::opcode_byte(op));
-                self.write_byte((value & 0xFF) as u8);
-                self.write_byte(((value >> 8) & 0xFF) as u8);
             }
         }
     }
@@ -1504,7 +1480,9 @@ impl Assembler {
             }
         }
         address &= 0xFF;
-        self.write_byte(Self::opcode_byte(op));
+        // `op` is `Some` here (the caller checked Relative exists); the sentinel
+        // preserves the reference's behavior defensively.
+        self.write_byte(op.map_or(0xFF, |o| o.opcode));
         self.write_byte((address & 0xFF) as u8);
     }
 
