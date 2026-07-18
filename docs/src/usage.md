@@ -162,6 +162,7 @@ below, so a project with no `.nessemblerc` still gets fully-formatted output.
   "commaSpacing": true,
   "finalNewline": true,
   "indentDirectives": false,
+  "alignContinuations": true,
   "dataPerLine": 8,
   "respectStrideHints": true,
   "blankLineAfterReturn": true,
@@ -180,6 +181,7 @@ below, so a project with no `.nessemblerc` still gets fully-formatted output.
 | `commaSpacing` | `true` | `", "` between values; `false` for tight commas. |
 | `finalNewline` | `true` | Ensure the file ends in exactly one newline. |
 | `indentDirectives` | `false` | Indent directive lines (`.db`, `.dw`, `.include`, …) to block depth like instructions. `false` pins them to column 0 (house style); `true` suits codebases that indent data under labels. Labels and constants stay at column 0 either way. |
+| `alignContinuations` | `true` | Align the continuation lines of a multi-line statement (operands wrapped onto the next line by a trailing comma) under the opening line's first argument. `false` indents them to the block indent (`indentWidth`). See below. |
 | `dataPerLine` | `8` | Values per consolidated `.db`/`.dw`/`.color` line; `0` disables consolidation. |
 | `respectStrideHints` | `true` | Honor `; @fmt stride=N[,N,...]` comments (see below). |
 | `blankLineAfterReturn` | `true` | Insert one blank line after every `RTS`/`RTI`. |
@@ -201,6 +203,33 @@ immediately before it. Multiple strides cycle in order and the last one repeats:
     .db $01, $02
     .db $03, $04
 ```
+
+### Continuation alignment
+
+When a statement's operand list wraps onto further lines (a trailing comma
+continues it onto the next physical line), `alignContinuations` (on by default)
+lines up each continuation under the opening line's first argument:
+
+```asm
+    .metasprite $FA, $02, $00, $FA,
+                $FA, $03, $00, $02,
+                $02, $0D, $00, $FA
+```
+
+With `alignContinuations: false`, continuation lines fall to the block indent
+instead:
+
+```asm
+    .metasprite $FA, $02, $00, $FA,
+    $FA, $03, $00, $02,
+    $02, $0D, $00, $FA
+```
+
+The alignment is computed from the opening line's actual indent, so it stays
+correct together with `indentDirectives`. Under `indentStyle: "tab"` the
+continuation reuses the opening line's leading tab and then pads to the
+first-argument column with spaces. Only leading whitespace changes, so the
+assembled output is unaffected.
 
 ### Overrides
 

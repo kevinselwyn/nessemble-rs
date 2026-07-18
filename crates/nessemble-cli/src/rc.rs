@@ -28,6 +28,7 @@ struct RcOptions {
     comma_spacing: Option<bool>,
     final_newline: Option<bool>,
     indent_directives: Option<bool>,
+    align_continuations: Option<bool>,
     data_per_line: Option<usize>,
     respect_stride_hints: Option<bool>,
     blank_line_after_return: Option<bool>,
@@ -73,6 +74,9 @@ impl RcOptions {
         }
         if let Some(b) = self.indent_directives {
             base.indent_directives = b;
+        }
+        if let Some(b) = self.align_continuations {
+            base.align_continuations = b;
         }
         if let Some(n) = self.data_per_line {
             base.data_per_line = n;
@@ -434,6 +438,56 @@ mod tests {
         assert_eq!(base.indent_style, IndentStyle::Tab);
         assert_eq!(base.data_per_line, 4);
         assert!(!base.blank_line_after_return);
+    }
+
+    #[test]
+    fn align_continuations_defaults_on_and_maps_onto_format_options() {
+        // Default is on; the key can turn it off.
+        let mut base = FormatOptions::default();
+        assert!(base.align_continuations);
+        let rc: RcConfig = serde_json::from_str(r#"{"alignContinuations":false}"#).unwrap();
+        rc.options.apply(&mut base).unwrap();
+        assert!(!base.align_continuations);
+    }
+
+    #[test]
+    fn align_continuations_participates_in_overrides() {
+        // Base turns it off; a per-glob override turns it back on for matching
+        // files — exercising the full `options_for` layering path.
+        let rc: RcConfig = serde_json::from_str(
+            r#"{
+                "alignContinuations": false,
+                "overrides": [
+                    { "files": "src/**/*.asm", "options": { "alignContinuations": true } }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut base = FormatOptions::default();
+        rc.options.apply(&mut base).unwrap();
+        let config = Config {
+            base,
+            extensions: vec!["asm".to_string()],
+            ignore: Vec::new(),
+            overrides: rc
+                .overrides
+                .into_iter()
+                .map(|o| (o.files, o.options))
+                .collect(),
+            root: PathBuf::from("."),
+        };
+        // A non-matching file keeps the base (off); a matching one gets the
+        // override (on).
+        assert!(
+            !config
+                .options_for(Path::new("other/x.asm"))
+                .align_continuations
+        );
+        assert!(
+            config
+                .options_for(Path::new("src/data/x.asm"))
+                .align_continuations
+        );
     }
 
     #[test]
