@@ -167,44 +167,23 @@ pub fn tokenize(source: &str) -> Vec<u32> {
     for t in toks {
         out.push(t.start);
         out.push(t.len);
-        out.push(token_class_id(t.class));
+        // The stable highlight-class wire id, defined once in core.
+        out.push(t.class.wire_id());
     }
     out
 }
 
-/// The highlight-class **id** for a class. Kept explicit (not the core enum's
-/// discriminant) so `tokenize`'s wire format is stable regardless of the enum's
-/// layout; index-aligned with [`token_classes`].
-fn token_class_id(class: TokenClass) -> u32 {
-    match class {
-        TokenClass::Directive => 0,
-        TokenClass::Instruction => 1,
-        TokenClass::Identifier => 2,
-        TokenClass::Number => 3,
-        TokenClass::String => 4,
-        TokenClass::Comment => 5,
-        TokenClass::Operator => 6,
-    }
-}
-
 /// The highlight-class **names**, indexed by the class id in [`tokenize`]'s
 /// output — the self-describing legend a JS consumer uses to turn an id into a
-/// CSS class (e.g. `na-tok-<name>`).
+/// CSS class (e.g. `na-tok-<name>`). Both the ids and the names come from the
+/// shared `TokenClass` contract in core, so this can't drift from `tokenize`.
 #[must_use]
 #[wasm_bindgen]
 pub fn token_classes() -> Vec<String> {
-    [
-        "directive",
-        "instruction",
-        "identifier",
-        "number",
-        "string",
-        "comment",
-        "operator",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect()
+    TokenClass::ALL
+        .iter()
+        .map(|c| c.wire_name().to_string())
+        .collect()
 }
 
 /// Reformat `source` with nessemble's default formatter and return the result —

@@ -196,6 +196,53 @@ pub enum TokenClass {
     Operator,
 }
 
+impl TokenClass {
+    /// Every class, in [`wire_id`](Self::wire_id) order — the legend the wasm
+    /// highlighter and the language server build their id/name tables from.
+    pub const ALL: [TokenClass; 7] = [
+        TokenClass::Directive,
+        TokenClass::Instruction,
+        TokenClass::Identifier,
+        TokenClass::Number,
+        TokenClass::String,
+        TokenClass::Comment,
+        TokenClass::Operator,
+    ];
+
+    /// This class's **wire id**: a stable integer contract (not the enum's
+    /// layout-dependent discriminant). The wasm highlighter packs it into its
+    /// `tokenize` output and indexes its `token_classes` legend by it, and the
+    /// language server orders its semantic-token legend to match. Renumbering is
+    /// a breaking change to every highlighter, so keep it fixed.
+    #[must_use]
+    pub fn wire_id(self) -> u32 {
+        match self {
+            TokenClass::Directive => 0,
+            TokenClass::Instruction => 1,
+            TokenClass::Identifier => 2,
+            TokenClass::Number => 3,
+            TokenClass::String => 4,
+            TokenClass::Comment => 5,
+            TokenClass::Operator => 6,
+        }
+    }
+
+    /// This class's stable lower-case name, index-aligned with
+    /// [`wire_id`](Self::wire_id) (e.g. mapped to a CSS class `na-tok-<name>`).
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            TokenClass::Directive => "directive",
+            TokenClass::Instruction => "instruction",
+            TokenClass::Identifier => "identifier",
+            TokenClass::Number => "number",
+            TokenClass::String => "string",
+            TokenClass::Comment => "comment",
+            TokenClass::Operator => "operator",
+        }
+    }
+}
+
 /// Classify a lexeme for highlighting. Identifiers naming a 6502 mnemonic are
 /// [`TokenClass::Instruction`]; all other identifiers are
 /// [`TokenClass::Identifier`]. Whitespace and newlines (which highlighters drop)
@@ -1635,6 +1682,18 @@ data:
                 .rom;
             assert_eq!(original, out, "align_continuations = {align}");
         }
+    }
+
+    #[test]
+    fn token_class_wire_ids_are_contiguous_and_name_aligned() {
+        // The wire ids are a cross-crate contract (wasm `tokenize`/`token_classes`
+        // and the LSP legend): contiguous 0..N in `ALL` order, with stable names.
+        for (i, class) in TokenClass::ALL.iter().enumerate() {
+            assert_eq!(class.wire_id() as usize, i);
+        }
+        assert_eq!(TokenClass::Directive.wire_name(), "directive");
+        assert_eq!(TokenClass::Instruction.wire_name(), "instruction");
+        assert_eq!(TokenClass::Operator.wire_id(), 6);
     }
 
     #[test]
