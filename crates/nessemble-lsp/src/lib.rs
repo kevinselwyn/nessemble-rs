@@ -57,15 +57,16 @@ use lsp_types::{
     TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 
-use nessemble_core::tooling::{self, LexKind, TokenClass};
+use nessemble_core::tooling::{self, LexKind};
 use nessemble_core::{
     diagnose_project_with, diagnose_source_with, lenient_custom_resolver, Diag, ListSymbol,
     Options, ProjectDiagnostics,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
-/// Semantic-token type legend. The index of each entry is the `token_type`
-/// referenced by emitted tokens (see [`token_type`]).
+/// Semantic-token type legend. Each emitted token's `token_type` is the shared
+/// `TokenClass::wire_id`, so this array is ordered by that id: index `i` is the
+/// `SemanticTokenType` for the class whose `wire_id()` is `i`.
 const TOKEN_TYPES: [SemanticTokenType; 7] = [
     SemanticTokenType::KEYWORD,  // 0: directive
     SemanticTokenType::FUNCTION, // 1: instruction mnemonic
@@ -75,13 +76,6 @@ const TOKEN_TYPES: [SemanticTokenType; 7] = [
     SemanticTokenType::COMMENT,  // 5
     SemanticTokenType::OPERATOR, // 6: punctuation/operator
 ];
-const TT_KEYWORD: u32 = 0;
-const TT_FUNCTION: u32 = 1;
-const TT_VARIABLE: u32 = 2;
-const TT_NUMBER: u32 = 3;
-const TT_STRING: u32 = 4;
-const TT_COMMENT: u32 = 5;
-const TT_OPERATOR: u32 = 6;
 
 /// A boxed, thread-safe error, matching what the stdio transport surfaces.
 type LspError = Box<dyn std::error::Error + Sync + Send>;
@@ -1016,9 +1010,11 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
                     delta_line,
                     delta_start,
                     length: len,
-                    // Classification is shared with the wasm/editor highlighter via
-                    // `tooling::classify`; the LSP keeps its own delta encoding.
-                    token_type: token_type_index(tooling::classify(kind, piece)),
+                    // Classification and its wire id are shared with the
+                    // wasm/editor highlighter (`tooling::classify` +
+                    // `TokenClass::wire_id`); the LSP keeps its own delta encoding
+                    // and maps that id through `TOKEN_TYPES`.
+                    token_type: tooling::classify(kind, piece).wire_id(),
                     token_modifiers_bitset: 0,
                 });
                 (prev_line, prev_col) = (line, col);
@@ -1027,20 +1023,6 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
         }
     }
     data
-}
-
-/// Map a shared [`TokenClass`] to this server's semantic-token type index (see
-/// [`TOKEN_TYPES`]).
-fn token_type_index(class: TokenClass) -> u32 {
-    match class {
-        TokenClass::Directive => TT_KEYWORD,
-        TokenClass::Instruction => TT_FUNCTION,
-        TokenClass::Identifier => TT_VARIABLE,
-        TokenClass::Number => TT_NUMBER,
-        TokenClass::String => TT_STRING,
-        TokenClass::Comment => TT_COMMENT,
-        TokenClass::Operator => TT_OPERATOR,
-    }
 }
 
 /// A significant lexeme paired with its source [`Range`] (line + UTF-16
@@ -1863,8 +1845,13 @@ mod tests {
             (toks[0].delta_line, toks[0].delta_start, toks[0].length),
             (0, 0, 3)
         );
-        assert_eq!(toks[0].token_type, TT_FUNCTION);
-        assert!(toks.iter().any(|t| t.token_type == TT_NUMBER));
+        assert_eq!(
+            toks[0].token_type,
+            tooling::TokenClass::Instruction.wire_id()
+        );
+        assert!(toks
+            .iter()
+            .any(|t| t.token_type == tooling::TokenClass::Number.wire_id()));
     }
 
     /// Drive the server through a full lifecycle over an in-memory connection,
