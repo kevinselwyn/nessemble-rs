@@ -1605,6 +1605,13 @@ start:
         // change the assembled bytes. Covers a custom pseudo (`.metasprite`, via
         // a resolver that emits one byte per int) and a built-in list directive
         // (`.hibytes`), with `align_continuations` both on and off.
+        fn resolver() -> crate::CustomResolver {
+            Box::new(
+                |_name: &str, ints: &[i64], _texts: &[String], _dir: &std::path::Path| {
+                    Ok(ints.iter().map(|&i| i as u8).collect())
+                },
+            )
+        }
         let src = "\
 data:
     .metasprite $FA, $02, $00, $FA,
@@ -1613,13 +1620,6 @@ data:
     .hibytes $8000, $C000,
     $1234, $ABCD
 ";
-        fn resolver() -> crate::CustomResolver {
-            Box::new(
-                |_name: &str, ints: &[i64], _texts: &[String], _dir: &std::path::Path| {
-                    Ok(ints.iter().map(|&i| i as u8).collect())
-                },
-            )
-        }
         let opts = crate::Options::default();
         let original = crate::assemble_with(src, &opts, resolver())
             .expect("original assembles")
