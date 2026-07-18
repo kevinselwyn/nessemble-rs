@@ -22,6 +22,7 @@ scripting = ["dep:nessemble-script"]
 lsp = ["dep:nessemble-lsp"]
 
 [dependencies]
+clap.workspace = true
 nessemble-core.workspace = true
 nessemble-isa.workspace = true
 nessemble-i18n.workspace = true

@@ -40,8 +40,11 @@ fn version_exits_129() {
 #[test]
 fn unknown_option_is_a_usage_error() {
     let out = bin().arg("-z").output().unwrap();
+    // The reference's usage return code (129) is preserved. clap writes parse
+    // errors to stderr (unlike the old hand-rolled parser, which printed the
+    // full usage to stdout), so the "Usage:" line now appears there.
     assert_eq!(out.status.code(), Some(129));
-    assert!(String::from_utf8(out.stdout).unwrap().contains("Usage:"));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("Usage:"));
 }
 
 #[test]

@@ -12,56 +12,44 @@
 
 use std::path::{Path, PathBuf};
 
+use clap::Args;
 use nessemble_core::tooling::{format_with, FormatOptions};
 
 use crate::rc::{Choice, Config};
 use crate::{RETURN_EPERM, RETURN_OK, RETURN_USAGE};
 
-/// Parsed `format` options.
-#[derive(Default)]
-struct Opts {
+/// Parsed `format` options. clap enforces the `--write`/`--check` and
+/// `--config`/`--no-config` mutual exclusions and the presence of at least one
+/// path; the remaining directory/multi-file rules are checked at runtime below
+/// (they depend on filesystem inspection).
+#[derive(Args)]
+pub struct FormatArgs {
+    /// rewrite files in place (required for a directory)
+    #[arg(short = 'w', long, conflicts_with = "check")]
     write: bool,
-    check: bool,
-    config: Option<String>,
-    no_config: bool,
-    paths: Vec<String>,
-}
 
-/// The outcome of parsing `format`'s own argument vector.
-enum Parsed {
-    Run(Opts),
-    /// Print usage and exit with `RETURN_USAGE` (help, or a bad flag).
-    Usage,
+    /// exit non-zero if any file is not formatted; write nothing
+    #[arg(short = 'c', long)]
+    check: bool,
+
+    /// use <file> as the .nessemblerc
+    #[arg(long, value_name = "file", conflicts_with = "no_config")]
+    config: Option<String>,
+
+    /// ignore any .nessemblerc; use built-in defaults
+    #[arg(long = "no-config")]
+    no_config: bool,
+
+    /// assembly source file or directory to format
+    #[arg(value_name = "path", required = true)]
+    paths: Vec<String>,
 }
 
 /// A file to format together with its resolved options.
 type Job = (PathBuf, FormatOptions);
 
-/// Run `format` with its raw argument vector (everything after `format`).
-pub fn run(exec: &str, args: &[String]) -> u8 {
-    let opts = match parse(args) {
-        Parsed::Run(o) => o,
-        Parsed::Usage => {
-            print!("{}", usage(exec));
-            return RETURN_USAGE;
-        }
-    };
-
-    if opts.write && opts.check {
-        eprintln!("nessemble: --write and --check are mutually exclusive");
-        print!("{}", usage(exec));
-        return RETURN_USAGE;
-    }
-    if opts.config.is_some() && opts.no_config {
-        eprintln!("nessemble: --config and --no-config are mutually exclusive");
-        print!("{}", usage(exec));
-        return RETURN_USAGE;
-    }
-    if opts.paths.is_empty() {
-        print!("{}", usage(exec));
-        return RETURN_USAGE;
-    }
-
+/// Run `format` with its parsed options.
+pub fn run(opts: &FormatArgs) -> u8 {
     let choice = if opts.no_config {
         Choice::NoConfig
     } else if let Some(path) = &opts.config {
@@ -109,17 +97,16 @@ pub fn run(exec: &str, args: &[String]) -> u8 {
     } else if opts.check {
         check_mode(&jobs)
     } else {
-        stdout_mode(exec, &jobs)
+        stdout_mode(&jobs)
     }
 }
 
 /// No `--write`/`--check`: print a single file's formatted text to stdout,
 /// leaving it untouched. More than one input is a usage error — stdout only
 /// makes sense for one file.
-fn stdout_mode(exec: &str, jobs: &[Job]) -> u8 {
+fn stdout_mode(jobs: &[Job]) -> u8 {
     if jobs.len() != 1 {
         eprintln!("nessemble: formatting multiple files requires --write or --check");
-        print!("{}", usage(exec));
         return RETURN_USAGE;
     }
     let (file, options) = &jobs[0];
@@ -203,58 +190,4 @@ fn collect_files(dir: &Path, config: &Config, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
-}
-
-/// Parse `format`'s own arguments: `-w`/`--write`, `-c`/`--check`,
-/// `--config <file>`, `--no-config`, `-h`/`--help`, `--` (end of options), and
-/// path positionals.
-fn parse(args: &[String]) -> Parsed {
-    let mut opts = Opts::default();
-    let mut rest_are_paths = false;
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if rest_are_paths {
-            opts.paths.push(arg.clone());
-            i += 1;
-            continue;
-        }
-        match arg.as_str() {
-            "--" => rest_are_paths = true,
-            "-w" | "--write" => opts.write = true,
-            "-c" | "--check" => opts.check = true,
-            "--no-config" => opts.no_config = true,
-            "--config" => {
-                i += 1;
-                match args.get(i) {
-                    Some(value) => opts.config = Some(value.clone()),
-                    None => return Parsed::Usage,
-                }
-            }
-            other if other.starts_with("--config=") => {
-                opts.config = Some(other["--config=".len()..].to_string());
-            }
-            other if other.starts_with('-') && other.len() > 1 => return Parsed::Usage,
-            _ => opts.paths.push(arg.clone()),
-        }
-        i += 1;
-    }
-    Parsed::Run(opts)
-}
-
-/// The `format` subcommand's help text.
-fn usage(exec: &str) -> String {
-    format!(
-        "Usage: {exec} format [<options>] <path> ...\n\
-         \n\
-         Format nessemble assembly source. A single file is printed to stdout;\n\
-         --write edits files in place; --check reports files needing formatting.\n\
-         \n\
-         Options:\n\
-         \x20 -w, --write         rewrite files in place (required for a directory)\n\
-         \x20 -c, --check         exit non-zero if any file is not formatted; write nothing\n\
-         \x20     --config <file> use <file> as the .nessemblerc\n\
-         \x20     --no-config     ignore any .nessemblerc; use built-in defaults\n\
-         \x20 -h, --help          print this message\n"
-    )
 }
