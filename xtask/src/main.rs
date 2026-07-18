@@ -238,24 +238,22 @@ fn directorify_chapters(src: &Path) -> Result<(), String> {
 /// layout. `in_chapter_dir` is true for a page that itself moved into `foo/`,
 /// so its links need an extra `../`.
 fn rewrite_chapter_links(text: &str, in_chapter_dir: bool) -> String {
-    let b = text.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < text.len() {
-        if b[i] == b']' && b.get(i + 1) == Some(&b'(') {
-            if let Some(rel) = text[i + 2..].find(')') {
-                let close = i + 2 + rel;
-                out.push_str("](");
-                out.push_str(&rewrite_link_target(&text[i + 2..close], in_chapter_dir));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("](") {
+        let (before, target_start) = rest.split_at(pos + 2);
+        out.push_str(before); // everything up to and including "]("
+        match target_start.find(')') {
+            Some(close) => {
+                out.push_str(&rewrite_link_target(&target_start[..close], in_chapter_dir));
                 out.push(')');
-                i = close + 1;
-                continue;
+                rest = &target_start[close + 1..];
             }
+            // No closing `)`: leave the `](` as emitted and keep scanning.
+            None => rest = target_start,
         }
-        let ch = text[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
     }
+    out.push_str(rest);
     out
 }
 
@@ -498,37 +496,30 @@ fn is_non_prose(t: &str) -> bool {
 /// Replace markdown link syntax with its visible text: `[text](url)` and
 /// `[text][ref]` both become `text`, and a bare `[text]` keeps `text`.
 fn strip_md_links(s: &str) -> String {
-    let mut out = String::new();
-    let mut i = 0;
-    while i < s.len() {
-        if s.as_bytes()[i] == b'[' {
-            if let Some(rel_close) = s[i + 1..].find(']') {
-                let close = i + 1 + rel_close;
-                let text = &s[i + 1..close];
-                let after = close + 1;
-                let rest = &s[after..];
-                if rest.starts_with('(') {
-                    if let Some(p) = rest.find(')') {
-                        out.push_str(text);
-                        i = after + p + 1;
-                        continue;
-                    }
-                } else if rest.starts_with('[') {
-                    if let Some(p) = rest.find(']') {
-                        out.push_str(text);
-                        i = after + p + 1;
-                        continue;
-                    }
-                }
-                out.push_str(text);
-                i = after;
-                continue;
-            }
-        }
-        let ch = s[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(']') else {
+            // Unmatched `[`: emit it literally and keep scanning after it.
+            out.push('[');
+            rest = after_open;
+            continue;
+        };
+        out.push_str(&after_open[..close]); // the link's visible text
+        let tail = &after_open[close + 1..];
+        rest = match tail.strip_prefix('(') {
+            // `[text](url)` — drop the `(url)`.
+            Some(inner) => inner.find(')').map_or(tail, |p| &inner[p + 1..]),
+            // `[text][ref]` — drop the `[ref]`; a bare `[text]` keeps the tail.
+            None => match tail.strip_prefix('[') {
+                Some(inner) => inner.find(']').map_or(tail, |p| &inner[p + 1..]),
+                None => tail,
+            },
+        };
     }
+    out.push_str(rest);
     out
 }
 
