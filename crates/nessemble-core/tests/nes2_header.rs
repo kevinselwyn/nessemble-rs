@@ -15,7 +15,7 @@ fn header(src: &str) -> [u8; 16] {
 fn err(src: &str) -> String {
     match assemble(src, &Options::default()) {
         Ok(_) => panic!("expected an error but assembly succeeded"),
-        Err(AssembleError::Diagnostic(d)) => d.message,
+        Err(AssembleError(d)) => d.message,
     }
 }
 

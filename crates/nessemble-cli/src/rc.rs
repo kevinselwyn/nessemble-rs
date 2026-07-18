@@ -49,6 +49,19 @@ fn parse_case(key: &str, value: &str) -> Result<Case, String> {
     }
 }
 
+/// Overlay each set (`Some`) scalar field of `$self` onto the matching field of
+/// `$base`, leaving unset (`None`) fields untouched. Only for `Copy` fields that
+/// map through verbatim; the enum-validated fields are handled explicitly.
+macro_rules! overlay {
+    ($base:expr, $self:expr, $($field:ident),+ $(,)?) => {
+        $(
+            if let Some(v) = $self.$field {
+                $base.$field = v;
+            }
+        )+
+    };
+}
+
 impl RcOptions {
     /// Overlay the set options onto `base`, validating enumerated values.
     fn apply(&self, base: &mut FormatOptions) -> Result<(), String> {
@@ -63,33 +76,19 @@ impl RcOptions {
                 }
             };
         }
-        if let Some(w) = self.indent_width {
-            base.indent_width = w;
-        }
-        if let Some(b) = self.comma_spacing {
-            base.comma_spacing = b;
-        }
-        if let Some(b) = self.final_newline {
-            base.final_newline = b;
-        }
-        if let Some(b) = self.indent_directives {
-            base.indent_directives = b;
-        }
-        if let Some(b) = self.align_continuations {
-            base.align_continuations = b;
-        }
-        if let Some(n) = self.data_per_line {
-            base.data_per_line = n;
-        }
-        if let Some(b) = self.respect_stride_hints {
-            base.respect_stride_hints = b;
-        }
-        if let Some(b) = self.blank_line_after_return {
-            base.blank_line_after_return = b;
-        }
-        if let Some(n) = self.max_consecutive_blank_lines {
-            base.max_consecutive_blank_lines = n;
-        }
+        overlay!(
+            base,
+            self,
+            indent_width,
+            comma_spacing,
+            final_newline,
+            indent_directives,
+            align_continuations,
+            data_per_line,
+            respect_stride_hints,
+            blank_line_after_return,
+            max_consecutive_blank_lines,
+        );
         if let Some(s) = &self.mnemonic_case {
             base.mnemonic_case = parse_case("mnemonicCase", s)?;
         }

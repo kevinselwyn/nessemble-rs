@@ -927,8 +927,8 @@ fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
         if hints_on {
             if let Some(strides) = parse_hint(line) {
                 flush_group(&mut out, &mut group, per, sep);
-                if let Some(hs) = hint_strides.clone() {
-                    flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+                if let Some(hs) = &hint_strides {
+                    flush_hint(&mut out, &mut hint_buffer, hs, &mut stride_idx, sep);
                 }
                 hint_strides = Some(strides);
                 stride_idx = 0;
@@ -940,14 +940,14 @@ fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
 
         if line.trim().is_empty() {
             consecutive_blanks += 1;
-            if let Some(hs) = hint_strides.clone() {
-                flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
-                if consecutive_blanks >= 2 {
-                    hint_strides = None;
-                    stride_idx = 0;
-                }
-            } else {
-                flush_group(&mut out, &mut group, per, sep);
+            match &hint_strides {
+                Some(hs) => flush_hint(&mut out, &mut hint_buffer, hs, &mut stride_idx, sep),
+                None => flush_group(&mut out, &mut group, per, sep),
+            }
+            // Two consecutive blank lines end an active stride hint.
+            if hint_strides.is_some() && consecutive_blanks >= 2 {
+                hint_strides = None;
+                stride_idx = 0;
             }
             out.push(line.clone());
             continue;
@@ -976,21 +976,19 @@ fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
         // A non-mergeable line. Flush appropriately, then emit it verbatim.
         if is_commented_data_line(line) {
             // A pinned data line: flush but keep any active hint alive.
-            if let Some(hs) = hint_strides.clone() {
-                flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
-            } else {
-                flush_group(&mut out, &mut group, per, sep);
+            match &hint_strides {
+                Some(hs) => flush_hint(&mut out, &mut hint_buffer, hs, &mut stride_idx, sep),
+                None => flush_group(&mut out, &mut group, per, sep),
             }
         } else if is_label_or_constant(line) && prev_blanks == 0 {
             // A label/constant butting against data flushes but keeps the hint.
-            if let Some(hs) = hint_strides.clone() {
-                flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
-            } else {
-                flush_group(&mut out, &mut group, per, sep);
+            match &hint_strides {
+                Some(hs) => flush_hint(&mut out, &mut hint_buffer, hs, &mut stride_idx, sep),
+                None => flush_group(&mut out, &mut group, per, sep),
             }
-        } else if let Some(hs) = hint_strides.clone() {
+        } else if let Some(hs) = hint_strides.take() {
+            // Any other line ends an active hint (consuming it clears the state).
             flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
-            hint_strides = None;
             stride_idx = 0;
         } else {
             flush_group(&mut out, &mut group, per, sep);
@@ -999,8 +997,8 @@ fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
     }
 
     flush_group(&mut out, &mut group, per, sep);
-    if let Some(hs) = hint_strides.clone() {
-        flush_hint(&mut out, &mut hint_buffer, &hs, &mut stride_idx, sep);
+    if let Some(hs) = &hint_strides {
+        flush_hint(&mut out, &mut hint_buffer, hs, &mut stride_idx, sep);
     }
     out
 }

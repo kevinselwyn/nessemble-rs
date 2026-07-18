@@ -37,7 +37,7 @@ const DOCS_BASE_URL: &str = "https://kevinselwyn.github.io/nessemble-rs/docs/";
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map_or("help", String::as_str);
-    let rest = &args[args.len().min(1)..];
+    let rest = args.get(1..).unwrap_or(&[]);
 
     let result = match cmd {
         "fetch-oracle" => fetch_oracle(rest),
