@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
 
-use crate::ast::{BinOp, CustomArg, Expr, Instruction, Line, Operand, Pseudo, Stmt};
+use crate::ast::{BinOp, CustomArg, Expr, InesField, Instruction, Line, Operand, Pseudo, Stmt};
 
 const BANK_PRG: i64 = 0x4000;
 const BANK_CHR: i64 = 0x2000;
@@ -964,89 +964,18 @@ impl Assembler {
                     self.rsset += size;
                 }
             }
-            Pseudo::InesPrg(e) => {
+            Pseudo::Ines(field, e) => {
                 self.nes = true;
-                self.ines.prg = self.eval(e);
-            }
-            Pseudo::InesChr(e) => {
-                self.nes = true;
-                self.ines.chr = self.eval(e);
-            }
-            Pseudo::InesMap(e) => {
-                self.nes = true;
-                self.ines.map = self.eval(e);
-            }
-            Pseudo::InesMir(e) => {
-                self.nes = true;
-                self.ines.mir = self.eval(e);
-            }
-            Pseudo::InesBat(e) => {
-                self.nes = true;
-                self.ines.bat = self.eval(e);
-            }
-            Pseudo::Ines4Scr(e) => {
-                self.nes = true;
-                self.ines.fsc = self.eval(e);
-            }
-            Pseudo::InesPrgRam(e) => {
-                self.nes = true;
-                self.ines.prgram = self.eval(e);
-            }
-            Pseudo::InesTv(e) => {
-                self.nes = true;
-                self.ines.tv = self.eval(e);
-            }
-            Pseudo::InesVs(e) => {
-                self.nes = true;
-                self.ines.vs = self.eval(e);
-            }
-            Pseudo::InesPc10(e) => {
-                self.nes = true;
-                self.ines.pc10 = self.eval(e);
+                let value = self.eval(e);
+                self.set_ines_field(*field, value);
             }
             Pseudo::Ines2(e) => {
                 self.nes = true;
                 self.ines.nes2 = self.eval(e) != 0;
             }
-            Pseudo::InesSubMap(e) => {
-                self.nes = true;
-                self.ines.submap = self.eval(e);
-            }
-            Pseudo::InesPrgNvRam(e) => {
-                self.nes = true;
-                self.ines.prgnvram = self.eval(e);
-            }
-            Pseudo::InesChrRam(e) => {
-                self.nes = true;
-                self.ines.chrram = self.eval(e);
-            }
-            Pseudo::InesChrNvRam(e) => {
-                self.nes = true;
-                self.ines.chrnvram = self.eval(e);
-            }
             Pseudo::InesTiming(e) => {
                 self.nes = true;
                 self.ines.timing = Some(self.eval(e));
-            }
-            Pseudo::InesConsole(e) => {
-                self.nes = true;
-                self.ines.console = self.eval(e);
-            }
-            Pseudo::InesVsPpu(e) => {
-                self.nes = true;
-                self.ines.vsppu = self.eval(e);
-            }
-            Pseudo::InesVsHw(e) => {
-                self.nes = true;
-                self.ines.vshw = self.eval(e);
-            }
-            Pseudo::InesMiscRom(e) => {
-                self.nes = true;
-                self.ines.miscrom = self.eval(e);
-            }
-            Pseudo::InesExpansion(e) => {
-                self.nes = true;
-                self.ines.expansion = self.eval(e);
             }
             Pseudo::Prg(e) => {
                 self.segment_prg = true;
@@ -1155,6 +1084,34 @@ impl Assembler {
                 self.exec_defchr(&ints);
             }
             Pseudo::Custom(name, args) => self.exec_custom(name, args),
+        }
+    }
+
+    /// Assign an evaluated numeric `.inesXxx` value to its iNES header field.
+    /// The non-numeric directives (`.ines2`, `.inestiming`) are handled inline
+    /// in [`Self::exec_pseudo`] and are not routed here.
+    fn set_ines_field(&mut self, field: InesField, value: i64) {
+        use InesField as F;
+        match field {
+            F::Prg => self.ines.prg = value,
+            F::Chr => self.ines.chr = value,
+            F::Map => self.ines.map = value,
+            F::Mir => self.ines.mir = value,
+            F::Bat => self.ines.bat = value,
+            F::FourScreen => self.ines.fsc = value,
+            F::PrgRam => self.ines.prgram = value,
+            F::Tv => self.ines.tv = value,
+            F::Vs => self.ines.vs = value,
+            F::Pc10 => self.ines.pc10 = value,
+            F::SubMap => self.ines.submap = value,
+            F::PrgNvRam => self.ines.prgnvram = value,
+            F::ChrRam => self.ines.chrram = value,
+            F::ChrNvRam => self.ines.chrnvram = value,
+            F::Console => self.ines.console = value,
+            F::VsPpu => self.ines.vsppu = value,
+            F::VsHw => self.ines.vshw = value,
+            F::MiscRom => self.ines.miscrom = value,
+            F::Expansion => self.ines.expansion = value,
         }
     }
 

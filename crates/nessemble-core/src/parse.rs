@@ -6,7 +6,7 @@
 //! Directives outside this phase parse to [`Pseudo::Unsupported`].
 
 use crate::ast::{
-    AsciiArg, BinOp, CustomArg, Expr, Instruction, Line, Operand, Pseudo, RandTerm, Stmt,
+    AsciiArg, BinOp, CustomArg, Expr, InesField, Instruction, Line, Operand, Pseudo, RandTerm, Stmt,
 };
 use crate::lexer::{Tok, Token};
 
@@ -287,6 +287,12 @@ impl Parser {
     }
 
     fn parse_pseudo(&mut self, name: &str) -> Result<Pseudo, ParseError> {
+        // The numeric `.inesXxx` directives all parse identically (one operand
+        // expression); route them through a single field lookup. `.ines2` and
+        // `.inestiming` are handled as their own arms below.
+        if let Some(field) = ines_field(name) {
+            return Ok(Pseudo::Ines(field, self.parse_expr()?));
+        }
         let p = match name {
             "org" => Pseudo::Org(self.parse_expr()?),
             "db" | "byte" => Pseudo::Db(self.parse_expr_list()?),
@@ -339,27 +345,8 @@ impl Parser {
             }
             "font" => Pseudo::Font(self.parse_expr_list()?),
             "defchr" => Pseudo::Defchr(self.parse_defchr_list()?),
-            "inesprg" => Pseudo::InesPrg(self.parse_expr()?),
-            "ineschr" => Pseudo::InesChr(self.parse_expr()?),
-            "inesmap" => Pseudo::InesMap(self.parse_expr()?),
-            "inesmir" => Pseudo::InesMir(self.parse_expr()?),
-            "inesbat" => Pseudo::InesBat(self.parse_expr()?),
-            "ines4scr" => Pseudo::Ines4Scr(self.parse_expr()?),
-            "inesprgram" => Pseudo::InesPrgRam(self.parse_expr()?),
-            "inestv" => Pseudo::InesTv(self.parse_expr()?),
-            "inesvs" => Pseudo::InesVs(self.parse_expr()?),
-            "inespc10" => Pseudo::InesPc10(self.parse_expr()?),
             "ines2" => Pseudo::Ines2(self.parse_expr()?),
-            "inessubmap" => Pseudo::InesSubMap(self.parse_expr()?),
-            "inesprgnvram" => Pseudo::InesPrgNvRam(self.parse_expr()?),
-            "ineschrram" => Pseudo::InesChrRam(self.parse_expr()?),
-            "ineschrnvram" => Pseudo::InesChrNvRam(self.parse_expr()?),
             "inestiming" => Pseudo::InesTiming(self.parse_expr()?),
-            "inesconsole" => Pseudo::InesConsole(self.parse_expr()?),
-            "inesvsppu" => Pseudo::InesVsPpu(self.parse_expr()?),
-            "inesvshw" => Pseudo::InesVsHw(self.parse_expr()?),
-            "inesmiscrom" => Pseudo::InesMiscRom(self.parse_expr()?),
-            "inesexpansion" => Pseudo::InesExpansion(self.parse_expr()?),
             "prg" => Pseudo::Prg(self.parse_expr()?),
             "chr" => Pseudo::Chr(self.parse_expr()?),
             "segment" => match self.bump() {
@@ -601,6 +588,34 @@ impl Parser {
         }
         Ok(e)
     }
+}
+
+/// Map a numeric `.inesXxx` directive name to its [`InesField`]. The two
+/// non-numeric iNES directives (`.ines2`, `.inestiming`) are not in this table —
+/// they parse to their own [`Pseudo`] variants.
+fn ines_field(name: &str) -> Option<InesField> {
+    Some(match name {
+        "inesprg" => InesField::Prg,
+        "ineschr" => InesField::Chr,
+        "inesmap" => InesField::Map,
+        "inesmir" => InesField::Mir,
+        "inesbat" => InesField::Bat,
+        "ines4scr" => InesField::FourScreen,
+        "inesprgram" => InesField::PrgRam,
+        "inestv" => InesField::Tv,
+        "inesvs" => InesField::Vs,
+        "inespc10" => InesField::Pc10,
+        "inessubmap" => InesField::SubMap,
+        "inesprgnvram" => InesField::PrgNvRam,
+        "ineschrram" => InesField::ChrRam,
+        "ineschrnvram" => InesField::ChrNvRam,
+        "inesconsole" => InesField::Console,
+        "inesvsppu" => InesField::VsPpu,
+        "inesvshw" => InesField::VsHw,
+        "inesmiscrom" => InesField::MiscRom,
+        "inesexpansion" => InesField::Expansion,
+        _ => return None,
+    })
 }
 
 fn binop(tok: &Tok) -> Option<BinOp> {
