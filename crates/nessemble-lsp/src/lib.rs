@@ -30,6 +30,7 @@
 //!   blocks and comment runs), `textDocument/rename` (a symbol across open
 //!   buffers), and `textDocument/codeAction` (numeric base conversions).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -101,6 +102,19 @@ pub struct Server {
     /// URIs we last published *non-empty* diagnostics to, so a file can be
     /// explicitly cleared when its problems are fixed or it leaves the project.
     published: HashSet<Url>,
+    /// Per-disk-file `.include` extraction, tagged with the file's `(mtime, len)`
+    /// so rebuilding the include graph re-reads only files that actually changed
+    /// (see [`Server::raw_include_targets`]). Open buffers are never cached here —
+    /// they come straight from the always-current document store.
+    include_cache: RefCell<HashMap<PathBuf, CachedIncludes>>,
+}
+
+/// The `.include`/`.inestrn` targets extracted from a disk file, tagged with the
+/// file's `(mtime, len)` signature. `None` signature means the file's metadata
+/// was unreadable (e.g. it is gone).
+struct CachedIncludes {
+    sig: Option<(std::time::SystemTime, u64)>,
+    targets: Vec<String>,
 }
 
 impl Server {
@@ -186,6 +200,37 @@ impl Server {
         out
     }
 
+    /// The raw `.include`/`.inestrn` targets of `file`. An open buffer is scanned
+    /// directly (always current); a disk file's targets are cached and reused
+    /// while its `(mtime, len)` is unchanged, so rebuilding the include graph on a
+    /// keystroke re-reads only the files that actually changed on disk.
+    fn raw_include_targets(&self, overlay: &HashMap<PathBuf, &str>, file: &Path) -> Vec<String> {
+        let np = normalize(file);
+        if let Some(text) = overlay.get(&np) {
+            return include_targets(text);
+        }
+        let sig = std::fs::metadata(&np)
+            .ok()
+            .and_then(|m| Some((m.modified().ok()?, m.len())));
+        let mut cache = self.include_cache.borrow_mut();
+        if let Some(entry) = cache.get(&np) {
+            if entry.sig == sig {
+                return entry.targets.clone();
+            }
+        }
+        let targets = std::fs::read_to_string(&np)
+            .map(|t| include_targets(&t))
+            .unwrap_or_default();
+        cache.insert(
+            np.clone(),
+            CachedIncludes {
+                sig,
+                targets: targets.clone(),
+            },
+        );
+        targets
+    }
+
     /// Compute diagnostics for the project the changed document belongs to.
     ///
     /// If the workspace's `.include` graph places the changed file inside one or
@@ -196,7 +241,7 @@ impl Server {
     /// any root is never flagged. Otherwise it falls back to single-file
     /// analysis of the changed buffer.
     fn compute_diagnostics(&self, changed: &Url) -> DiagResults {
-        let Some(text) = self.documents.get(changed).map(|d| d.text.clone()) else {
+        let Some(text) = self.documents.get(changed).map(|d| d.text.as_str()) else {
             return DiagResults::default();
         };
         let changed_path = normalize(&uri_to_path(changed));
@@ -206,26 +251,32 @@ impl Server {
         let known_custom: HashSet<String> = self.custom_scripts().into_keys().collect();
 
         if self.workspace_roots.is_empty() {
-            return single_file(changed, &text, &known_custom);
+            return single_file(changed, text, &known_custom);
         }
 
-        // An overlay + reader backed by the open buffers, falling back to disk.
-        let overlay_map: HashMap<PathBuf, String> = self
+        // An overlay + reader backed by the open buffers (borrowed, not cloned),
+        // falling back to disk; the full text is materialized only for the files
+        // actually read.
+        let overlay_map: HashMap<PathBuf, &str> = self
             .documents
             .iter()
-            .map(|(u, d)| (normalize(&uri_to_path(u)), d.text.clone()))
+            .map(|(u, d)| (normalize(&uri_to_path(u)), d.text.as_str()))
             .collect();
-        let overlay = |p: &Path| overlay_map.get(&normalize(p)).cloned();
+        let overlay = |p: &Path| overlay_map.get(&normalize(p)).map(|s| (*s).to_string());
         let read = |p: &Path| overlay(p).or_else(|| std::fs::read_to_string(p).ok());
 
-        // Discover the entry roots whose include-closure contains the file.
+        // Discover the entry roots whose include-closure contains the file. The
+        // graph reads each file's include lines through the mtime-cached
+        // extractor, so an unchanged disk file is stat'd, not re-read.
         let candidates = scan_source_files(&self.workspace_roots)
             .into_iter()
             .chain(self.documents.keys().map(uri_to_path));
-        let graph = build_include_graph(candidates, &read);
+        let graph = build_include_graph(candidates, &|file| {
+            self.raw_include_targets(&overlay_map, file)
+        });
         let roots = graph.entry_roots_for(&changed_path);
         if roots.is_empty() {
-            return single_file(changed, &text, &known_custom);
+            return single_file(changed, text, &known_custom);
         }
 
         // Assemble each entry root and normalize its file table once.
@@ -393,21 +444,23 @@ impl Server {
         }
 
         // Search the include closure of the roots that contain this file.
-        let overlay_map: HashMap<PathBuf, String> = self
+        let overlay_map: HashMap<PathBuf, &str> = self
             .documents
             .iter()
-            .map(|(u, d)| (normalize(&uri_to_path(u)), d.text.clone()))
+            .map(|(u, d)| (normalize(&uri_to_path(u)), d.text.as_str()))
             .collect();
         let read = |p: &Path| {
             overlay_map
                 .get(&normalize(p))
-                .cloned()
+                .map(|s| (*s).to_string())
                 .or_else(|| std::fs::read_to_string(p).ok())
         };
         let candidates = scan_source_files(&self.workspace_roots)
             .into_iter()
             .chain(self.documents.keys().map(uri_to_path));
-        let graph = build_include_graph(candidates, &read);
+        let graph = build_include_graph(candidates, &|file| {
+            self.raw_include_targets(&overlay_map, file)
+        });
         let here = normalize(&uri_to_path(uri));
         let mut project: HashSet<PathBuf> = HashSet::new();
         for root in graph.entry_roots_for(&here) {
@@ -831,12 +884,12 @@ impl IncludeGraph {
     }
 }
 
-/// Build the `.include` graph for `candidates`, reading each file's text through
-/// `read` (open buffer or disk) and resolving include targets file-relative,
-/// matching the assembler.
+/// Build the `.include` graph for `candidates`, taking each file's raw include
+/// targets from `raw_targets_of` (which reads open buffers or disk, with
+/// caching) and resolving them file-relative, matching the assembler.
 fn build_include_graph(
     candidates: impl IntoIterator<Item = PathBuf>,
-    read: &impl Fn(&Path) -> Option<String>,
+    raw_targets_of: &impl Fn(&Path) -> Vec<String>,
 ) -> IncludeGraph {
     let mut includes: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for file in candidates {
@@ -844,9 +897,8 @@ fn build_include_graph(
         if includes.contains_key(&norm) {
             continue;
         }
-        let text = read(&file).unwrap_or_default();
         let dir = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-        let targets = include_targets(&text)
+        let targets = raw_targets_of(&file)
             .into_iter()
             .map(|t| normalize(&dir.join(t)))
             .collect();
@@ -2321,6 +2373,49 @@ mod tests {
             diags_for(&changed, &code).unwrap().is_empty(),
             "error should clear: {changed:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn include_graph_reflects_an_external_change_to_an_include_line() {
+        // The include *structure* is cached per disk file by (mtime, len), so
+        // changing it on disk must invalidate that cache. main.asm pulls in
+        // consts.asm (which defines `palette`); after main.asm is rewritten on
+        // disk to drop that include, re-analysis must flag `palette` as undefined
+        // — proving the cached include list for main.asm was not served stale.
+        let w = workspace("inc-cache");
+        write(
+            &w,
+            "main.asm",
+            ".include \"consts.asm\"\n.include \"code.asm\"\n",
+        );
+        write(&w, "consts.asm", "palette = $3F00\n");
+        let code = w.join("code.asm");
+        write(&w, "code.asm", "  lda palette\n");
+
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &code, "  lda palette\n");
+        assert!(
+            diags_for(&pubs, &code).expect("published").is_empty(),
+            "palette should resolve via the project initially"
+        );
+
+        // Rewrite main.asm on disk so it no longer includes consts.asm. The file
+        // is shorter, so its (mtime, len) signature changes even if the clock's
+        // mtime granularity is coarse.
+        write(&w, "main.asm", ".include \"code.asm\"\n");
+        let uri = Url::from_file_path(&code).unwrap();
+        let changed = server.apply_notification(
+            DidChangeTextDocument::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri.as_str(), "version": 2 },
+                "contentChanges": [{ "text": "  lda palette\n" }]
+            }),
+        );
+        let d = diags_for(&changed, &code).expect("published");
+        assert_eq!(d.len(), 1, "palette should now be undefined: {d:?}");
+        assert!(d[0].message.contains("palette"));
 
         let _ = std::fs::remove_dir_all(&w);
     }
