@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.13.0 - 2026-07-18
+
+### Minor changes
+
+- Remove the `config` subcommand. Its only purpose in the reference tool was
+  storing the package-registry endpoint, and that registry subsystem is out of
+  scope for this rewrite — nothing in the assembler, formatter, or language
+  server ever read a value it stored, so the command configured nothing. It was
+  carried over by mistake during the initial rewrite and is now gone from the
+  CLI, help text, and documentation.
+
+### Patch changes
+
+- Replace the hand-rolled CLI argument parser with [clap](https://docs.rs/clap).
+  The same flags, subcommands, and exit codes are accepted, but `--help`/usage
+  text is now generated from the argument definitions instead of being
+  hand-maintained. Two cosmetic differences follow from clap's conventions: the
+  help layout is clap's (still listing every in-scope option and command), and
+  argument errors are written to stderr rather than stdout. The `-v`/`--version`
+  and `-L`/`--license` banners are unchanged.
+
 ## 2.12.2 - 2026-07-18
 
 ### Patch changes
