@@ -1,15 +1,22 @@
 # nessemble-rs: A Plan for an Idiomatic-Rust Refactor
 
-> Status: **Planned — not started.** This document scopes a series of small,
+> Status: **Complete — Phases 1–7 done.** This document scoped a series of small,
 > behavior-preserving refactors that make the codebase read more like idiomatic
 > Rust, drawn from a staff-level review of the workspace (see
-> [§2](#2-context--where-this-came-from)). The codebase is already in very good
+> [§2](#2-context--where-this-came-from)). The codebase was already in very good
 > shape — `clippy::pedantic` is enabled workspace-wide and passes clean, `unsafe`
-> is `forbid`-den, and every crate is thoroughly documented — so this is polish,
-> not rescue. The work is split into **phases, each shipped as its own patch
+> is `forbid`-den, and every crate is thoroughly documented — so this was polish,
+> not rescue. The work was split into **phases, each shipped as its own patch
 > release** (a single `nessemble: patch` changeset per phase), so any one can land
-> or be reverted independently. Phases 1–5 are the core cleanup; Phases 6–7 are
-> **optional** and constrained by the byte-parity mandate.
+> or be reverted independently. **Phase 1** folded the instruction encoder's
+> opcode-resolution into one helper; **Phase 2** collapsed the numeric `.inesXxx`
+> directives into one AST node; **Phase 3** made conditional nesting a stack;
+> **Phase 4** defined the highlight token-class wire ids once in core; **Phase 5**
+> a batch of low-risk cleanups (formatter borrow-not-clone, config overlay macro,
+> argv slicing, flattened `AssembleError`); **Phase 6** typed the single-bit iNES
+> flag fields as `bool`; **Phase 7** made the i18n catalog process-global. Every
+> phase held **parity at 122/122** with clippy clean and no observable output
+> change; each is marked done at its section below.
 
 ---
 
@@ -80,7 +87,7 @@ Ordered highest-value-first, so the structural wins land while the code is fresh
 then the cross-cutting contract, then mechanical polish, then the two optional
 byte-parity-adjacent items.
 
-### Phase 1 — Instruction-encoding cleanup (#1, #6) · patch
+### Phase 1 — Instruction-encoding cleanup (#1, #6) · patch · ✅ done (PR #75)
 
 **Files:** `crates/nessemble-core/src/assemble.rs`.
 
@@ -120,7 +127,7 @@ zeropage) unchanged; parity 122/122; clippy clean.
 **Changeset line (draft):** *Internal: fold the repeated opcode-resolution logic
 in the instruction encoder into a single helper (no output change).*
 
-### Phase 2 — iNES directive dedup (#2) · patch
+### Phase 2 — iNES directive dedup (#2) · patch · ✅ done (PR #75)
 
 **Files:** `crates/nessemble-core/src/ast.rs`, `parse.rs`, `assemble.rs`.
 
@@ -159,7 +166,7 @@ pass untouched; parity 122/122.
 **Changeset line (draft):** *Internal: collapse the ~19 numeric `.inesXxx`
 directive variants into one parameterized AST node (header bytes unchanged).*
 
-### Phase 3 — Conditional-assembly stack (#4) · patch
+### Phase 3 — Conditional-assembly stack (#4) · patch · ✅ done (PR #76)
 
 **Files:** `crates/nessemble-core/src/assemble.rs`.
 
@@ -184,7 +191,7 @@ guard test, and collect-mode diagnostics; parity 122/122.
 **Changeset line (draft):** *Internal: model conditional-assembly nesting as a
 stack instead of a fixed array (same suppression semantics).*
 
-### Phase 4 — Shared token-class contract (#8) · patch
+### Phase 4 — Shared token-class contract (#8) · patch · ✅ done (PR #77)
 
 **Files:** `crates/nessemble-core/src/tooling.rs`, `crates/nessemble-lsp/src/lib.rs`,
 `crates/nessemble-wasm/src/lib.rs`.
@@ -207,7 +214,7 @@ tests, must produce identical ids/names; full workspace suite green.
 **Changeset line (draft):** *Internal: define the highlight token-class wire ids
 once in core instead of re-deriving them in the LSP and wasm crates.*
 
-### Phase 5 — Low-risk polish batch (#5, #7, #10, #11) · patch
+### Phase 5 — Low-risk polish batch (#5, #7, #10, #11) · patch · ✅ done
 
 Four small, independent, mechanical cleanups in one PR (each is a self-contained
 file-local diff):
@@ -239,7 +246,17 @@ file-local diff):
 instead of clone in the data-consolidation pass, tidy config overlay and argv
 slicing, and flatten the single-variant assemble error.*
 
-### Phase 6 — Typed iNES header fields (#3) · patch · **optional**
+### Phase 6 — Typed iNES header fields (#3) · patch · **optional** · ✅ done (scoped)
+
+> **Done — deliberately scoped to the boolean flag group.** The single-bit
+> Flags-6 toggles (`mir`, `bat`, `fsc`, `trn`) became `bool` (joining the
+> already-boolean `nes2`); the value-set directives mask bit 0 exactly as the
+> old `& 0x01` emission did, so byte 6 is byte-identical. The multi-value fields
+> (mapper, bank counts, RAM sizes, timing, console, VS PPU/HW, …) were **kept as
+> `i64`** because their out-of-range diagnostics echo the raw value, and
+> `vs`/`pc10` were kept because they are read both as `& 0x01` (byte 7) and
+> `!= 0` (console type) — no single `bool` reproduces both. This is the "convert
+> one field group, drop where risky" path the section below prescribes.
 
 **Files:** `crates/nessemble-core/src/assemble.rs`.
 
@@ -264,7 +281,16 @@ representative ROM.
 **Changeset line (draft):** *Internal: type the iNES header fields as booleans and
 sized integers instead of uniform `i64` (identical header output).*
 
-### Phase 7 — Process-global i18n catalog (#9) · patch · **optional**
+### Phase 7 — Process-global i18n catalog (#9) · patch · **optional** · ✅ done
+
+> **Done.** The plan's naive `OnceLock<RwLock<Catalog>>` didn't compile as-is:
+> the default `FluentBundle` is `!Sync` (which is *why* the original used
+> `thread_local!`). The fix swapped it for `fluent_bundle::concurrent::FluentBundle`
+> (its intl memoizer is `Mutex`-guarded, hence `Sync`), which has the same API,
+> then moved the catalog into a global `OnceLock<RwLock<…>>`. `t!` takes a
+> poison-recovering read lock. The i18n tests now serialize on a local lock (they
+> share one catalog), plus a new cross-thread test asserts a locale registered on
+> one thread is visible on another.
 
 **Files:** `crates/nessemble-i18n/src/lib.rs`.
 
