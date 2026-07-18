@@ -339,6 +339,14 @@ pub struct FormatOptions {
     /// data under labels. Labels and constant definitions stay at column 0
     /// regardless.
     pub indent_directives: bool,
+    /// Align the continuation lines of a multi-line statement (an operand list
+    /// spilled across physical lines by a trailing comma) under the opening
+    /// line's first argument, rather than to the block indent. `true` (the
+    /// default) pads each continuation line to `<opening indent> + <directive
+    /// token> + one space`; `false` indents continuations to the block indent
+    /// (`indent_width`). Only the leading whitespace of continuation lines is
+    /// affected — operand text is untouched — so this is purely cosmetic.
+    pub align_continuations: bool,
     /// Consolidate adjacent `.db`/`.dw`/`.color` lines to this many values per
     /// line. `0` disables consolidation (data lines are left as-is).
     pub data_per_line: usize,
@@ -368,6 +376,7 @@ impl Default for FormatOptions {
             indent_width: 4,
             comma_spacing: true,
             indent_directives: false,
+            align_continuations: true,
             data_per_line: 8,
             respect_stride_hints: true,
             blank_line_after_return: true,
@@ -432,12 +441,30 @@ pub fn format_with(source: &str, opts: &FormatOptions) -> String {
     }
     lines.push(current);
 
-    // Pass 0 — normalize each physical line.
+    // Pass 0 — normalize each physical line. Continuation lines of a multi-line
+    // statement (an operand list carried across lines by a trailing comma) are
+    // aligned under the opening line's first argument when `align_continuations`
+    // is set; the alignment prefix is computed once from the opening line.
     let indent = opts.indent_unit();
-    let mut content: Vec<String> = lines
-        .iter()
-        .map(|line| format_line(source, line, opts, &indent))
-        .collect();
+    let mut content: Vec<String> = Vec::with_capacity(lines.len());
+    let mut continuation_prefix: Option<String> = None;
+    for line in &lines {
+        let formatted = match &continuation_prefix {
+            Some(lead) => format_continuation_line(source, line, opts, lead),
+            None => format_line(source, line, opts, &indent),
+        };
+        // The next line is a continuation iff this line ends with an operand
+        // comma. Compute the alignment prefix from the opening line only (an
+        // already-active prefix carries through every continuation line).
+        if opts.align_continuations && ends_with_operand_comma(source, line) {
+            if continuation_prefix.is_none() {
+                continuation_prefix = Some(continuation_lead(&formatted));
+            }
+        } else {
+            continuation_prefix = None;
+        }
+        content.push(formatted);
+    }
 
     // The split appends a trailing empty line iff the source ended in a
     // newline; peel it off so the passes see only real content lines, and
@@ -503,11 +530,56 @@ fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str
 
     let instruction_line = is_indented(source, &sig, opts);
     let lead = if instruction_line { indent } else { "" };
+    let body = build_body(source, line, first_sig, opts, instruction_line);
+    format!("{lead}{body}").trim_end().to_string()
+}
 
-    // Reconstruct from the first to the last significant lexeme, preserving
-    // internal whitespace except around commas (no space before, one after when
-    // `comma_spacing`, else tight). Case normalization (Pass 4) is applied here:
-    // the mnemonic is the first significant token of an instruction line.
+/// Format a continuation line — a physical line whose operands belong to the
+/// preceding statement (the previous line ended with a trailing operand comma).
+/// Its body is rebuilt like any operand list, but its leading whitespace is
+/// `lead` (computed by [`continuation_lead`] to align under the opening line's
+/// first argument) instead of the block indent. A comment-only continuation
+/// line keeps its own indentation, exactly as [`format_line`] treats comments.
+fn format_continuation_line(
+    source: &str,
+    line: &[Lexeme],
+    opts: &FormatOptions,
+    lead: &str,
+) -> String {
+    let Some(first_sig) = line.iter().position(|l| l.kind != LexKind::Whitespace) else {
+        return String::new();
+    };
+    let sig: Vec<&Lexeme> = line
+        .iter()
+        .filter(|l| l.kind != LexKind::Whitespace)
+        .collect();
+    if sig.len() == 1 && sig[0].kind == LexKind::Comment {
+        let orig = if line[0].kind == LexKind::Whitespace {
+            text(source, &line[0])
+        } else {
+            ""
+        };
+        return format!("{orig}{}", text(source, sig[0]))
+            .trim_end()
+            .to_string();
+    }
+    // The first token of a continuation line is an operand, never a mnemonic.
+    let body = build_body(source, line, first_sig, opts, false);
+    format!("{lead}{body}").trim_end().to_string()
+}
+
+/// Reconstruct a line's body from its first significant lexeme to its last,
+/// preserving internal whitespace except around commas (no space before, one
+/// after when `comma_spacing`, else tight). Case normalization (Pass 4) applies
+/// here: when `mnemonic_line`, the first significant token is the instruction
+/// mnemonic.
+fn build_body(
+    source: &str,
+    line: &[Lexeme],
+    first_sig: usize,
+    opts: &FormatOptions,
+    mnemonic_line: bool,
+) -> String {
     let last_sig = line
         .iter()
         .rposition(|l| l.kind != LexKind::Whitespace)
@@ -530,7 +602,7 @@ fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str
             }
             seen_significant = true;
         } else {
-            let is_mnemonic = instruction_line
+            let is_mnemonic = mnemonic_line
                 && !seen_significant
                 && lx.kind == LexKind::Ident
                 && MNEMONICS.contains(&text(source, lx).to_ascii_lowercase());
@@ -538,8 +610,35 @@ fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str
             seen_significant = true;
         }
     }
+    body
+}
 
-    format!("{lead}{body}").trim_end().to_string()
+/// Whether `line`'s last significant token — ignoring a trailing comment — is a
+/// comma, marking a multi-line statement whose operand list continues on the
+/// next physical line.
+fn ends_with_operand_comma(source: &str, line: &[Lexeme]) -> bool {
+    line.iter()
+        .rev()
+        .find(|l| !matches!(l.kind, LexKind::Whitespace | LexKind::Comment))
+        .is_some_and(|l| is_punct(source, l, ","))
+}
+
+/// The leading whitespace for the continuation lines of the multi-line statement
+/// whose already-formatted opening line is `opening`: the opening line's own
+/// leading whitespace (verbatim — spaces, or a tab under `IndentStyle::Tab`)
+/// followed by spaces spanning the opening's first token and the single gap
+/// before its first argument. The continuation's first token therefore lines up
+/// directly under the opening line's first argument, in both indent styles.
+fn continuation_lead(opening: &str) -> String {
+    let trimmed = opening.trim_start_matches([' ', '\t']);
+    let base_ws = &opening[..opening.len() - trimmed.len()];
+    // The opening's first token (directive/pseudo/mnemonic) is the run of
+    // non-whitespace after the indent; the gap is the whitespace before arg 1.
+    let after_token = trimmed.trim_start_matches(|c: char| c != ' ' && c != '\t');
+    let token_cols = trimmed.chars().count() - after_token.chars().count();
+    let arg = after_token.trim_start_matches([' ', '\t']);
+    let gap_cols = after_token.chars().count() - arg.chars().count();
+    format!("{base_ws}{}", " ".repeat(token_cols + gap_cols))
 }
 
 /// The text of `lx`, with Pass-4 case normalization applied: the instruction
@@ -1106,6 +1205,124 @@ mod tests {
         assert_eq!(format_with(&once, &opts), once);
     }
 
+    // ── Continuation-line alignment (alignContinuations) ────────────────────
+
+    #[test]
+    fn continuations_align_under_first_arg_by_default() {
+        // Default (alignContinuations on, indentDirectives off): the directive
+        // sits at column 0 and each continuation lines up under its first arg —
+        // `.metasprite ` is 12 columns, so continuations get 12 spaces.
+        let src = "sprite:\n\
+                   .metasprite $FA, $02, $00, $FA,\n\
+                   $FA, $03, $00, $02,\n\
+                   $02, $0D, $00, $FA\n";
+        let pad = " ".repeat(12);
+        assert_eq!(
+            format(src),
+            format!(
+                "sprite:\n\
+                 .metasprite $FA, $02, $00, $FA,\n\
+                 {pad}$FA, $03, $00, $02,\n\
+                 {pad}$02, $0D, $00, $FA\n"
+            )
+        );
+    }
+
+    #[test]
+    fn continuations_align_with_indent_directives() {
+        // With indentDirectives on the opening line carries the 4-space block
+        // indent, so the first arg — and every continuation — lands at column
+        // 16 (4 + `.metasprite ` = 4 + 12).
+        let opts = FormatOptions {
+            indent_directives: true,
+            ..FormatOptions::default()
+        };
+        let src = "sprite:\n.metasprite $FA, $02,\n$FA, $03\n";
+        let pad = " ".repeat(16);
+        assert_eq!(
+            format_with(src, &opts),
+            format!("sprite:\n    .metasprite $FA, $02,\n{pad}$FA, $03\n")
+        );
+    }
+
+    #[test]
+    fn continuations_block_indent_when_disabled() {
+        // alignContinuations off reproduces today's behavior: continuation
+        // lines fall to the block indent (indentWidth = 4).
+        let opts = FormatOptions {
+            align_continuations: false,
+            ..FormatOptions::default()
+        };
+        let src = "sprite:\n.metasprite $FA, $02,\n$FA, $03\n";
+        assert_eq!(
+            format_with(src, &opts),
+            "sprite:\n.metasprite $FA, $02,\n    $FA, $03\n"
+        );
+    }
+
+    #[test]
+    fn continuations_use_tab_base_then_space_pad() {
+        // Under IndentStyle::Tab the continuation reproduces the opening line's
+        // tab indent, then pads to the first-arg column with spaces (a tab plus
+        // `.metasprite ` = tab + 12 spaces).
+        let opts = FormatOptions {
+            indent_style: IndentStyle::Tab,
+            indent_directives: true,
+            ..FormatOptions::default()
+        };
+        let src = "sprite:\n.metasprite $FA, $02,\n$FA, $03\n";
+        let pad = format!("\t{}", " ".repeat(12));
+        assert_eq!(
+            format_with(src, &opts),
+            format!("sprite:\n\t.metasprite $FA, $02,\n{pad}$FA, $03\n")
+        );
+    }
+
+    #[test]
+    fn continuation_alignment_holds_with_tight_commas() {
+        // commaSpacing changes spacing between operands but not the first-arg
+        // column, so continuations still align at column 12.
+        let opts = FormatOptions {
+            comma_spacing: false,
+            ..FormatOptions::default()
+        };
+        let src = "sprite:\n.metasprite $FA, $02,\n$FA, $03\n";
+        let pad = " ".repeat(12);
+        assert_eq!(
+            format_with(src, &opts),
+            format!("sprite:\n.metasprite $FA,$02,\n{pad}$FA,$03\n")
+        );
+    }
+
+    #[test]
+    fn continuation_alignment_survives_trailing_comment() {
+        // A trailing comment on the opening line doesn't shift the first-arg
+        // column; the continuation still aligns at column 12.
+        let src = "sprite:\n.metasprite $FA, $02,  ; row 0\n$FA, $03\n";
+        let pad = " ".repeat(12);
+        assert_eq!(
+            format(src),
+            format!("sprite:\n.metasprite $FA, $02, ; row 0\n{pad}$FA, $03\n")
+        );
+    }
+
+    #[test]
+    fn continuation_alignment_is_idempotent() {
+        let src = "sprite:\n.metasprite $FA, $02, $00, $FA,\n$FA, $03, $00, $02\n";
+        let once = format(src);
+        assert_eq!(format(&once), once);
+    }
+
+    #[test]
+    fn single_line_statements_are_unaffected_by_alignment() {
+        // No trailing comma → no continuation; ordinary directive/instruction
+        // layout is unchanged.
+        assert_eq!(
+            format("loop:\n    LDA $00\n.db $01, $02\n"),
+            "loop:\n    LDA $00\n.db $01, $02\n"
+        );
+    }
+
     #[test]
     fn format_with_tight_commas() {
         let opts = FormatOptions {
@@ -1378,6 +1595,46 @@ start:
         assert_ne!(format(src), src);
         // And the branch is indented, not pinned to column 0.
         assert!(format(src).contains("    BNE :-"));
+    }
+
+    #[test]
+    fn formatting_preserves_assembled_bytes_with_multiline_continuations() {
+        // Continuation-line indentation is insignificant to the assembler (a
+        // trailing comma continues the operand list regardless of the leading
+        // whitespace), so aligning or block-indenting continuations must not
+        // change the assembled bytes. Covers a custom pseudo (`.metasprite`, via
+        // a resolver that emits one byte per int) and a built-in list directive
+        // (`.hibytes`), with `align_continuations` both on and off.
+        let src = "\
+data:
+    .metasprite $FA, $02, $00, $FA,
+    $FA, $03, $00, $02,
+    $02, $0D, $00, $FA
+    .hibytes $8000, $C000,
+    $1234, $ABCD
+";
+        fn resolver() -> crate::CustomResolver {
+            Box::new(
+                |_name: &str, ints: &[i64], _texts: &[String], _dir: &std::path::Path| {
+                    Ok(ints.iter().map(|&i| i as u8).collect())
+                },
+            )
+        }
+        let opts = crate::Options::default();
+        let original = crate::assemble_with(src, &opts, resolver())
+            .expect("original assembles")
+            .rom;
+        for align in [true, false] {
+            let fopts = FormatOptions {
+                align_continuations: align,
+                ..FormatOptions::default()
+            };
+            let formatted = format_with(src, &fopts);
+            let out = crate::assemble_with(&formatted, &opts, resolver())
+                .expect("formatted assembles")
+                .rom;
+            assert_eq!(original, out, "align_continuations = {align}");
+        }
     }
 
     #[test]
