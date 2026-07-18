@@ -59,8 +59,8 @@ use lsp_types::{
 
 use nessemble_core::tooling::{self, LexKind};
 use nessemble_core::{
-    diagnose_project_with, diagnose_source_with, lenient_custom_resolver, Diag, ListSymbol,
-    Options, ProjectDiagnostics,
+    diagnose_project_with, diagnose_source_with, lenient_custom_resolver, parse_pseudo_mapping,
+    Diag, ListSymbol, Options, ProjectDiagnostics,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
@@ -299,7 +299,7 @@ impl Server {
                 continue;
             };
             let base = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-            for (name, rel) in parse_mapping(&text) {
+            for (name, rel) in parse_pseudo_mapping(&text) {
                 let script = base.join(&rel);
                 if script.is_file() {
                     map.entry(name).or_insert(script);
@@ -789,20 +789,6 @@ fn is_source_file(path: &Path) -> bool {
 
 fn is_mapping_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("txt")
-}
-
-/// Parse a `--pseudo` mapping file's `.name = path` lines into `(name, path)`
-/// pairs (name without the leading dot). Mirrors the CLI's mapping reader.
-fn parse_mapping(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            let name = key.trim().trim_start_matches('.');
-            let value = value.trim();
-            (is_identifier(name) && !value.is_empty())
-                .then(|| (name.to_string(), value.to_string()))
-        })
-        .collect()
 }
 
 /// A file's `.include` graph over normalized paths.

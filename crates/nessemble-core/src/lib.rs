@@ -446,6 +446,35 @@ fn default_custom_resolver() -> CustomResolver {
     })
 }
 
+/// Parse a `--pseudo`-style custom pseudo-op mapping into `(name, path)` pairs,
+/// the name without its leading dot. A line contributes an entry only when it is
+/// `<name> = <path>` with a valid directive identifier for the key (an ASCII
+/// letter or `_`, then letters/digits/`_`) and a non-empty value; comments and
+/// malformed lines are skipped. Shared by the CLI's `--pseudo` reader and the
+/// language server's project scan so the two can't drift.
+#[must_use]
+pub fn parse_pseudo_mapping(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let name = key.trim().trim_start_matches('.');
+            let value = value.trim();
+            (is_directive_name(name) && !value.is_empty())
+                .then(|| (name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// Whether `name` is a valid custom pseudo-op identifier — the lexer's rule: an
+/// ASCII letter or `_`, followed by ASCII letters, digits, or `_`.
+fn is_directive_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// A resolver for tooling that recognizes a fixed set of custom pseudo-op names
 /// (e.g. those declared in a project's `--pseudo` mapping) without running their
 /// scripts: a known `.foo` resolves to **no bytes** (so it isn't reported as an
@@ -512,6 +541,26 @@ mod tests {
         assemble(src, &Options::default())
             .expect("assembly succeeds")
             .rom
+    }
+
+    #[test]
+    fn parse_pseudo_mapping_keeps_valid_entries_only() {
+        let text = "\
+.double = double.rhai
+# a comment line (no `=`)
+.ease = scripts/ease.rhai
+bad line without equals
+.empty =
+= novalue
+.no-ident = x.rhai
+";
+        assert_eq!(
+            parse_pseudo_mapping(text),
+            vec![
+                ("double".to_string(), "double.rhai".to_string()),
+                ("ease".to_string(), "scripts/ease.rhai".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use nessemble_core::CustomResolver;
+use nessemble_core::{parse_pseudo_mapping, CustomResolver};
 use nessemble_i18n::t;
 
 use crate::home;
@@ -77,22 +77,13 @@ pub fn build_resolver(pseudo_file: Option<&str>) -> CustomResolver {
     Box::new(move |name, ints, texts, base_dir| resolver.resolve(name, ints, texts, base_dir))
 }
 
-/// Read a `.name = path` mapping file into `name -> path` (name without dot).
+/// Read a `.name = path` mapping file into `name -> path` (name without dot),
+/// via the shared [`parse_pseudo_mapping`] parser. A missing/unreadable file
+/// yields an empty map.
 fn read_mapping(path: impl AsRef<Path>) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return map;
-    };
-    for line in text.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().trim_start_matches('.');
-            let value = value.trim();
-            if !key.is_empty() && !value.is_empty() {
-                map.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-    map
+    std::fs::read_to_string(path)
+        .map(|text| parse_pseudo_mapping(&text).into_iter().collect())
+        .unwrap_or_default()
 }
 
 #[cfg(feature = "scripting")]
