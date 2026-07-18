@@ -133,7 +133,7 @@ pub fn assemble(source: &str, opts_json: &str) -> AssembleResult {
             errors: Vec::new(),
             warnings: assembly.warnings.iter().map(format_diag).collect(),
         },
-        Err(AssembleError::Diagnostic(diag)) => AssembleResult::from_error(format_diag(&diag)),
+        Err(AssembleError(diag)) => AssembleResult::from_error(format_diag(&diag)),
     }
 }
 

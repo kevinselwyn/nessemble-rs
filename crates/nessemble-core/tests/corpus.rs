@@ -48,7 +48,7 @@ fn check_err(name: &str) {
     let golden = std::fs::read_to_string(dir.join(format!("{name}.rom"))).unwrap();
     match assemble_file(&dir.join(format!("{name}.asm")), &Options::default()) {
         Ok(_) => panic!("{name} unexpectedly assembled"),
-        Err(AssembleError::Diagnostic(d)) => {
+        Err(AssembleError(d)) => {
             let formatted = format!("Error in `{}` on line {}: {}\n", d.file, d.line, d.message);
             assert_eq!(formatted, golden, "diagnostic mismatch for errors/{name}");
         }

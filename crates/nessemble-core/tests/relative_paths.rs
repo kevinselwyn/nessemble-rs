@@ -146,6 +146,6 @@ fn missing_asset_does_not_fall_back_to_project_root() {
 
     let err = assemble_file(&tree.path("main.asm"), &Options::default())
         .expect_err("must not resolve the asset from the project root");
-    let AssembleError::Diagnostic(d) = err;
+    let AssembleError(d) = err;
     assert_eq!(d.file, "sub/mod.asm");
 }

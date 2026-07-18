@@ -33,7 +33,7 @@ const CHANGELOG_HEADER: &str = "# Changelog";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let sub = args.first().map(String::as_str);
-    let rest = &args[args.len().min(1)..];
+    let rest = args.get(1..).unwrap_or(&[]);
     match sub {
         Some("add") => add(rest),
         Some("check") => check(),

@@ -245,7 +245,7 @@ fn assemble_mode(cli: &Cli) -> u8 {
             }
             RETURN_OK
         }
-        Err(AssembleError::Diagnostic(d)) => {
+        Err(AssembleError(d)) => {
             eprintln!(
                 "{}",
                 t!(

@@ -104,13 +104,15 @@ struct Symbol {
 struct Ines {
     chr: i64,
     map: i64,
-    mir: i64,
+    /// Nametable mirroring (Flags 6 bit 0): `false` horizontal, `true` vertical.
+    mir: bool,
     prg: i64,
-    trn: i64,
+    /// A trainer region is present (Flags 6 bit 2).
+    trn: bool,
     /// Battery-backed / persistent memory (Flags 6 bit 1).
-    bat: i64,
+    bat: bool,
     /// Four-screen VRAM / alternative nametable layout (Flags 6 bit 3).
-    fsc: i64,
+    fsc: bool,
     /// PRG-RAM size in 8 KB units (byte 8).
     prgram: i64,
     /// TV system (Flags 9 bit 0 / Flags 10 bits 0-1: 0 NTSC, 1 PAL).
@@ -150,11 +152,11 @@ impl Default for Ines {
         Ines {
             chr: 1,
             map: 0,
-            mir: 0,
+            mir: false,
             prg: 1,
-            trn: 0,
-            bat: 0,
-            fsc: 0,
+            trn: false,
+            bat: false,
+            fsc: false,
             prgram: 0,
             tv: 0,
             vs: 0,
@@ -441,10 +443,10 @@ impl Assembler {
         // Bytes 4-6 are identical in iNES 1.0 and NES 2.0.
         out.push((self.ines.prg & 0xFF) as u8);
         out.push((self.ines.chr & 0xFF) as u8);
-        let byte6 = (self.ines.mir & 0x01)
-            | ((self.ines.bat & 0x01) << 1)
-            | ((self.ines.trn & 0x01) << 2)
-            | ((self.ines.fsc & 0x01) << 3)
+        let byte6 = i64::from(self.ines.mir)
+            | (i64::from(self.ines.bat) << 1)
+            | (i64::from(self.ines.trn) << 2)
+            | (i64::from(self.ines.fsc) << 3)
             | ((self.ines.map & 0x0F) << 4);
         out.push((byte6 & 0xFF) as u8);
         if self.ines.nes2 {
@@ -453,7 +455,7 @@ impl Assembler {
             self.build_header_ines(&mut out);
         }
         // A trainer, when present, sits between the header and the PRG/CHR data.
-        if self.ines.trn == 1 {
+        if self.ines.trn {
             out.extend_from_slice(&self.trainer);
         }
         out.extend_from_slice(&self.rom);
@@ -788,7 +790,7 @@ impl Assembler {
 
         // While a trainer is active every emitted byte is redirected into the
         // 512-byte trainer region and does not advance the ROM counters.
-        if self.ines.trn == 1 {
+        if self.ines.trn {
             if self.pass == 2 && self.offset_trainer < self.trainer.len() {
                 self.trainer[self.offset_trainer] = byte;
             }
@@ -987,7 +989,7 @@ impl Assembler {
             }
             Pseudo::InesTrn => {
                 self.nes = true;
-                self.ines.trn = 1;
+                self.ines.trn = true;
             }
             Pseudo::If(e) => {
                 let cond = self.eval(e);
@@ -1082,9 +1084,11 @@ impl Assembler {
             F::Prg => self.ines.prg = value,
             F::Chr => self.ines.chr = value,
             F::Map => self.ines.map = value,
-            F::Mir => self.ines.mir = value,
-            F::Bat => self.ines.bat = value,
-            F::FourScreen => self.ines.fsc = value,
+            // Single-bit Flags-6 toggles: keep only bit 0, exactly as the header
+            // emission's former `& 0x01` did.
+            F::Mir => self.ines.mir = (value & 1) != 0,
+            F::Bat => self.ines.bat = (value & 1) != 0,
+            F::FourScreen => self.ines.fsc = (value & 1) != 0,
             F::PrgRam => self.ines.prgram = value,
             F::Tv => self.ines.tv = value,
             F::Vs => self.ines.vs = value,

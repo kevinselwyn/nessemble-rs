@@ -45,18 +45,14 @@ impl Default for Options {
     }
 }
 
-/// Errors produced while assembling.
+/// The error produced by a failed assembly: a single diagnostic with a source
+/// line and message (reference-compatible text).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AssembleError {
-    /// A diagnostic with a source line and message (reference-compatible text).
-    Diagnostic(Diag),
-}
+pub struct AssembleError(pub Diag);
 
 impl std::fmt::Display for AssembleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AssembleError::Diagnostic(d) => write!(f, "line {}: {}", d.line, d.message),
-        }
+        write!(f, "line {}: {}", self.0.line, self.0.message)
     }
 }
 
@@ -174,7 +170,7 @@ pub fn assemble_file_with(
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
     let source = std::fs::read_to_string(path).map_err(|e| {
-        AssembleError::Diagnostic(Diag {
+        AssembleError(Diag {
             file: display_name(path),
             line: 0,
             message: format!("Could not open `{}`: {e}", path.display()),
@@ -481,10 +477,9 @@ fn assemble_impl(
     top_name: &str,
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
-    let pre =
-        preprocess::preprocess(source, base_dir, top_name).map_err(AssembleError::Diagnostic)?;
+    let pre = preprocess::preprocess(source, base_dir, top_name).map_err(AssembleError)?;
     let lines = parse::parse(pre.tokens).map_err(|e| {
-        AssembleError::Diagnostic(Diag {
+        AssembleError(Diag {
             file: pre.files.get(e.file as usize).cloned().unwrap_or_default(),
             line: e.line,
             message: e.message,
@@ -498,7 +493,7 @@ fn assemble_impl(
         pre.dirs,
         custom,
     );
-    let rom = asm.run(&lines).map_err(AssembleError::Diagnostic)?;
+    let rom = asm.run(&lines).map_err(AssembleError)?;
     let symbols = asm.list_symbols();
     let coverage = asm.coverage_report();
     Ok(Assembly {
@@ -662,25 +657,22 @@ mod tests {
     #[test]
     fn undefined_symbol_errors() {
         let err = assemble("    LDA test\n", &Options::default()).unwrap_err();
-        match err {
-            AssembleError::Diagnostic(d) => {
-                assert_eq!(d.line, 1);
-                assert_eq!(d.message, "Symbol `test` was not defined");
-            }
-        }
+        let AssembleError(d) = err;
+        assert_eq!(d.line, 1);
+        assert_eq!(d.message, "Symbol `test` was not defined");
     }
 
     #[test]
     fn unknown_opcode_errors() {
         let err = assemble("    BLA #$01\n", &Options::default()).unwrap_err();
-        let AssembleError::Diagnostic(d) = err;
+        let AssembleError(d) = err;
         assert_eq!(d.message, "Unknown opcode `BLA`");
     }
 
     #[test]
     fn invalid_mode_errors() {
         let err = assemble("    LDA [$0000]\n", &Options::default()).unwrap_err();
-        let AssembleError::Diagnostic(d) = err;
+        let AssembleError(d) = err;
         assert_eq!(d.message, "Invalid addressing mode");
     }
 
@@ -693,7 +685,7 @@ mod tests {
     #[test]
     fn undefined_macro_errors() {
         let err = assemble("    .macro missing\n", &Options::default()).unwrap_err();
-        let AssembleError::Diagnostic(d) = err;
+        let AssembleError(d) = err;
         assert_eq!(d.message, "Macro `missing` was not defined");
     }
 

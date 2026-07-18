@@ -15,10 +15,13 @@
 //! assert_eq!(t!("unknown-opcode", mnemonic = "BLA"), "Unknown opcode `BLA`");
 //! ```
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
+// The concurrent bundle (its intl memoizer is guarded by a `Mutex`) is `Sync`,
+// so the catalog can live in one process-global lock rather than per thread.
+use fluent_bundle::concurrent::FluentBundle;
+use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 use unic_langid::LanguageIdentifier;
 
 /// The default (and always-present fallback) locale.
@@ -53,7 +56,7 @@ impl Catalog {
     /// Build and store a bundle for `lang` from Fluent source.
     fn insert(&mut self, lang: &str, source: &str) {
         let langid: LanguageIdentifier = lang.parse().unwrap_or_else(|_| "en-US".parse().unwrap());
-        let mut bundle = FluentBundle::new(vec![langid]);
+        let mut bundle = FluentBundle::new_concurrent(vec![langid]);
         // Do not wrap interpolated values in Unicode isolation marks — output
         // must be byte-identical to the reference's plain strings.
         bundle.set_use_isolating(false);
@@ -90,8 +93,26 @@ impl Catalog {
     }
 }
 
-thread_local! {
-    static CATALOG: RefCell<Catalog> = RefCell::new(Catalog::new());
+/// The process-wide message catalog. A global (rather than thread-local) store
+/// means a locale registered with [`register_locale`] or selected with
+/// [`set_locale`] on one thread is visible on every thread — the language
+/// server, for instance, analyzes buffers on worker threads. `t!` only takes a
+/// read lock, and only on diagnostic / CLI-output paths (never per emitted
+/// byte), so the lock is off the hot path.
+fn catalog() -> &'static RwLock<Catalog> {
+    static CATALOG: OnceLock<RwLock<Catalog>> = OnceLock::new();
+    CATALOG.get_or_init(|| RwLock::new(Catalog::new()))
+}
+
+/// Read-lock the catalog, recovering the guard if a previous holder panicked —
+/// a poisoned lock must not turn every later `t!` into a panic.
+fn read_catalog() -> RwLockReadGuard<'static, Catalog> {
+    catalog().read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Write-lock the catalog, recovering from poisoning as [`read_catalog`] does.
+fn write_catalog() -> RwLockWriteGuard<'static, Catalog> {
+    catalog().write().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Extract a language id from the locale environment (e.g. `en_US.UTF-8` →
@@ -124,25 +145,25 @@ pub fn translate(id: &str, args: &[(&str, String)]) -> String {
         }
         Some(fa)
     };
-    CATALOG.with(|c| c.borrow().translate(id, fluent_args.as_ref()))
+    read_catalog().translate(id, fluent_args.as_ref())
 }
 
 /// Set the active locale for the current thread. Unknown locales still resolve
 /// via the en-US fallback.
 pub fn set_locale(lang: &str) {
-    CATALOG.with(|c| c.borrow_mut().active = lang.to_string());
+    write_catalog().active = lang.to_string();
 }
 
 /// The active locale for the current thread.
 #[must_use]
 pub fn active_locale() -> String {
-    CATALOG.with(|c| c.borrow().active.clone())
+    read_catalog().active.clone()
 }
 
 /// Register (or replace) a locale catalog from Fluent source at runtime. This is
 /// how translators add a locale; it also backs the tests.
 pub fn register_locale(lang: &str, source: &str) {
-    CATALOG.with(|c| c.borrow_mut().insert(lang, source));
+    write_catalog().insert(lang, source);
 }
 
 /// Load every `<lang>.ftl` in `dir` as a locale catalog (the file stem is the
@@ -190,8 +211,20 @@ macro_rules! t {
 mod tests {
     use super::*;
 
+    /// The catalog is now process-global, so tests that read or mutate the
+    /// active locale must not run concurrently — one selecting `xx` would
+    /// otherwise corrupt another asserting the en-US default. Serialize them on
+    /// this lock, recovering from poisoning so one failing assert doesn't
+    /// cascade into the rest.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[test]
     fn resolves_plain_and_parameterized() {
+        let _guard = lock();
         assert_eq!(t!("invalid-mode"), "Invalid addressing mode");
         assert_eq!(
             t!("unknown-opcode", mnemonic = "BLA"),
@@ -205,6 +238,7 @@ mod tests {
 
     #[test]
     fn numeric_args_have_no_grouping() {
+        let _guard = lock();
         // A four-digit value must not gain a thousands separator.
         assert_eq!(
             t!("error-line", file = "a.asm", line = 1234, message = "boom"),
@@ -214,16 +248,19 @@ mod tests {
 
     #[test]
     fn trailing_space_is_preserved() {
+        let _guard = lock();
         assert_eq!(t!("init-prompt-filename"), "Filename: ");
     }
 
     #[test]
     fn unknown_id_falls_back_to_itself() {
+        let _guard = lock();
         assert_eq!(t!("no-such-message-id"), "no-such-message-id");
     }
 
     #[test]
     fn stub_locale_overrides_then_falls_back_to_en_us() {
+        let _guard = lock();
         register_locale("xx", "invalid-mode = Modo no valido\n");
         set_locale("xx");
         // Overridden message uses the stub locale...
@@ -231,5 +268,22 @@ mod tests {
         // ...while a message the stub omits falls back to en-US.
         assert_eq!(t!("no-errors"), "No errors");
         set_locale(DEFAULT_LOCALE);
+    }
+
+    #[test]
+    fn a_locale_registered_on_one_thread_is_visible_on_another() {
+        let _guard = lock();
+        // Register on THIS thread, then select and read it from a DIFFERENT one.
+        // The old thread-local catalog missed such a registration entirely; the
+        // process-global catalog makes it visible everywhere (the point of #9).
+        register_locale("zz", "invalid-mode = zz-mode\n");
+        let seen = std::thread::spawn(|| {
+            set_locale("zz");
+            t!("invalid-mode")
+        })
+        .join()
+        .unwrap();
+        set_locale(DEFAULT_LOCALE);
+        assert_eq!(seen, "zz-mode");
     }
 }
