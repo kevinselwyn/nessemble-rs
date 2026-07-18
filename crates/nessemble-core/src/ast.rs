@@ -95,48 +95,16 @@ pub enum Pseudo {
     /// `<label> .rs <size>`.
     Rs(String, Expr),
     Rsset(Expr),
-    InesPrg(Expr),
-    InesChr(Expr),
-    InesMap(Expr),
-    InesMir(Expr),
-    /// `.inesbat <flag>` — battery-backed / persistent memory (Flags 6 bit 1).
-    InesBat(Expr),
-    /// `.ines4scr <flag>` — four-screen VRAM / alt. nametable (Flags 6 bit 3).
-    Ines4Scr(Expr),
-    /// `.inesprgram <count>` — PRG-RAM size in 8 KB units (byte 8).
-    InesPrgRam(Expr),
-    /// `.inestv <system>` — TV system (Flags 9 bit 0 / Flags 10 bits 0-1:
-    /// 0 NTSC, 1 PAL).
-    InesTv(Expr),
-    /// `.inesvs <flag>` — VS Unisystem (Flags 7 bit 0 in iNES; console type 1
-    /// in NES 2.0).
-    InesVs(Expr),
-    /// `.inespc10 <flag>` — PlayChoice-10 (Flags 7 bit 1 in iNES; console type
-    /// 2 in NES 2.0).
-    InesPc10(Expr),
+    /// A numeric `.inesXxx` header directive: set `field` to the evaluated
+    /// value. See [`InesField`] for the per-directive field and bit layout. The
+    /// two non-numeric iNES directives (`.ines2`, `.inestiming`) have their own
+    /// variants below.
+    Ines(InesField, Expr),
     /// `.ines2 <flag>` — emit a NES 2.0 header (Flags 7 bits 2-3 = 2).
     Ines2(Expr),
-    /// `.inessubmap <n>` — NES 2.0 submapper (byte 8 bits 4-7).
-    InesSubMap(Expr),
-    /// `.inesprgnvram <bytes>` — NES 2.0 battery PRG-RAM size (byte 10 bits 4-7).
-    InesPrgNvRam(Expr),
-    /// `.ineschrram <bytes>` — NES 2.0 volatile CHR-RAM size (byte 11 bits 0-3).
-    InesChrRam(Expr),
-    /// `.ineschrnvram <bytes>` — NES 2.0 battery CHR-RAM size (byte 11 bits 4-7).
-    InesChrNvRam(Expr),
     /// `.inestiming <n>` — NES 2.0 CPU/PPU timing (byte 12: 0 NTSC, 1 PAL,
     /// 2 multi-region, 3 Dendy).
     InesTiming(Expr),
-    /// `.inesconsole <n>` — NES 2.0 console type (Flags 7 bits 0-1).
-    InesConsole(Expr),
-    /// `.inesvsppu <n>` — NES 2.0 VS System PPU type (byte 13 bits 0-3).
-    InesVsPpu(Expr),
-    /// `.inesvshw <n>` — NES 2.0 VS System hardware type (byte 13 bits 4-7).
-    InesVsHw(Expr),
-    /// `.inesmiscrom <n>` — NES 2.0 number of miscellaneous ROMs (byte 14).
-    InesMiscRom(Expr),
-    /// `.inesexpansion <n>` — NES 2.0 default expansion device (byte 15).
-    InesExpansion(Expr),
     Prg(Expr),
     Chr(Expr),
     Segment(String),
@@ -170,6 +138,56 @@ pub enum Pseudo {
     /// A custom pseudo-op (`.foo`) resolved to a script at assemble time. The
     /// name has no leading dot; arguments preserve source order.
     Custom(String, Vec<CustomArg>),
+}
+
+/// The `Ines` header field written by a numeric `.inesXxx` directive. Each
+/// variant names the directive's target field and its iNES / NES 2.0 bit layout.
+/// `.ines2` and `.inestiming` are not here — they parse to their own [`Pseudo`]
+/// variants because they set a flag / an optional field rather than a plain
+/// numeric member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InesField {
+    /// `.inesprg <count>` — PRG-ROM bank count (byte 4).
+    Prg,
+    /// `.ineschr <count>` — CHR-ROM bank count (byte 5).
+    Chr,
+    /// `.inesmap <n>` — mapper number (Flags 6/7 nibbles; byte 8 in NES 2.0).
+    Map,
+    /// `.inesmir <n>` — nametable mirroring (Flags 6 bit 0).
+    Mir,
+    /// `.inesbat <flag>` — battery-backed / persistent memory (Flags 6 bit 1).
+    Bat,
+    /// `.ines4scr <flag>` — four-screen VRAM / alt. nametable (Flags 6 bit 3).
+    FourScreen,
+    /// `.inesprgram <count>` — PRG-RAM size in 8 KB units (byte 8).
+    PrgRam,
+    /// `.inestv <system>` — TV system (Flags 9 bit 0 / Flags 10 bits 0-1:
+    /// 0 NTSC, 1 PAL).
+    Tv,
+    /// `.inesvs <flag>` — VS Unisystem (Flags 7 bit 0 in iNES; console type 1
+    /// in NES 2.0).
+    Vs,
+    /// `.inespc10 <flag>` — PlayChoice-10 (Flags 7 bit 1 in iNES; console type
+    /// 2 in NES 2.0).
+    Pc10,
+    /// `.inessubmap <n>` — NES 2.0 submapper (byte 8 bits 4-7).
+    SubMap,
+    /// `.inesprgnvram <bytes>` — NES 2.0 battery PRG-RAM size (byte 10 bits 4-7).
+    PrgNvRam,
+    /// `.ineschrram <bytes>` — NES 2.0 volatile CHR-RAM size (byte 11 bits 0-3).
+    ChrRam,
+    /// `.ineschrnvram <bytes>` — NES 2.0 battery CHR-RAM size (byte 11 bits 4-7).
+    ChrNvRam,
+    /// `.inesconsole <n>` — NES 2.0 console type (Flags 7 bits 0-1).
+    Console,
+    /// `.inesvsppu <n>` — NES 2.0 VS System PPU type (byte 13 bits 0-3).
+    VsPpu,
+    /// `.inesvshw <n>` — NES 2.0 VS System hardware type (byte 13 bits 4-7).
+    VsHw,
+    /// `.inesmiscrom <n>` — NES 2.0 number of miscellaneous ROMs (byte 14).
+    MiscRom,
+    /// `.inesexpansion <n>` — NES 2.0 default expansion device (byte 15).
+    Expansion,
 }
 
 /// A single argument to a custom pseudo-op: a numeric expression or a string.
