@@ -84,9 +84,8 @@ init-choose-banks = Choose a positive number of CHR banks
 init-choose-mapper = Choose a mapper between 0-255
 init-choose-mirroring = Choose a mirroring between 0-15
 
-## config / scripts
+## scripts
 
-config-no-set = No `{ $key }` set
 scripts-installed = Installed scripts to { $path }
 
 ## Miscellaneous

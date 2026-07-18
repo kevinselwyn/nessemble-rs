@@ -1,5 +1,5 @@
 //! Integration tests for the `nessemble` CLI surface: exit codes, help/version
-//! text, `init` scaffolding, `config` round-tripping, and i18n locale loading.
+//! text, `init` scaffolding, and i18n locale loading.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -92,38 +92,6 @@ fn coverage_reports_per_bank_for_ines_file_output() {
     assert_eq!(text, "PRG 00:     3/16384\nCHR 00:     0/8192 \n");
 
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn config_round_trips_in_isolated_home() {
-    let home = std::env::temp_dir().join(format!("nessemble-home-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
-
-    // set
-    assert!(bin()
-        .env("HOME", &home)
-        .args(["config", "author", "ada"])
-        .status()
-        .unwrap()
-        .success());
-    // get
-    let got = bin()
-        .env("HOME", &home)
-        .args(["config", "author"])
-        .output()
-        .unwrap();
-    assert!(got.status.success());
-    assert_eq!(String::from_utf8(got.stdout).unwrap(), "ada\n");
-    // missing key fails
-    let missing = bin()
-        .env("HOME", &home)
-        .args(["config", "nope"])
-        .output()
-        .unwrap();
-    assert_eq!(missing.status.code(), Some(1));
-
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
