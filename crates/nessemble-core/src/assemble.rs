@@ -199,10 +199,10 @@ pub struct Assembler {
     enum_inc: i64,
     rsset: i64,
 
-    // Conditional-assembly state (`.if`/`.ifdef`/`.ifndef`/`.else`/`.endif`).
-    if_active: bool,
-    if_depth: usize,
-    if_cond: [bool; MAX_NESTED_IFS],
+    // Conditional-assembly state (`.if`/`.ifdef`/`.ifndef`/`.else`/`.endif`):
+    // one entry per open block, holding its (possibly `.else`-flipped)
+    // condition. Empty means no conditional is open.
+    if_stack: Vec<bool>,
 
     // iNES trainer redirection (`.inestrn`).
     trainer: Vec<u8>,
@@ -262,9 +262,7 @@ impl Assembler {
             enum_value: 0,
             enum_inc: 0,
             rsset: 0,
-            if_active: false,
-            if_depth: 0,
-            if_cond: [false; MAX_NESTED_IFS],
+            if_stack: Vec::new(),
             trainer: Vec::new(),
             offset_trainer: 0,
             pass: 1,
@@ -404,9 +402,7 @@ impl Assembler {
         self.enum_value = 0;
         self.enum_inc = 0;
         self.rsset = 0;
-        self.if_active = false;
-        self.if_depth = 0;
-        self.if_cond = [false; MAX_NESTED_IFS];
+        self.if_stack.clear();
         self.offset_trainer = 0;
     }
 
@@ -414,19 +410,23 @@ impl Assembler {
     /// block. Mirrors the reference guard used in `write_byte`/`add_symbol`,
     /// which checks the current level and (when nested) its parent.
     fn if_suppressed(&self) -> bool {
-        if !self.if_active {
+        let depth = self.if_stack.len();
+        if depth == 0 {
             return false;
         }
         // Defensive bound: unbalanced `.if` nesting past the limit can only
-        // happen on malformed input (which produces no golden ROM); guarding
-        // here keeps collect-mode analysis from indexing out of range.
-        if self.if_depth >= MAX_NESTED_IFS {
+        // happen on malformed input (which produces no golden ROM); matching the
+        // reference, nothing past the limit is suppressed.
+        if depth >= MAX_NESTED_IFS {
             return false;
         }
-        if !self.if_cond[self.if_depth] {
+        // Suppressed when the current level is false, or — when nested — its
+        // immediate parent is. The reference checks only the current level and
+        // one level up, not the whole stack; preserve that exactly.
+        if !self.if_stack[depth - 1] {
             return true;
         }
-        self.if_depth >= 2 && !self.if_cond[self.if_depth - 1]
+        depth >= 2 && !self.if_stack[depth - 2]
     }
 
     /// Assemble the final output bytes: raw ROM, or an iNES / NES 2.0 file in
@@ -991,40 +991,26 @@ impl Assembler {
             }
             Pseudo::If(e) => {
                 let cond = self.eval(e);
-                self.if_active = true;
-                self.if_depth += 1;
-                if self.if_depth < MAX_NESTED_IFS {
-                    self.if_cond[self.if_depth] = cond != 0;
-                }
+                self.if_stack.push(cond != 0);
             }
             Pseudo::Ifdef(name) => {
                 let defined = self.find_symbol(name).is_some();
-                self.if_active = true;
-                self.if_depth += 1;
-                if self.if_depth < MAX_NESTED_IFS {
-                    self.if_cond[self.if_depth] = defined;
-                }
+                self.if_stack.push(defined);
             }
             Pseudo::Ifndef(name) => {
                 let defined = self.find_symbol(name).is_some();
-                self.if_active = true;
-                self.if_depth += 1;
-                if self.if_depth < MAX_NESTED_IFS {
-                    self.if_cond[self.if_depth] = !defined;
-                }
+                self.if_stack.push(!defined);
             }
             Pseudo::Else => {
-                if self.if_depth < MAX_NESTED_IFS {
-                    self.if_cond[self.if_depth] = !self.if_cond[self.if_depth];
+                // Invert the innermost open block; a stray `.else` with none open
+                // is a no-op (as before).
+                if let Some(top) = self.if_stack.last_mut() {
+                    *top = !*top;
                 }
             }
             Pseudo::Endif => {
-                if self.if_depth > 0 {
-                    self.if_depth -= 1;
-                }
-                if self.if_depth == 0 {
-                    self.if_active = false;
-                }
+                // Close the innermost block; a stray `.endif` is a no-op.
+                self.if_stack.pop();
             }
             Pseudo::Segment(name) => {
                 if let Some(rest) = name.strip_prefix("PRG") {
