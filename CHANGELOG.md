@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.13.1 - 2026-07-18
+
+### Patch changes
+
+- Internal: two idiomatic-Rust follow-ups from the round-2 review. Hoist the
+  `--pseudo` mapping parser into `nessemble_core::parse_pseudo_mapping`, so the CLI
+  reader and the language server's project scan share one implementation instead of
+  two that had begun to drift; and rewrite the `xtask` doc-pipeline markdown
+  scanners (`rewrite_chapter_links`, `strip_md_links`) from manual byte-index loops
+  to `find`/slice/`strip_prefix`. No change to assembled output, custom pseudo-op
+  resolution, or the generated docs.
+- Internal: make the language server's per-keystroke project analysis cheaper. The
+  include graph now extracts each disk file's `.include` lines through an
+  `(mtime, len)`-keyed cache, so rebuilding it on an edit re-reads only files that
+  actually changed on disk (unchanged files are stat'd, not re-read and
+  re-scanned), and the open-buffer overlay borrows document text instead of cloning
+  every buffer on every change. Behavior is unchanged — an external edit to an
+  include line is still reflected, because the cache is keyed on the file's
+  signature.
+- Internal: fold the repeated opcode-resolution logic in the instruction encoder
+  into a single `resolve_opcode` helper (plus an `indexed_mode` helper for the
+  `X`/`Y`-indexed forms), and drop the `opcode_byte` sentinel wrapper now that the
+  `Option` flows through to emission. No change to assembled output, diagnostics,
+  or the addressing-mode selection — Phase 1 of `plans/006-idiomatic-rust-refactor.md`.
+- Internal: collapse the ~19 numeric `.inesXxx` directive AST variants into a
+  single `Pseudo::Ines(InesField, Expr)` node, driven by a name→field table in the
+  parser and a field→member assignment in the assembler. The three non-numeric
+  directives (`.ines2`, `.inestiming`, `.inestrn`) keep their own variants. No
+  change to the emitted iNES / NES 2.0 header bytes or any diagnostic — Phase 2 of
+  `plans/006-idiomatic-rust-refactor.md`.
+- Internal: model conditional-assembly nesting (`.if`/`.ifdef`/`.ifndef`/`.else`/
+  `.endif`) as a `Vec<bool>` stack instead of a fixed `[bool; N]` array plus a
+  manual depth counter — push/pop/flip-top replace the hand-tracked index, and the
+  `MAX_NESTED_IFS` cap becomes a suppression guard rather than an array length. The
+  suppression predicate (current level, plus the immediate parent when nested) and
+  the past-the-limit behavior are preserved exactly. No change to assembled output
+  or diagnostics — Phase 3 of `plans/006-idiomatic-rust-refactor.md`.
+- Internal: define the highlight token-class wire ids and names once, as
+  `TokenClass::wire_id` / `wire_name` / `ALL` in `nessemble-core::tooling`, instead
+  of re-deriving the same 0–6 numbering in the wasm highlighter (`tokenize` /
+  `token_classes`) and the language server's semantic-token mapping. The wire ids,
+  class names, and LSP legend are unchanged — Phase 4 of
+  `plans/006-idiomatic-rust-refactor.md`.
+- Internal: a batch of low-risk readability cleanups — borrow (rather than clone)
+  the stride list in the formatter's data-consolidation pass; collapse the
+  `.nessemblerc` scalar-field overlay into a small local macro; replace the obscure
+  `&args[args.len().min(1)..]` argv slicing in `xtask` with `args.get(1..)`; and
+  flatten the single-variant `AssembleError` enum into a `AssembleError(Diag)`
+  newtype. No change to output, formatting, or diagnostics — Phase 5 of
+  `plans/006-idiomatic-rust-refactor.md`.
+- Internal: type the single-bit iNES Flags-6 toggles (`mir`, `bat`, `fsc`, `trn`)
+  as `bool` instead of `i64`, alongside the already-boolean `nes2`. The value-set
+  directives mask bit 0 exactly as the header emission's former `& 0x01` did, so
+  the emitted header is byte-identical. The multi-value fields (mapper, bank
+  counts, RAM sizes, timing, console, …) and the dual-use `vs`/`pc10` flags stay
+  `i64` to preserve exact emission and range-check diagnostics — Phase 6 of
+  `plans/006-idiomatic-rust-refactor.md`.
+- Internal: make the i18n locale catalog process-global (a `OnceLock<RwLock<…>>`
+  over the concurrent Fluent bundle) instead of thread-local, so a locale
+  registered or selected on one thread is honored on all of them — the language
+  server analyzes on worker threads. Message output is unchanged (parity holds);
+  `t!` takes only a read lock, off the assembly hot path — Phase 7 of
+  `plans/006-idiomatic-rust-refactor.md`.
+
 ## 2.13.0 - 2026-07-18
 
 ### Minor changes
