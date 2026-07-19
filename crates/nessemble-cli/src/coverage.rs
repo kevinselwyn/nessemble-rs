@@ -66,6 +66,10 @@ pub struct CoverageArgs {
     /// use custom pseudo-instruction functions
     #[arg(short = 'p', long, value_name = "pseudo.txt")]
     pseudo: Option<String>,
+
+    /// also report line coverage for the `-p` Rhai scripts
+    #[arg(long)]
+    scripts: bool,
 }
 
 /// Run `coverage` with its parsed options, returning the process exit code.
@@ -77,11 +81,30 @@ pub fn run(args: &CoverageArgs) -> u8 {
         source_map: true,
         ..Options::default()
     };
-    let assembly = match assemble_file_with(
-        Path::new(&args.infile),
-        &options,
-        custom::build_resolver(args.pseudo.as_deref()),
-    ) {
+    // When `--scripts` is requested (and supported), the resolver also records
+    // Rhai line coverage into `scripts_cov`, which outlives the assembly.
+    #[cfg(feature = "coverage")]
+    let scripts_cov = args.scripts.then(|| {
+        std::rc::Rc::new(std::cell::RefCell::new(
+            nessemble_script::coverage::ScriptCoverage::new(),
+        ))
+    });
+    #[cfg(feature = "coverage")]
+    let resolver = match &scripts_cov {
+        Some(cov) => custom::build_resolver_with_coverage(args.pseudo.as_deref(), cov.clone()),
+        None => custom::build_resolver(args.pseudo.as_deref()),
+    };
+    #[cfg(not(feature = "coverage"))]
+    let resolver = {
+        if args.scripts {
+            eprintln!(
+                "nessemble: this build lacks Rhai script-coverage support; ignoring --scripts"
+            );
+        }
+        custom::build_resolver(args.pseudo.as_deref())
+    };
+
+    let assembly = match assemble_file_with(Path::new(&args.infile), &options, resolver) {
         Ok(a) => a,
         Err(AssembleError(d)) => {
             eprintln!("nessemble: {}: line {}: {}", args.infile, d.line, d.message);
@@ -120,7 +143,26 @@ pub fn run(args: &CoverageArgs) -> u8 {
         }
     };
 
+    #[cfg(feature = "coverage")]
+    let mut report = build_report(&source_map, cdl.as_ref());
+    #[cfg(not(feature = "coverage"))]
     let report = build_report(&source_map, cdl.as_ref());
+
+    // Fold in Rhai script coverage (each project script as its own file), then
+    // re-sort so scripts and asm files interleave by path.
+    #[cfg(feature = "coverage")]
+    if let Some(cov) = &scripts_cov {
+        let cov = cov.borrow();
+        for (path, rows) in cov.files() {
+            report
+                .files
+                .push(nessemble_core::coverage::FileCoverage::from_line_hits(
+                    path.display().to_string(),
+                    rows,
+                ));
+        }
+        report.files.sort_by(|a, b| a.path.cmp(&b.path));
+    }
 
     if let Err(code) = write_reports(&report, args.format, args.out.as_deref()) {
         return code;

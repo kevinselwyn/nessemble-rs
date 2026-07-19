@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for CDL-Based Runtime Coverage
 
-> Status: **In progress — Phases 0–3 done.** This document specifies a new
+> Status: **Complete — Phases 0–4 done.** This document specifies a new
 > `nessemble coverage` subcommand that reports **runtime execution coverage** of
 > an assembled ROM against a **CDL (Code/Data Logger)** capture from an emulator,
 > and **retires the existing `-C`/`--coverage` write-coverage flag** it supersedes
@@ -15,8 +15,9 @@
 > the CDL core (`coverage` module — `CdlSource`, `FlatMaskCdl`, `classify_span`,
 > the `CoverageReport` model); Phase 2 the `nessemble coverage` subcommand with
 > FCEUX + Mesen `--emulator`, JSON/LCOV emitters, and the stale-CDL size guard;
-> Phase 3 removed the old `-C`/`--coverage` write-coverage flag. **Phase 4** (Rhai
-> script coverage) is the remaining phase (§9).
+> Phase 3 removed the old `-C`/`--coverage` write-coverage flag; **Phase 4** adds
+> `--scripts` Rhai line coverage. Only the deferred follow-ups (BizHawk, an HTML
+> report) remain out of scope (§5.3, §7).
 
 ---
 
@@ -359,8 +360,16 @@ and ships as its own changeset, consistent with prior plans.
   `coverage_report()` producer, `Assembly::coverage`, and the usage-doc entry;
   replaced the one CLI test that exercised `-C` with the new `coverage` tests. The
   internal write bitmap stays (the source map is built from it). Parity untouched.
-- **Phase 4 — Rhai script coverage.** `--scripts`, debugger-based instrumentation
-  behind a feature; scripts join the report (§8).
+- **Phase 4 — Rhai script coverage. ✅ Done.** Added `--scripts`: a `coverage`
+  Cargo feature (on the `nessemble-script` host, enabled by the CLI's own
+  `coverage` feature, default-on) turns on Rhai's debugger + AST walk. Project
+  (`-p`) scripts run on a debugger-instrumented engine that records executed
+  lines (numerator); the coverable-line denominator comes from walking the
+  compiled AST, so never-run branches show as uncovered. Hits accumulate across
+  every invocation; each script joins the report via `FileCoverage::from_line_hits`
+  (executed → `Code`, not → `Unaccessed`), so JSON/LCOV need no change. Bundled
+  scripts are excluded. The instrumented engine is built only under `--scripts`,
+  so ordinary runs are unaffected (parity 122/122).
 - **Later (own releases):** BizHawk container reader (§5.3); HTML report port
   (§7.3).
 
@@ -410,8 +419,11 @@ Open items to resolve during implementation (not blockers to the plan):
 
 - ~~Exact Mesen PRG bit positions vs. FCEUX~~ — **resolved (Phase 2)**: verified
   against Mesen2 `DebugTypes.h`; masks are code `0x0D` / data `0x02` (§5.2).
-- Rhai `debugging` feature vs. the `default-features = false` + `fs`/wasm matrix;
-  `on_progress` sampler as plan B (§8). *(Phase 4.)*
+- ~~Rhai `debugging` feature vs. the `default-features = false` + `fs`/wasm
+  matrix~~ — **resolved (Phase 4)**: a dedicated `coverage` feature adds
+  `rhai/debugging` + `rhai/internals`; it composes cleanly (wasm keeps
+  `default-features = false` and never enables it), so the `on_progress` plan B
+  was not needed (§8).
 - iNES header/trainer offset reconciliation between the internal ROM buffer and
   the CDL coordinate space (§6.1). *Phase 2 uses the header-less PRG+CHR size as
   the expected CDL length; trainer handling is still to confirm.*

@@ -25,6 +25,27 @@ struct Resolver {
 }
 
 impl Resolver {
+    /// Locate the script a `.name` directive maps to, and whether it came from
+    /// the `-p` project mapping (`true`) rather than the bundled scripts
+    /// (`false`). Project scripts are the ones eligible for coverage.
+    fn locate(&self, name: &str, base_dir: &Path) -> Result<(PathBuf, bool), String> {
+        if let Some(rel) = self.pseudo_map.get(name) {
+            // Relative to the mapping file's directory (falling back to the
+            // source directory only if the mapping path had no parent, which
+            // cannot happen once the mapping produced an entry).
+            Ok((
+                self.pseudo_dir.as_deref().unwrap_or(base_dir).join(rel),
+                true,
+            ))
+        } else if let (Some(file), Some(dir)) =
+            (self.scripts_map.get(name), self.scripts_dir.as_deref())
+        {
+            Ok((dir.join(file), false))
+        } else {
+            Err(t!("unknown-custom", pseudo = format!(".{name}")))
+        }
+    }
+
     fn resolve(
         &self,
         name: &str,
@@ -32,31 +53,18 @@ impl Resolver {
         texts: &[String],
         base_dir: &Path,
     ) -> Result<Vec<u8>, String> {
-        let pseudo = format!(".{name}");
-        let path = if let Some(rel) = self.pseudo_map.get(name) {
-            // Relative to the mapping file's directory (falling back to the
-            // source directory only if the mapping path had no parent, which
-            // cannot happen once the mapping produced an entry).
-            self.pseudo_dir.as_deref().unwrap_or(base_dir).join(rel)
-        } else if let (Some(file), Some(dir)) =
-            (self.scripts_map.get(name), self.scripts_dir.as_deref())
-        {
-            dir.join(file)
-        } else {
-            return Err(t!("unknown-custom", pseudo = pseudo));
-        };
-
-        let source =
-            std::fs::read_to_string(&path).map_err(|_| t!("custom-not-exist", pseudo = pseudo))?;
+        let (path, _from_pseudo) = self.locate(name, base_dir)?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|_| t!("custom-not-exist", pseudo = format!(".{name}")))?;
         run_script(&source, ints, texts, base_dir)
     }
 }
 
-/// Build a resolver from the optional `-p` mapping file. It also consults the
-/// installed bundled scripts (`~/.nessemble/scripts`).
-pub fn build_resolver(pseudo_file: Option<&str>) -> CustomResolver {
+/// Construct the resolver state from the optional `-p` mapping file, also
+/// consulting the installed bundled scripts (`~/.nessemble/scripts`).
+fn make_resolver(pseudo_file: Option<&str>) -> Resolver {
     let scripts_dir = home::config_dir().map(|d| d.join("scripts"));
-    let resolver = Resolver {
+    Resolver {
         pseudo_map: pseudo_file.map(read_mapping).unwrap_or_default(),
         // Script paths in the mapping resolve relative to the mapping file's own
         // directory, so a `pseudo.txt` and its scripts travel together
@@ -72,9 +80,38 @@ pub fn build_resolver(pseudo_file: Option<&str>) -> CustomResolver {
             .map(|d| read_mapping(d.join("scripts.txt")))
             .unwrap_or_default(),
         scripts_dir,
-    };
+    }
+}
 
+/// Build a resolver from the optional `-p` mapping file.
+pub fn build_resolver(pseudo_file: Option<&str>) -> CustomResolver {
+    let resolver = make_resolver(pseudo_file);
     Box::new(move |name, ints, texts, base_dir| resolver.resolve(name, ints, texts, base_dir))
+}
+
+/// Build a resolver that also records Rhai line coverage for **project** scripts
+/// (those from the `-p` mapping; bundled scripts are excluded). Each `custom()`
+/// invocation runs on an instrumented engine and accumulates into `coverage`.
+#[cfg(feature = "coverage")]
+pub fn build_resolver_with_coverage(
+    pseudo_file: Option<&str>,
+    coverage: nessemble_script::coverage::SharedCoverage,
+) -> CustomResolver {
+    let resolver = make_resolver(pseudo_file);
+    Box::new(move |name, ints, texts, base_dir| {
+        let (path, from_pseudo) = resolver.locate(name, base_dir)?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|_| t!("custom-not-exist", pseudo = format!(".{name}")))?;
+        if from_pseudo {
+            // Key by absolute path so the report is unambiguous across dirs.
+            let key = path.canonicalize().unwrap_or(path);
+            nessemble_script::coverage::run_with_coverage(
+                &source, ints, texts, base_dir, &key, &coverage,
+            )
+        } else {
+            run_script(&source, ints, texts, base_dir)
+        }
+    })
 }
 
 /// Read a `.name = path` mapping file into `name -> path` (name without dot),

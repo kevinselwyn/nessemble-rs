@@ -170,6 +170,11 @@ section is classified; lines that emit only CHR data are omitted.
 - `--out <path>` — output file for a single format, or a directory for `all`
   (`coverage.json` + `coverage.lcov`); defaults to the current directory.
 - `-p`, `--pseudo <pseudo.txt>` — custom pseudo-op mapping, as in assemble mode.
+- `--scripts` — also report **line coverage for the `-p` Rhai scripts**, so you
+  can see which parts of a custom pseudo-op never ran during assembly. Each
+  project script appears as its own file (each line executed or not); bundled
+  `~/.nessemble` scripts are excluded. Available when the binary is built with
+  the `coverage` feature (on by default).
 
 The CDL must be the same size as this ROM's PRG+CHR (it carries no ROM identity
 of its own); a size mismatch is a hard error. Equal sizes still do not guarantee

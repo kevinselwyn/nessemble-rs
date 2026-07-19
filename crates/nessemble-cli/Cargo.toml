@@ -17,9 +17,14 @@ path = "src/main.rs"
 # disabling a feature drops its dependency. Without `scripting`, custom
 # directives report "scripting disabled"; without `lsp`, `nessemble lsp` reports
 # that the build lacks LSP support.
-default = ["scripting", "lsp"]
+default = ["scripting", "lsp", "coverage"]
 scripting = ["dep:nessemble-script"]
 lsp = ["dep:nessemble-lsp"]
+# Rhai script coverage for `nessemble coverage --scripts`. Requires `scripting`;
+# turns on the script host's `coverage` feature (Rhai debugger + AST walk). On by
+# default so `--scripts` works out of the box; the instrumented engine is built
+# only when `--scripts` is passed, so ordinary runs pay nothing at runtime.
+coverage = ["scripting", "nessemble-script/coverage"]
 
 [dependencies]
 clap.workspace = true

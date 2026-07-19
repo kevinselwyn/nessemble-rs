@@ -268,6 +268,40 @@ pub struct FileCoverage {
     pub unaccessed: u32,
 }
 
+impl FileCoverage {
+    /// Build a file's coverage from `(line, executed)` rows — the shape script
+    /// coverage produces, where a line is simply run or not run (there is no
+    /// data/mixed for code that executes inside the assembler). Each executed
+    /// line becomes [`Code`](CdlClass::Code), each un-executed coverable line
+    /// [`Unaccessed`](CdlClass::Unaccessed), so the same JSON/LCOV emitters
+    /// apply. `rows` should already be in ascending line order.
+    #[must_use]
+    pub fn from_line_hits(
+        path: String,
+        rows: impl IntoIterator<Item = (u32, bool)>,
+    ) -> FileCoverage {
+        let mut file = FileCoverage {
+            path,
+            lines: Vec::new(),
+            code: 0,
+            data: 0,
+            mixed: 0,
+            unaccessed: 0,
+        };
+        for (line, executed) in rows {
+            let class = if executed {
+                file.code += 1;
+                CdlClass::Code
+            } else {
+                file.unaccessed += 1;
+                CdlClass::Unaccessed
+            };
+            file.lines.push(LineCoverage { line, class });
+        }
+        file
+    }
+}
+
 /// A full coverage report over the assembled program: one [`FileCoverage`] per
 /// source file that emitted PRG bytes, sorted by path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -677,6 +711,32 @@ mod tests {
             serde_json::from_str(&CoverageReport::default().to_json()).expect("valid JSON");
         assert_eq!(empty["files"].as_array().unwrap().len(), 0);
         assert_eq!(empty["totals"]["total"], 0);
+    }
+
+    #[test]
+    fn from_line_hits_maps_executed_to_code() {
+        let f =
+            FileCoverage::from_line_hits("s.rhai".to_string(), [(2, true), (4, false), (6, true)]);
+        assert_eq!((f.code, f.unaccessed), (2, 1));
+        assert_eq!(f.data, 0);
+        assert_eq!(f.mixed, 0);
+        assert_eq!(
+            f.lines,
+            vec![
+                LineCoverage {
+                    line: 2,
+                    class: CdlClass::Code
+                },
+                LineCoverage {
+                    line: 4,
+                    class: CdlClass::Unaccessed
+                },
+                LineCoverage {
+                    line: 6,
+                    class: CdlClass::Code
+                },
+            ]
+        );
     }
 
     #[test]
