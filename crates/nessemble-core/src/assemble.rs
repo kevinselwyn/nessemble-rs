@@ -69,19 +69,6 @@ enum SymType {
     Enum,
 }
 
-/// Per-bank write coverage for `-C`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoverageReport {
-    /// Covered byte count for each PRG bank.
-    pub prg: Vec<u32>,
-    /// Covered byte count for each CHR bank.
-    pub chr: Vec<u32>,
-    /// Total bytes in a PRG bank (denominator).
-    pub prg_bank_size: u32,
-    /// Total bytes in a CHR bank (denominator).
-    pub chr_bank_size: u32,
-}
-
 /// A contiguous run of emitted ROM bytes attributed to a single source line —
 /// one entry in a [`SourceMap`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +92,8 @@ pub struct SourceSpan {
 /// no span bookkeeping and normal output is untouched.
 ///
 /// Every recorded offset is one the assembler actually wrote (the same set the
-/// `-C` write bitmap marks), and consecutive same-line bytes are coalesced into
-/// one span.
+/// internal write bitmap marks), and consecutive same-line bytes are coalesced
+/// into one span.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceMap {
     /// Spans in emission order.
@@ -222,7 +209,8 @@ pub struct Assembler {
     segment_prg: bool,
 
     rom: Vec<u8>,
-    /// Per-ROM-byte coverage bitmap (which bytes were written), for `-C`.
+    /// Per-ROM-byte write bitmap (which bytes were written). Used to bound
+    /// second-pass writes and as the basis for the source map's recording.
     coverage: Vec<bool>,
     offset_max: usize,
 
@@ -353,35 +341,6 @@ impl Assembler {
         self.run_pass(lines);
         self.validate_ines();
         (dedup(&self.errors), dedup(&self.warnings))
-    }
-
-    /// The per-bank coverage summary (`-C`), or `None` when not in iNES mode
-    /// (coverage is reported over PRG/CHR banks). Mirrors the reference
-    /// `get_coverage` output.
-    pub fn coverage_report(&self) -> Option<CoverageReport> {
-        if !self.nes {
-            return None;
-        }
-        let count = |start: usize, len: usize| -> u32 {
-            self.coverage
-                .get(start..start + len)
-                .map_or(0, |s| s.iter().filter(|&&c| c).count() as u32)
-        };
-        let mut prg = Vec::new();
-        for i in 0..self.ines.prg.max(0) as usize {
-            prg.push(count(i * BANK_PRG as usize, BANK_PRG as usize));
-        }
-        let mut chr = Vec::new();
-        let prg_bytes = self.ines.prg.max(0) as usize * BANK_PRG as usize;
-        for i in 0..self.ines.chr.max(0) as usize {
-            chr.push(count(prg_bytes + i * BANK_CHR as usize, BANK_CHR as usize));
-        }
-        Some(CoverageReport {
-            prg,
-            chr,
-            prg_bank_size: BANK_PRG as u32,
-            chr_bank_size: BANK_CHR as u32,
-        })
     }
 
     /// Enable or disable byte-exact source-map recording for the next [`run`].

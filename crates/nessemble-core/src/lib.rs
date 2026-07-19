@@ -6,7 +6,6 @@
 //! semantics, and error messages. Full iNES ROM output (header/banking/CHR)
 //! arrives in Phase 3.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 pub use nessemble_isa as isa;
@@ -19,7 +18,7 @@ mod parse;
 mod preprocess;
 pub mod tooling;
 
-pub use assemble::{CoverageReport, CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
+pub use assemble::{CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
 pub use preprocess::FileOverlay;
 
 /// The reference implementation version this crate targets for output parity.
@@ -74,32 +73,8 @@ pub struct Assembly {
     pub warnings: Vec<Diag>,
     /// Defined symbols, for rendering the list file (`-l`).
     pub symbols: Vec<ListSymbol>,
-    /// Per-bank write coverage (`-C`), or `None` when not in iNES mode.
-    pub coverage: Option<CoverageReport>,
     /// Byte-exact source map, or `None` unless [`Options::source_map`] was set.
     pub source_map: Option<SourceMap>,
-}
-
-/// Render the coverage summary (`-C`) exactly as the reference `get_coverage`:
-/// one `PRG XX:` / `CHR XX:` line per bank with `covered/total` counts.
-#[must_use]
-pub fn render_coverage(report: &CoverageReport) -> String {
-    let mut out = String::new();
-    for (i, covered) in report.prg.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "PRG {:02X}: {:>5}/{:<5}",
-            i, covered, report.prg_bank_size
-        );
-    }
-    for (i, covered) in report.chr.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "CHR {:02X}: {:>5}/{:<5}",
-            i, covered, report.chr_bank_size
-        );
-    }
-    out
 }
 
 /// Render the list-file (`-l`) contents from the defined symbols, mirroring the
@@ -533,13 +508,11 @@ fn assemble_impl(
     asm.set_record_source_map(options.source_map);
     let rom = asm.run(&lines).map_err(AssembleError)?;
     let symbols = asm.list_symbols();
-    let coverage = asm.coverage_report();
     let source_map = asm.source_map();
     Ok(Assembly {
         rom,
         warnings: asm.take_warnings(),
         symbols,
-        coverage,
         source_map,
     })
 }
@@ -821,28 +794,32 @@ bad line without equals
     }
 
     #[test]
-    fn source_map_union_matches_write_coverage() {
-        // Every span byte is a written byte and vice versa: the total span length
-        // equals the write-coverage byte count, and spans are disjoint and
-        // in-bounds. This is the load-bearing invariant — the map accounts for
-        // exactly the bytes the `-C` bitmap marks.
+    fn source_map_union_matches_emitted_bytes() {
+        // The total span length equals the exact number of bytes this program
+        // emits, and spans are disjoint and in-bounds. This is the load-bearing
+        // invariant — the map accounts for every written byte and no others.
         // A single PRG bank maps at $C000; `.org $C800` jumps forward, leaving a
         // gap of unwritten bytes the map must not claim.
-        let src = "\
-.inesprg 1\n.ineschr 1\n\
-    LDA #$01\n    STA $2000\n\
-    .db $de, $ad, $be, $ef\n\
-    .org $C800\n    RTS\n";
+        // `concat!` keeps each line's indentation (a `\`-continued string literal
+        // would strip it, turning `LDA` into a column-0 label).
+        let src = concat!(
+            ".inesprg 1\n",
+            ".ineschr 1\n",
+            "    LDA #$01\n",
+            "    STA $2000\n",
+            "    .db $de, $ad, $be, $ef\n",
+            "    .org $C800\n",
+            "    RTS\n",
+        );
         let assembly = asm_nes(src, true);
         let map = assembly.source_map.expect("map present");
-        let cov = assembly.coverage.expect("coverage present");
-        let covered: usize = cov.prg.iter().map(|&c| c as usize).sum::<usize>()
-            + cov.chr.iter().map(|&c| c as usize).sum::<usize>();
+        // LDA #imm (2) + STA abs (3) + .db ×4 (4) + RTS (1) = 10 emitted bytes.
+        let expected_emitted = 2 + 3 + 4 + 1;
 
         let span_bytes: usize = map.spans.iter().map(|s| s.len).sum();
         assert_eq!(
-            span_bytes, covered,
-            "spans must account for every written byte"
+            span_bytes, expected_emitted,
+            "spans must account for every emitted byte"
         );
 
         // Disjoint and within the ROM image.
