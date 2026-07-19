@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.14.0 - 2026-07-19
+
+### Minor changes
+
+- Add a `nessemble coverage <infile.asm> --cdl <file.cdl>` subcommand that reports
+  runtime execution coverage of an assembled ROM against an emulator CDL capture.
+  It classifies each PRG source line as code / data / mixed / unaccessed and writes
+  JSON and/or LCOV reports (`--format`, default both) plus a one-line summary.
+  FCEUX and Mesen flat-mask CDLs are supported via `--emulator` (default `fceux`);
+  multiple `--cdl` files are merged by bitwise OR. Phase 2 of
+  `plans/007-cdl-based-coverage.md`.
+- Add `nessemble coverage --scripts`, which also reports line coverage for the
+  project's `-p` Rhai pseudo-op scripts — revealing script code that never runs
+  during assembly. Executed lines come from a debugger-instrumented engine; the
+  coverable set is the compiled AST, so never-run branches show as uncovered. Each
+  script joins the JSON/LCOV report as its own file. Behind the `coverage` Cargo
+  feature (on by default). Phase 4 of `plans/007-cdl-based-coverage.md`.
+- Remove the `-C`/`--coverage` assemble-time write-coverage flag. It reported
+  per-bank byte counts (a disassembly-progress metric) that was not useful in
+  practice, and is superseded by the new `coverage` subcommand, which reports true
+  runtime execution coverage from an emulator CDL. Scripts invoking `nessemble -C …`
+  should switch to `nessemble coverage …`. Phase 3 of
+  `plans/007-cdl-based-coverage.md`.
+
+### Patch changes
+
+- Add a `coverage` module to `nessemble-core` that classifies a byte-exact source
+  map against an emulator CDL capture: a `CdlSource` trait, a `FlatMaskCdl` reader
+  (FCEUX masks), `classify_span`, and a per-file/per-line `CoverageReport` model.
+  This is Phase 1 of the CDL-based coverage plan
+  (`plans/007-cdl-based-coverage.md`); no CLI surface yet.
+- Fix `nessemble coverage` report paths so `genhtml` (and other LCOV tools) can
+  find the sources. The source map now identifies each file by its resolved
+  absolute path instead of the assembler's per-file display name (which lost the
+  top-level directory and left includes relative to a different base), and the
+  `coverage` command emits each `SF:`/JSON path relative to the current directory
+  (clean, no `../..`) when the file is under it, else absolute. Running
+  `genhtml coverage.lcov` from the project root now resolves every source.
+- Remove the oracle/parity developer tooling from xtask (the fetch-oracle, verify-goldens, and parity commands) and its supporting corpus-runner code. The repo has diverged from the original C implementation, so cross-checking output against the v1.1.1 reference binary is no longer useful. The hermetic golden-ROM tests in crates/nessemble-core/tests/corpus.rs remain the source of assembler-output regression coverage. Also drops the now-unused nessemble-core::REFERENCE_VERSION constant and the reference-version workspace metadata.
+- Add an opt-in byte-exact source map to the assembler (`Options::source_map`,
+  exposed as `Assembly::source_map`), recording which source line emitted each ROM
+  byte. Off by default and side-effect free — assembled bytes are unchanged. This
+  is the internal seam Phase 0 of the CDL-based coverage plan
+  (`plans/007-cdl-based-coverage.md`) needs; no CLI surface yet.
+
 ## 2.13.1 - 2026-07-18
 
 ### Patch changes

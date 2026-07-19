@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "nessemble-cli"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "clap",
  "nessemble-core",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "nessemble-core"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "nessemble-i18n",
  "nessemble-isa",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "nessemble-i18n"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "fluent-bundle",
  "unic-langid",
@@ -614,11 +614,11 @@ dependencies = [
 
 [[package]]
 name = "nessemble-isa"
-version = "2.13.1"
+version = "2.14.0"
 
 [[package]]
 name = "nessemble-lsp"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
@@ -629,14 +629,14 @@ dependencies = [
 
 [[package]]
 name = "nessemble-media"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "image",
 ]
 
 [[package]]
 name = "nessemble-script"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "image",
  "nessemble-media",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "nessemble-wasm"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "console_error_panic_hook",
  "nessemble-core",
@@ -1154,7 +1154,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "2.13.1"
+version = "2.14.0"
 dependencies = [
  "changesets",
  "nessemble-core",
