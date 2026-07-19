@@ -13,5 +13,9 @@ nessemble-isa.workspace = true
 nessemble-media.workspace = true
 nessemble-i18n.workspace = true
 
+[dev-dependencies]
+# Parses the hand-rolled JSON coverage report in tests to assert it is valid.
+serde_json.workspace = true
+
 [lints]
 workspace = true

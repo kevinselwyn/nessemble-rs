@@ -70,29 +70,79 @@ fn init_scaffolds_expected_project() {
 }
 
 #[test]
-fn coverage_reports_per_bank_for_ines_file_output() {
+fn coverage_subcommand_writes_lcov_from_a_cdl() {
     let dir = std::env::temp_dir().join(format!("nessemble-cov-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let asm = dir.join("cov.asm");
-    let nes = dir.join("cov.nes");
-    // One PRG + one CHR bank, with a couple of emitted bytes.
+    let cdl = dir.join("cov.cdl");
+    let lcov = dir.join("out.lcov");
+    // One PRG + one CHR bank: LDA #$01 (line 3, bytes 0-1), BRK (line 4, byte 2).
     std::fs::write(&asm, ".inesprg 1\n.ineschr 1\n    LDA #$01\n    BRK\n").unwrap();
+    // CDL is PRG(16384)+CHR(8192): mark the LDA bytes as code, leave BRK untouched.
+    let mut bytes = vec![0u8; 16384 + 8192];
+    bytes[0] = 0x01;
+    bytes[1] = 0x01;
+    std::fs::write(&cdl, &bytes).unwrap();
 
     let out = bin()
         .args([
-            "-C",
-            "-f",
-            "nes",
-            "-o",
-            nes.to_str().unwrap(),
+            "coverage",
             asm.to_str().unwrap(),
+            "--cdl",
+            cdl.to_str().unwrap(),
+            "--format",
+            "lcov",
+            "--out",
+            lcov.to_str().unwrap(),
         ])
         .output()
         .unwrap();
-    assert!(out.status.success());
-    let text = String::from_utf8(out.stdout).unwrap();
-    // Three emitted bytes (A9 01 00) land in PRG bank 0.
-    assert_eq!(text, "PRG 00:     3/16384\nCHR 00:     0/8192 \n");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The LDA line is covered, BRK is not → 1 of 2 lines.
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "coverage: 1/2 lines (50.0%)\n"
+    );
+
+    let report = std::fs::read_to_string(&lcov).unwrap();
+    assert!(report.contains("DA:3,1"), "{report}");
+    assert!(report.contains("DA:4,0"), "{report}");
+    assert!(report.contains("LF:2"), "{report}");
+    assert!(report.contains("LH:1"), "{report}");
+    assert!(report.ends_with("end_of_record\n"), "{report}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn coverage_rejects_a_cdl_of_the_wrong_size() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covbad-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let asm = dir.join("cov.asm");
+    let cdl = dir.join("bad.cdl");
+    std::fs::write(&asm, ".inesprg 1\n.ineschr 1\n    BRK\n").unwrap();
+    // Too small: not PRG+CHR sized.
+    std::fs::write(&cdl, vec![0u8; 100]).unwrap();
+
+    let out = bin()
+        .args([
+            "coverage",
+            asm.to_str().unwrap(),
+            "--cdl",
+            cdl.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("PRG+CHR"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -601,6 +601,7 @@ dependencies = [
  "nessemble-i18n",
  "nessemble-isa",
  "nessemble-media",
+ "serde_json",
 ]
 
 [[package]]

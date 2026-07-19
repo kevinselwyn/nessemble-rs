@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for CDL-Based Runtime Coverage
 
-> Status: **In progress — Phases 0–1 done.** This document specifies a new
+> Status: **In progress — Phases 0–3 done.** This document specifies a new
 > `nessemble coverage` subcommand that reports **runtime execution coverage** of
 > an assembled ROM against a **CDL (Code/Data Logger)** capture from an emulator,
 > and **retires the existing `-C`/`--coverage` write-coverage flag** it supersedes
@@ -11,10 +11,12 @@
 > and **Mesen** NES CDL files and emits **JSON** and **LCOV** reports; **BizHawk**
 > and an HTML report are deferred follow-ups (§5, §7). Coverage also extends to
 > **Rhai pseudo-op scripts** so unexecuted script branches are visible (§8).
-> **Phases 0–1** have landed: Phase 0 is the byte-exact source-map seam in
-> `nessemble-core`; Phase 1 adds the CDL core (`coverage` module — `CdlSource`,
-> `FlatMaskCdl` with FCEUX masks, `classify_span`, and the `CoverageReport`
-> model). The remaining phases (§9) are still to come.
+> **Phases 0–3** have landed: Phase 0 is the byte-exact source-map seam; Phase 1
+> the CDL core (`coverage` module — `CdlSource`, `FlatMaskCdl`, `classify_span`,
+> the `CoverageReport` model); Phase 2 the `nessemble coverage` subcommand with
+> FCEUX + Mesen `--emulator`, JSON/LCOV emitters, and the stale-CDL size guard;
+> Phase 3 removed the old `-C`/`--coverage` write-coverage flag. **Phase 4** (Rhai
+> script coverage) is the remaining phase (§9).
 
 ---
 
@@ -130,12 +132,14 @@ handles the container for both. But the two are **not bit-compatible above bit 3
 they share bit 0 (code), bit 1 (data), and bits 2–3 (bank), then diverge —
 FCEUX's bits 4/5/6 are indirect-code / indirect-data / PCM, whereas Mesen's are
 indirect-read / DMC / JSR-target. Folding a Mesen file through FCEUX's masks would
-therefore **misclassify** (e.g. Mesen's indirect-read would be counted as code via
-FCEUX's indirect-code bit). Because nothing in either file's size or content
+therefore **misclassify**. Because nothing in either file's size or content
 distinguishes them, the format **cannot be auto-detected** — the emulator must be
 stated (§6.4). Each emulator gets its own `code_mask`/`data_mask` on the shared
-`FlatMaskCdl` reader. **Action for v1:** confirm Mesen's exact bit positions
-against its `CodeDataLogger.h` before shipping the `Mesen` masks.
+`FlatMaskCdl` reader. **Verified (Phase 2):** Mesen2 uses one unified `CdlFlags`
+set for all consoles (`Core/Debugger/DebugTypes.h`) — `Code` `0x01`, `Data`
+`0x02`, `JumpTarget` `0x04`, `SubEntryPoint` `0x08`, with **no** indirect/PCM
+bits. So the shipped Mesen masks are **code = `0x0D`** (Code | JumpTarget |
+SubEntryPoint — the latter two are execution targets) and **data = `0x02`**.
 
 ### 5.3 BizHawk — named-block container (deferred)
 
@@ -342,12 +346,19 @@ and ships as its own changeset, consistent with prior plans.
   bytes. PRG-only; CHR-only lines are omitted. Unit-tested (flag decoding, the
   four classes, multi-byte/multi-span OR, too-small-file error, sort + CHR
   skip). No CLI yet; parity unaffected (no assemble-path change).
-- **Phase 2 — `coverage` command + JSON/LCOV.** Wire the subcommand, assemble
-  with the source map, classify, emit JSON and LCOV; stdout summary. Mesen masks
-  and `--emulator` selection.
-- **Phase 3 — remove `-C`.** Delete the flag, `render_coverage`, and the
-  write-`CoverageReport` type per §10, and drop the one CLI test that exercises it.
-  Small and self-contained (the parity harness does not touch `-C`).
+- **Phase 2 — `coverage` command + JSON/LCOV. ✅ Done.** Added the
+  `nessemble coverage <infile.asm> --cdl <file>...` subcommand: assembles in NES
+  mode with `source_map = true`, merges the CDL(s) by OR, guards the CDL size
+  against the assembled PRG+CHR (hard error on mismatch), classifies, and writes
+  JSON and/or LCOV (`--format`, default `all`) plus a one-line stdout summary.
+  `--emulator fceux|mesen` (default `fceux`) selects the masks; the emitters
+  (`to_json`/`to_lcov`, hand-rolled, JSON validated in tests) live on
+  `CoverageReport`. CLI integration tests cover a real report and the size guard.
+- **Phase 3 — remove `-C`. ✅ Done.** Deleted the `-C`/`--coverage` flag, its
+  print block, `render_coverage`, the write-`CoverageReport` type and
+  `coverage_report()` producer, `Assembly::coverage`, and the usage-doc entry;
+  replaced the one CLI test that exercised `-C` with the new `coverage` tests. The
+  internal write bitmap stays (the source map is built from it). Parity untouched.
 - **Phase 4 — Rhai script coverage.** `--scripts`, debugger-based instrumentation
   behind a feature; scripts join the report (§8).
 - **Later (own releases):** BizHawk container reader (§5.3); HTML report port
@@ -397,11 +408,13 @@ Settled with the requester before drafting:
 
 Open items to resolve during implementation (not blockers to the plan):
 
-- Exact Mesen PRG bit positions vs. FCEUX, verified against Mesen source (§5.2).
+- ~~Exact Mesen PRG bit positions vs. FCEUX~~ — **resolved (Phase 2)**: verified
+  against Mesen2 `DebugTypes.h`; masks are code `0x0D` / data `0x02` (§5.2).
 - Rhai `debugging` feature vs. the `default-features = false` + `fs`/wasm matrix;
-  `on_progress` sampler as plan B (§8).
+  `on_progress` sampler as plan B (§8). *(Phase 4.)*
 - iNES header/trainer offset reconciliation between the internal ROM buffer and
-  the CDL coordinate space (§6.1).
+  the CDL coordinate space (§6.1). *Phase 2 uses the header-less PRG+CHR size as
+  the expected CDL length; trainer handling is still to confirm.*
 
 ## 12. Out of scope
 
