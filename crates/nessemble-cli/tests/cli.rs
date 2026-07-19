@@ -147,6 +147,61 @@ fn coverage_rejects_a_cdl_of_the_wrong_size() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(feature = "coverage")]
+#[test]
+fn coverage_scripts_reports_an_unexecuted_rhai_branch() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covscr-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // A script with an else branch that never runs for a positive argument.
+    std::fs::write(
+        dir.join("pick.rhai"),
+        "fn custom(ints, texts) {\n    let out = [];\n    if ints[0] > 0 {\n        out += ints[0] & 0xFF;\n    } else {\n        out += 0xFF;\n    }\n    out\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("pseudo.txt"), ".pick = pick.rhai\n").unwrap();
+    std::fs::write(
+        dir.join("main.asm"),
+        ".inesprg 1\n.ineschr 1\n    .pick 5\n    RTS\n",
+    )
+    .unwrap();
+    let mut cdl = vec![0u8; 16384 + 8192];
+    for b in &mut cdl[0..4] {
+        *b = 0x01;
+    }
+    std::fs::write(dir.join("main.cdl"), &cdl).unwrap();
+    let lcov = dir.join("cov.lcov");
+
+    let out = bin()
+        .args([
+            "coverage",
+            dir.join("main.asm").to_str().unwrap(),
+            "--cdl",
+            dir.join("main.cdl").to_str().unwrap(),
+            "-p",
+            dir.join("pseudo.txt").to_str().unwrap(),
+            "--scripts",
+            "--format",
+            "lcov",
+            "--out",
+            lcov.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = std::fs::read_to_string(&lcov).unwrap();
+    // The script file appears, with its else-branch line (line 6) unexecuted.
+    assert!(report.contains("pick.rhai"), "{report}");
+    assert!(report.contains("DA:6,0"), "{report}");
+    // And an executed line is marked hit.
+    assert!(report.contains("DA:4,1"), "{report}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_dropped_in_locale_localizes_output_end_to_end() {
     // A translator drops `~/.nessemble/locales/<lang>.ftl`; selecting it with

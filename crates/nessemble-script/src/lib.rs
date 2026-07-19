@@ -42,6 +42,9 @@ use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
 #[cfg(feature = "fs")]
 use rhai_fs::FilesystemPackage;
 
+#[cfg(feature = "coverage")]
+pub mod coverage;
+
 /// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
 /// or a human-readable error message (a thrown string, or an engine error).
 ///

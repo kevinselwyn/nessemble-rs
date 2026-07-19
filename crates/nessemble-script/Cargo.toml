@@ -19,6 +19,11 @@ default = ["fs"]
 # default; disabled for targets without a filesystem (e.g. `wasm32-unknown-unknown`),
 # where scripts that call the file API get a clear "function not found" error.
 fs = ["dep:rhai-fs"]
+# Line coverage for scripts (`coverage` module): enables Rhai's debugger and AST
+# walk. Off by default — only the `nessemble coverage --scripts` path needs it,
+# and it is never used unless a debugger is explicitly registered, so ordinary
+# script execution is unaffected.
+coverage = ["rhai/debugging", "rhai/internals"]
 
 [dev-dependencies]
 # Encodes small PNGs for the `decode_png` tests.
