@@ -255,6 +255,10 @@ pub struct Assembler {
     /// `files`. Indexed by `cur_file`, so a directive is resolved relative to
     /// the file that contains it rather than the top-level file.
     dirs: Vec<PathBuf>,
+    /// Resolved filesystem path of each source file, parallel to `files`. Used
+    /// to give the source map real, uniformly-rooted paths (the `files` display
+    /// names are per-file-relative and lose the top-level directory).
+    paths: Vec<PathBuf>,
     /// Resolver for custom pseudo-ops (`.foo`): given the directive name, its
     /// numeric and string arguments, and the base directory, it returns the
     /// bytes to emit (or an error message).
@@ -282,6 +286,7 @@ impl Assembler {
         empty_byte: u8,
         files: Vec<String>,
         dirs: Vec<PathBuf>,
+        paths: Vec<PathBuf>,
         custom: CustomResolver,
     ) -> Self {
         Assembler {
@@ -316,6 +321,7 @@ impl Assembler {
             cur_file: 0,
             files,
             dirs,
+            paths,
             custom,
         }
     }
@@ -354,9 +360,14 @@ impl Assembler {
     }
 
     /// The byte-exact source map collected during the last [`run`], or `None`
-    /// when recording was not enabled (see [`set_record_source_map`]). File
-    /// indices are resolved to their display names here, sharing one `Arc<str>`
-    /// per file across all its spans.
+    /// when recording was not enabled (see [`set_record_source_map`]).
+    ///
+    /// Each file is identified by its **resolved filesystem path**
+    /// (canonicalized to an absolute path), so a consumer can locate the source
+    /// on disk — the per-file display names lose the top-level directory and are
+    /// each relative to a different include base. Files with no real path on disk
+    /// (e.g. `stdin` text assembly) fall back to their display name. One
+    /// `Arc<str>` per file is shared across all its spans.
     ///
     /// [`run`]: Assembler::run
     /// [`set_record_source_map`]: Assembler::set_record_source_map
@@ -364,13 +375,25 @@ impl Assembler {
         if !self.record_source_map {
             return None;
         }
-        let file_names: Vec<Arc<str>> = self.files.iter().map(|f| Arc::from(f.as_str())).collect();
+        // Resolve each file index once. Prefer the canonical absolute path; fall
+        // back to the raw resolved path, then to the display name.
+        let file_ids: Vec<Arc<str>> = (0..self.files.len())
+            .map(|i| {
+                let resolved = self
+                    .paths
+                    .get(i)
+                    .and_then(|p| p.canonicalize().ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .or_else(|| self.files.get(i).cloned());
+                Arc::from(resolved.unwrap_or_default().as_str())
+            })
+            .collect();
         let empty: Arc<str> = Arc::from("");
         let spans = self
             .spans
             .iter()
             .map(|r| SourceSpan {
-                file: file_names.get(r.file as usize).unwrap_or(&empty).clone(),
+                file: file_ids.get(r.file as usize).unwrap_or(&empty).clone(),
                 line: r.line,
                 rom_offset: r.rom_offset,
                 len: r.len,
