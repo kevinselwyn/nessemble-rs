@@ -13,6 +13,7 @@ pub use nessemble_isa as isa;
 
 mod assemble;
 pub mod ast;
+pub mod coverage;
 mod lexer;
 mod parse;
 mod preprocess;

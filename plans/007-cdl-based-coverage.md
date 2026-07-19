@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for CDL-Based Runtime Coverage
 
-> Status: **In progress — Phase 0 done.** This document specifies a new
+> Status: **In progress — Phases 0–1 done.** This document specifies a new
 > `nessemble coverage` subcommand that reports **runtime execution coverage** of
 > an assembled ROM against a **CDL (Code/Data Logger)** capture from an emulator,
 > and **retires the existing `-C`/`--coverage` write-coverage flag** it supersedes
@@ -11,8 +11,10 @@
 > and **Mesen** NES CDL files and emits **JSON** and **LCOV** reports; **BizHawk**
 > and an HTML report are deferred follow-ups (§5, §7). Coverage also extends to
 > **Rhai pseudo-op scripts** so unexecuted script branches are visible (§8).
-> **Phase 0** (the byte-exact source-map seam in `nessemble-core`) has landed;
-> the remaining phases (§9) are still to come.
+> **Phases 0–1** have landed: Phase 0 is the byte-exact source-map seam in
+> `nessemble-core`; Phase 1 adds the CDL core (`coverage` module — `CdlSource`,
+> `FlatMaskCdl` with FCEUX masks, `classify_span`, and the `CoverageReport`
+> model). The remaining phases (§9) are still to come.
 
 ---
 
@@ -332,9 +334,14 @@ and ships as its own changeset, consistent with prior plans.
   absent and output bytes are unchanged, parity stays **122/122**; with it on,
   tests assert byte-exact spans and that the total span length equals the write
   bitmap's covered-byte count (spans disjoint and in-bounds).
-- **Phase 1 — CDL core.** `CdlSource` trait, `FlatMaskCdl` (FCEUX masks),
-  `classify_span`, `CoverageReport` model. Unit-tested against the ported
-  range-classification cases.
+- **Phase 1 — CDL core. ✅ Done.** Added a `coverage` module to `nessemble-core`:
+  `CdlSource` trait, `FlatMaskCdl` (FCEUX masks, plus a `with_masks` constructor
+  the Mesen variant reuses in Phase 2), `classify_span`, and the report model
+  (`CoverageReport` / `FileCoverage` / `LineCoverage` / `CdlClass`), with
+  `build_report` grouping spans by file+line and OR-ing flags across a line's
+  bytes. PRG-only; CHR-only lines are omitted. Unit-tested (flag decoding, the
+  four classes, multi-byte/multi-span OR, too-small-file error, sort + CHR
+  skip). No CLI yet; parity unaffected (no assemble-path change).
 - **Phase 2 — `coverage` command + JSON/LCOV.** Wire the subcommand, assemble
   with the source map, classify, emit JSON and LCOV; stdout summary. Mesen masks
   and `--emulator` selection.
