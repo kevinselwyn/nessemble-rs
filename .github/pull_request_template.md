@@ -2,7 +2,7 @@
   Nessemble pull-request template.
 
   Fill in the sections that apply and delete the ones that don't — a one-line
-  CSS tweak doesn't need a Parity section. The HTML comments are guidance and
+  CSS tweak doesn't need a Golden ROMs section. The HTML comments are guidance and
   won't render in the final description; leave them or delete them. Keep the
   write-up focused on WHAT changed and WHY — the commit history has the
   play-by-play.
@@ -33,17 +33,18 @@
 
 -
 
-## Parity & safety
+## Golden ROMs & safety
 
-<!-- The assembler's ROM output is guarded by a golden-ROM parity harness
-     (`cargo run -p xtask -- parity`). If you touched nessemble-core or the
-     assemble path, confirm parity is still green and that the CLI `assemble`
-     path is byte-for-byte unchanged (new tooling/analysis paths should be
-     separate seams, not changes to the parity path). Delete this section for
-     changes that can't affect ROM output (docs, website, CI-only). -->
+<!-- The assembler's ROM output is guarded by the hermetic golden-ROM tests in
+     `crates/nessemble-core/tests/corpus.rs` (run by `cargo test`). If you
+     touched nessemble-core or the assemble path, confirm those tests are still
+     green and that the CLI `assemble` path is byte-for-byte unchanged (new
+     tooling/analysis paths should be separate seams, not changes to the
+     assemble path). Delete this section for changes that can't affect ROM
+     output (docs, website, CI-only). -->
 
-- Parity: **__ / __** golden ROMs still byte-for-byte
-- CLI `assemble` path unchanged (no parity-path edits)
+- Golden-ROM corpus tests still pass
+- CLI `assemble` path unchanged
 
 ## Verification
 
@@ -54,7 +55,6 @@
 - [ ] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets`
 - [ ] `cargo test --workspace`
-- [ ] `cargo run -p xtask -- parity` — if core / the assemble path was touched
 
 ## Docs & notes
 

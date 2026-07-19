@@ -17,12 +17,9 @@ The CLI binary is written to `target/release/nessemble`.
 cargo test
 ```
 
-The parity harness compares `nessemble` output against the committed golden
-ROMs:
-
-```text
-cargo run -p xtask -- parity
-```
+The test suite includes hermetic golden-ROM tests that assemble the committed
+corpus (`tests/corpus/`) and compare the output against the golden `.rom` files
+byte-for-byte — no external binary or network access is required.
 
 ## Cross-compilation
 

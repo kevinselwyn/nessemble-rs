@@ -24,8 +24,6 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all-features
-      - name: Parity
-        run: cargo run -p xtask -- parity
       - name: Changeset validate
         # Confirm every pending changeset parses and is on-convention, so a
         # malformed file can't break the Release action later. Presence is

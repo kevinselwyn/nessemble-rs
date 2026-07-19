@@ -10,5 +10,4 @@ Before submitting, please make sure the workspace is clean:
 cargo fmt --all
 cargo clippy --all-targets
 cargo test
-cargo run -p xtask -- parity
 ```
