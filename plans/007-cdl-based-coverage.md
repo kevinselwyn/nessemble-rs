@@ -4,9 +4,10 @@
 > `nessemble coverage` subcommand that reports **runtime execution coverage** of
 > an assembled ROM against a **CDL (Code/Data Logger)** capture from an emulator,
 > and **retires the existing `-C`/`--coverage` write-coverage flag** it supersedes
-> (§10). The feature is promoted from the Thrilla disassembly project's
-> `generate-coverage` utility, but re-founded on the assembler's own byte-exact
-> source map rather than a regex byte-count estimator (§4). v1 parses **FCEUX**
+> (§10). The feature is adapted from a `generate-coverage` utility that lives in
+> an external NES disassembly project, but re-founded on the assembler's own
+> byte-exact source map rather than a regex byte-count estimator (§4). v1 parses
+> **FCEUX**
 > and **Mesen** NES CDL files and emits **JSON** and **LCOV** reports; **BizHawk**
 > and an HTML report are deferred follow-ups (§5, §7). Coverage also extends to
 > **Rhai pseudo-op scripts** so unexecuted script branches are visible (§8). No
@@ -31,8 +32,8 @@ drops into CI and coverage services.
 
 Two requirements from the request:
 
-1. **Promote** Thrilla's `generate-coverage` utility directly into nessemble as a
-   built-in command (§4).
+1. **Promote** a `generate-coverage` utility (from an external NES disassembly
+   project) directly into nessemble as a built-in command (§4).
 2. **Supplant** the current `-C`/`--coverage` flag, which is little-used and of
    limited value (§10).
 
@@ -52,7 +53,7 @@ something else. Being precise about the difference is the whole design.
 | Input | The source alone | The source **plus** an emulator CDL capture |
 | When | Assemble time, static | Post-run, dynamic |
 | Granularity | Per bank (`covered/total` byte counts) | Per source line (code / data / mixed / unaccessed) |
-| Origin | C-reference `get_coverage` parity | Thrilla `generate-coverage` utility |
+| Origin | C-reference `get_coverage` parity | external `generate-coverage` utility |
 | Fate | **Removed** (§10) | **Added** as `nessemble coverage` |
 
 The `-C` metric is really *disassembly progress* — "how full is the ROM image" —
@@ -63,12 +64,11 @@ CDL provides.
 
 ## 3. Why nessemble is the right home
 
-The Thrilla utility lives outside the assembler and pays for it. To attribute CDL
-flags to source lines it must **guess byte counts from source text**: `instrBytes`
-re-derives each instruction's length from operand syntax, `csvCount` counts
-`.db`/`.dw`/`.color` commas, and `.incbin` ranges are recomputed with file-size
-arithmetic (`utils/apps/generate-coverage/src/coverage.ts`, Thrilla). Every one
-of those is a re-implementation of logic the assembler already owns exactly, and
+The external utility lives outside the assembler and pays for it. To attribute
+CDL flags to source lines it must **guess byte counts from source text**: it
+re-derives each instruction's length from operand syntax, counts `.db`/`.dw`/
+`.color` commas, and recomputes `.incbin` ranges with file-size arithmetic. Every
+one of those is a re-implementation of logic the assembler already owns exactly, and
 each is a place the estimate can drift from the truth (macros, conditional
 assembly, custom pseudo-ops, `.align`, and `.incbin` third-argument semantics are
 all invisible to a regex).
@@ -84,32 +84,29 @@ nessemble is the assembler. It already:
 Joining those two facts as bytes are emitted yields a **byte-exact source map**
 — `(file, line) → (rom_offset, len)` — for free, over the real post-macro,
 post-conditional program. That map is the foundation the estimator was
-approximating, and it is the compelling reason to move the feature in-tree rather
-than keep shelling out to a heuristic.
+approximating, and it is the compelling reason to build the feature in the
+assembler rather than lean on an external heuristic.
 
 ## 4. What we are promoting
 
-Thrilla's `generate-coverage` (`utils/apps/generate-coverage/`) does three things:
+The external `generate-coverage` utility does three things:
 
 1. **Source map** — walk each PRG `.asm`, follow `.include`, estimate the byte
    count of every emitting line, and record `line → (bank, addr, bytes)`.
 2. **Classify** — for each line's byte range, OR together the CDL flags and label
-   the line `code` / `data` / `mixed` / `unaccessed`
-   (`classifyRange`, using `cdlIsCode`/`cdlIsData`).
+   the line `code` / `data` / `mixed` / `unaccessed`.
 3. **Report** — render an Istanbul/NYC-style HTML index + per-file pages.
 
-We keep **step 2's classification model verbatim** (it is the useful part and is
-already unit-tested), **replace step 1** with the assembler's exact source map
-(§3), and **re-target step 3** at JSON + LCOV (§7), leaving the HTML renderer as a
-later port (§7.3). The CDL bit semantics we adopt unchanged:
+We keep **step 2's classification model verbatim** (it is the useful part),
+**replace step 1** with the assembler's exact source map (§3), and **re-target
+step 3** at JSON + LCOV (§7), leaving the HTML renderer as a later port (§7.3).
+The CDL bit semantics we adopt unchanged, taken from FCEUX's documented
+`xPdcAADC` PRG bit layout:
 
 ```
 code  ⇐ PRG_CODE (0x01) | PRG_INDIRECT_C (0x10)
 data  ⇐ PRG_DATA (0x02) | PRG_INDIRECT_D (0x20) | PRG_PCM (0x40)
 ```
-
-(from `utils/packages/lib/src/cdl.ts`, matching FCEUX's documented `xPdcAADC`
-PRG bit layout, `docs/fceux/fceux.md` in Thrilla).
 
 ## 5. The CDL format landscape
 
@@ -121,7 +118,7 @@ Findings, and what they imply for the design:
 A CDL file is exactly ROM-sized, one flag byte per ROM byte, **PRG section then
 CHR section**, mirroring iNES layout (no header in the CDL). PRG bit layout
 `xPdcAADC`; CHR bit layout `xxxxxxRD`. Multiple CDLs merge by bitwise OR. This is
-the format Thrilla already consumes.
+the format the external utility already consumes.
 
 ### 5.2 Mesen — flat ROM mask, FCEUX-superset (v1)
 
@@ -191,7 +188,7 @@ pub struct SourceMap { pub spans: Vec<SourceSpan> }   // in emission order
 
 This makes the source map a property of the real assembled program (macros,
 conditionals, custom pseudo-ops, `.incbin` all resolved), which is precisely what
-the Thrilla estimator could not see.
+the external estimator could not see.
 
 ### 6.2 CDL source + classifier (core)
 
@@ -210,7 +207,8 @@ pub fn classify_span(cdl: &dyn CdlSource, span: &SourceSpan) -> CdlCls;
 ```
 
 `classify_span` ORs the CDL flags across `span`'s byte range and returns the
-4-way class — a direct port of Thrilla's `classifyRange`. `FlatMaskCdl`
+4-way class — a direct port of the external utility's range classifier.
+`FlatMaskCdl`
 constructed with FCEUX or Mesen masks covers §5.1–5.2; `prg_len` guards
 short/oversized files (the current util rejects `< PRG_TOTAL`; nessemble knows
 the true PRG size from the assembled header and can validate exactly).
@@ -263,8 +261,8 @@ Mesen masks.
 
 - **v1 emits JSON + LCOV** (§6.3), the machine-readable pair chosen for CI and
   coverage-service ingestion (§11).
-- **HTML is deferred.** Thrilla's `generate-coverage` HTML renderer (sortable
-  index, per-file colour-coded pages) is good and can be ported later as a third
+- **HTML is deferred.** The external utility's HTML renderer (sortable index,
+  per-file colour-coded pages) is good and can be ported later as a third
   emitter over the same `CoverageReport` model — but it is not v1. Keeping the
   model emitter-agnostic (§6.3) is what makes that port additive.
 - The web/wasm build (`crates/nessemble-wasm`) is out of scope for v1; the report
@@ -314,7 +312,7 @@ and ships as its own changeset, consistent with prior plans.
   union of spans equals the write bitmap).
 - **Phase 1 — CDL core.** `CdlSource` trait, `FlatMaskCdl` (FCEUX masks),
   `classify_span`, `CoverageReport` model. Unit-tested against the ported
-  `classifyRange` cases.
+  range-classification cases.
 - **Phase 2 — `coverage` command + JSON/LCOV.** Wire the subcommand, assemble
   with the source map, classify, emit JSON and LCOV; stdout summary. Mesen masks
   and `--emulator` selection.
@@ -370,7 +368,7 @@ Open items to resolve during implementation (not blockers to the plan):
 ## 12. Out of scope
 
 - **CHR coverage.** CDLs carry CHR draw/read flags, but the disassembly source
-  map is PRG-only; CHR is ignored, matching the Thrilla util. Could be a later
+  map is PRG-only; CHR is ignored, matching the external util. Could be a later
   addition (CHR banks → tile usage) but not here.
 - **Capturing** CDLs. nessemble consumes an emulator's CDL; it does not run or
   emulate the ROM.
