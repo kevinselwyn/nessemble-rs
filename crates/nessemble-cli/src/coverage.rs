@@ -143,13 +143,9 @@ pub fn run(args: &CoverageArgs) -> u8 {
         }
     };
 
-    #[cfg(feature = "coverage")]
     let mut report = build_report(&source_map, cdl.as_ref());
-    #[cfg(not(feature = "coverage"))]
-    let report = build_report(&source_map, cdl.as_ref());
 
-    // Fold in Rhai script coverage (each project script as its own file), then
-    // re-sort so scripts and asm files interleave by path.
+    // Fold in Rhai script coverage (each project script as its own file).
     #[cfg(feature = "coverage")]
     if let Some(cov) = &scripts_cov {
         let cov = cov.borrow();
@@ -161,8 +157,17 @@ pub fn run(args: &CoverageArgs) -> u8 {
                     rows,
                 ));
         }
-        report.files.sort_by(|a, b| a.path.cmp(&b.path));
     }
+
+    // Rewrite every file path so `SF:` records are uniformly rooted: relative to
+    // the current directory when the file is under it (clean, no `../..`, and
+    // `genhtml report.lcov` resolves them from the project root), else absolute.
+    // Then sort so the report order matches the displayed paths.
+    let cwd = std::env::current_dir().ok();
+    for file in &mut report.files {
+        file.path = relative_to(cwd.as_deref(), &file.path);
+    }
+    report.files.sort_by(|a, b| a.path.cmp(&b.path));
 
     if let Err(code) = write_reports(&report, args.format, args.out.as_deref()) {
         return code;
@@ -177,6 +182,19 @@ pub fn run(args: &CoverageArgs) -> u8 {
     };
     println!("coverage: {}/{} lines ({pct:.1}%)", t.covered(), t.total());
     RETURN_OK
+}
+
+/// Present a source-file path for the report: relative to `base` (the current
+/// directory) when the file sits under it, otherwise unchanged. The source map
+/// gives canonical absolute paths, so this yields clean, `../..`-free relative
+/// paths for in-tree files while leaving out-of-tree files absolute.
+fn relative_to(base: Option<&Path>, path: &str) -> String {
+    if let Some(base) = base {
+        if let Ok(rel) = Path::new(path).strip_prefix(base) {
+            return rel.display().to_string();
+        }
+    }
+    path.to_string()
 }
 
 /// Read every `--cdl` file, verify each is the expected size, and OR them into
@@ -249,4 +267,33 @@ fn write_reports(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_to_strips_the_base_and_leaves_outsiders_alone() {
+        let base = Path::new("/proj/root");
+        // Under the base → clean relative path, no `../..`.
+        assert_eq!(
+            relative_to(Some(base), "/proj/root/src/main.asm"),
+            "src/main.asm"
+        );
+        assert_eq!(
+            relative_to(Some(base), "/proj/root/inc/tbl.asm"),
+            "inc/tbl.asm"
+        );
+        // Outside the base → left absolute.
+        assert_eq!(
+            relative_to(Some(base), "/elsewhere/x.asm"),
+            "/elsewhere/x.asm"
+        );
+        // No base (couldn't read cwd) → unchanged.
+        assert_eq!(
+            relative_to(None, "/proj/root/src/main.asm"),
+            "/proj/root/src/main.asm"
+        );
+    }
 }

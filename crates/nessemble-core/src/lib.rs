@@ -298,6 +298,7 @@ fn diagnose_impl(
         options.empty_byte,
         pre.files,
         pre.dirs,
+        pre.paths,
         custom,
     );
     let (errors, warnings) = asm.diagnostics(&lines);
@@ -399,6 +400,7 @@ pub fn diagnose_project_with(
         options.empty_byte,
         pre.files,
         pre.dirs,
+        pre.paths,
         custom,
     );
     let (errors, warnings) = asm.diagnostics(&lines);
@@ -503,6 +505,7 @@ fn assemble_impl(
         options.empty_byte,
         pre.files,
         pre.dirs,
+        pre.paths,
         custom,
     );
     asm.set_record_source_map(options.source_map);
@@ -791,6 +794,48 @@ bad line without equals
             (map.spans[0].line, map.spans[0].rom_offset, map.spans[0].len),
             (3, 0, 4)
         );
+    }
+
+    #[test]
+    fn source_map_uses_resolved_paths_for_files_and_includes() {
+        // File-based assembly identifies each source (top-level and an include in
+        // a sibling directory) by its real, canonical absolute path — not the
+        // per-file display name that loses the directory or carries `../`.
+        let dir = std::env::temp_dir().join(format!("nessemble-sm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("inc")).unwrap();
+        std::fs::write(
+            dir.join("src/main.asm"),
+            ".inesprg 1\n.ineschr 1\n    LDA #$01\n    .include \"../inc/tbl.asm\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("inc/tbl.asm"), "    .db $de, $ad\n").unwrap();
+
+        let opts = Options {
+            nes: true,
+            source_map: true,
+            ..Options::default()
+        };
+        let map = assemble_file(&dir.join("src/main.asm"), &opts)
+            .expect("assembles")
+            .source_map
+            .expect("map present");
+
+        let files: std::collections::BTreeSet<&str> =
+            map.spans.iter().map(|s| s.file.as_ref()).collect();
+        // Both files appear as absolute paths that exist and contain no `..`.
+        assert_eq!(files.len(), 2, "files: {files:?}");
+        for f in &files {
+            let p = Path::new(f);
+            assert!(p.is_absolute(), "not absolute: {f}");
+            assert!(p.exists(), "does not exist: {f}");
+            assert!(!f.contains(".."), "path not normalized: {f}");
+        }
+        assert!(files.iter().any(|f| f.ends_with("main.asm")));
+        assert!(files.iter().any(|f| f.ends_with("tbl.asm")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -253,6 +253,13 @@ pub struct CoverageReport { pub files: Vec<FileCoverage> }   // asm and .rhai al
   so `.rhai` files (§8) slot in with no format change.
 - A one-line **stdout summary** (covered/total lines, overall %) is printed for
   humans regardless of `--format`; it is not the deliverable, just a convenience.
+- **File paths (`SF:` / JSON `path`).** The source map identifies each file by its
+  **resolved, canonical absolute path** (the assembler's per-file display names
+  are each relative to a different include base and lose the top-level directory,
+  so `genhtml` cannot root them). The CLI then rewrites each path **relative to
+  the current directory** when the file is under it (clean, `../..`-free), else
+  leaves it absolute — so `genhtml report.lcov` resolves sources from the project
+  root. Script paths (§8) are rooted the same way.
 
 ### 6.4 CLI surface
 
