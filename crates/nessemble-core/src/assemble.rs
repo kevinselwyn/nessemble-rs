@@ -7,6 +7,7 @@
 //! match) but emit the raw written region.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
@@ -79,6 +80,37 @@ pub struct CoverageReport {
     pub prg_bank_size: u32,
     /// Total bytes in a CHR bank (denominator).
     pub chr_bank_size: u32,
+}
+
+/// A contiguous run of emitted ROM bytes attributed to a single source line —
+/// one entry in a [`SourceMap`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSpan {
+    /// Display name of the source file the bytes came from (the same name used
+    /// in diagnostics; `stdin` for the top-level source when assembling text).
+    pub file: Arc<str>,
+    /// 1-based line within `file`.
+    pub line: u32,
+    /// Byte offset into the assembled ROM image. This is the PRG-then-CHR layout
+    /// with **no iNES header** (the header is prepended only in the final NES
+    /// file), so it is the same coordinate space a CDL file uses.
+    pub rom_offset: usize,
+    /// Number of consecutive ROM bytes this span covers.
+    pub len: usize,
+}
+
+/// A byte-exact map from source lines to the ROM bytes they emitted, recorded in
+/// emission order over the real post-macro / post-conditional program. Produced
+/// only when [`crate::Options::source_map`] is set; otherwise the assembler does
+/// no span bookkeeping and normal output is untouched.
+///
+/// Every recorded offset is one the assembler actually wrote (the same set the
+/// `-C` write bitmap marks), and consecutive same-line bytes are coalesced into
+/// one span.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceMap {
+    /// Spans in emission order.
+    pub spans: Vec<SourceSpan>,
 }
 
 /// A defined symbol exposed for the list file (`-l`).
@@ -194,6 +226,14 @@ pub struct Assembler {
     coverage: Vec<bool>,
     offset_max: usize,
 
+    /// When set, record a byte-exact source map (see [`SourceMap`]) as bytes are
+    /// emitted. Off by default so ordinary assembly does no extra work.
+    record_source_map: bool,
+    /// Coalesced source spans collected during pass 2 when `record_source_map`
+    /// is set. Stored with a file *index* (into `files`) and resolved to
+    /// `Arc<str>` names only when [`Assembler::source_map`] is called.
+    spans: Vec<RawSpan>,
+
     symbols: Vec<Symbol>,
 
     enum_active: bool,
@@ -233,6 +273,16 @@ pub struct Assembler {
     custom: CustomResolver,
 }
 
+/// A source span as collected during assembly: like [`SourceSpan`] but keyed by
+/// a file *index* into `Assembler::files`, so no string is cloned per byte.
+#[derive(Clone)]
+struct RawSpan {
+    file: u32,
+    line: u32,
+    rom_offset: usize,
+    len: usize,
+}
+
 /// Resolves a custom pseudo-op to the bytes it emits. See [`Assembler::custom`].
 pub type CustomResolver =
     Box<dyn Fn(&str, &[i64], &[String], &std::path::Path) -> Result<Vec<u8>, String>>;
@@ -259,6 +309,8 @@ impl Assembler {
             rom: Vec::new(),
             coverage: Vec::new(),
             offset_max: 0,
+            record_source_map: false,
+            spans: Vec::new(),
             symbols: Vec::new(),
             enum_active: false,
             enum_value: 0,
@@ -330,6 +382,42 @@ impl Assembler {
             prg_bank_size: BANK_PRG as u32,
             chr_bank_size: BANK_CHR as u32,
         })
+    }
+
+    /// Enable or disable byte-exact source-map recording for the next [`run`].
+    /// Off by default; when off, [`source_map`] returns `None` and no span
+    /// bookkeeping happens.
+    ///
+    /// [`run`]: Assembler::run
+    /// [`source_map`]: Assembler::source_map
+    pub fn set_record_source_map(&mut self, on: bool) {
+        self.record_source_map = on;
+    }
+
+    /// The byte-exact source map collected during the last [`run`], or `None`
+    /// when recording was not enabled (see [`set_record_source_map`]). File
+    /// indices are resolved to their display names here, sharing one `Arc<str>`
+    /// per file across all its spans.
+    ///
+    /// [`run`]: Assembler::run
+    /// [`set_record_source_map`]: Assembler::set_record_source_map
+    pub fn source_map(&self) -> Option<SourceMap> {
+        if !self.record_source_map {
+            return None;
+        }
+        let file_names: Vec<Arc<str>> = self.files.iter().map(|f| Arc::from(f.as_str())).collect();
+        let empty: Arc<str> = Arc::from("");
+        let spans = self
+            .spans
+            .iter()
+            .map(|r| SourceSpan {
+                file: file_names.get(r.file as usize).unwrap_or(&empty).clone(),
+                line: r.line,
+                rom_offset: r.rom_offset,
+                len: r.len,
+            })
+            .collect();
+        Some(SourceMap { spans })
     }
 
     /// Symbols eligible for the list file (`-l`), excluding those only
@@ -406,6 +494,9 @@ impl Assembler {
         self.rsset = 0;
         self.if_stack.clear();
         self.offset_trainer = 0;
+        // Spans are collected fresh on pass 2; clearing here drops any from an
+        // earlier pass so the final map reflects only the emitting pass.
+        self.spans.clear();
     }
 
     /// Whether the current statement is suppressed by a false conditional
@@ -807,6 +898,9 @@ impl Assembler {
         if self.pass == 2 && offset < self.rom.len() {
             self.rom[offset] = byte;
             self.coverage[offset] = true;
+            if self.record_source_map {
+                self.record_span(offset);
+            }
         }
         if self.segment_prg {
             if self.pass == 1 && self.prg_offsets[self.prg_index] >= BANK_PRG {
@@ -820,6 +914,28 @@ impl Assembler {
             }
             self.chr_offsets[self.chr_index] += 1;
         }
+    }
+
+    /// Record that `offset` was just written on the current source line,
+    /// extending the previous span when it is the same line and the write is
+    /// contiguous, or starting a new span otherwise. Called only when
+    /// `record_source_map` is set.
+    fn record_span(&mut self, offset: usize) {
+        if let Some(last) = self.spans.last_mut() {
+            if last.file == self.cur_file
+                && last.line == self.cur_line
+                && last.rom_offset + last.len == offset
+            {
+                last.len += 1;
+                return;
+            }
+        }
+        self.spans.push(RawSpan {
+            file: self.cur_file,
+            line: self.cur_line,
+            rom_offset: offset,
+            len: 1,
+        });
     }
 
     // -- statement execution -----------------------------------------------

@@ -18,7 +18,7 @@ mod parse;
 mod preprocess;
 pub mod tooling;
 
-pub use assemble::{CoverageReport, CustomResolver, Diag, ListSymbol};
+pub use assemble::{CoverageReport, CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
 pub use preprocess::FileOverlay;
 
 /// The reference implementation version this crate targets for output parity.
@@ -33,6 +33,10 @@ pub struct Options {
     pub undocumented: bool,
     /// Byte used to fill unwritten ROM regions (`-e`).
     pub empty_byte: u8,
+    /// Record a byte-exact [`SourceMap`] during assembly (for the `coverage`
+    /// tooling path). Off by default; enabling it does not change the assembled
+    /// bytes, only whether the map is collected and exposed on [`Assembly`].
+    pub source_map: bool,
 }
 
 impl Default for Options {
@@ -41,6 +45,7 @@ impl Default for Options {
             nes: false,
             undocumented: false,
             empty_byte: 0xFF,
+            source_map: false,
         }
     }
 }
@@ -70,6 +75,8 @@ pub struct Assembly {
     pub symbols: Vec<ListSymbol>,
     /// Per-bank write coverage (`-C`), or `None` when not in iNES mode.
     pub coverage: Option<CoverageReport>,
+    /// Byte-exact source map, or `None` unless [`Options::source_map`] was set.
+    pub source_map: Option<SourceMap>,
 }
 
 /// Render the coverage summary (`-C`) exactly as the reference `get_coverage`:
@@ -522,14 +529,17 @@ fn assemble_impl(
         pre.dirs,
         custom,
     );
+    asm.set_record_source_map(options.source_map);
     let rom = asm.run(&lines).map_err(AssembleError)?;
     let symbols = asm.list_symbols();
     let coverage = asm.coverage_report();
+    let source_map = asm.source_map();
     Ok(Assembly {
         rom,
         warnings: asm.take_warnings(),
         symbols,
         coverage,
+        source_map,
     })
 }
 
@@ -753,5 +763,100 @@ bad line without equals
         let src = "FOO = $01\n.ifdef FOO\n.db $aa\n.else\n.db $bb\n.endif\n\
 .ifdef BAR\n.db $cc\n.else\n.db $dd\n.endif\n";
         assert_eq!(asm(src), vec![0xAA, 0xDD]);
+    }
+
+    /// Assemble `src` in NES mode with source-map recording toggled by `map`.
+    fn asm_nes(src: &str, map: bool) -> Assembly {
+        let opts = Options {
+            nes: true,
+            source_map: map,
+            ..Options::default()
+        };
+        assemble(src, &opts).expect("assembly succeeds")
+    }
+
+    #[test]
+    fn source_map_is_none_unless_requested() {
+        // Off by default: the map is absent and the assembled bytes are exactly
+        // the same as when it is on (recording is side-effect free).
+        let src = ".inesprg 1\n.ineschr 1\n    LDA #$01\n    BRK\n";
+        let off = asm_nes(src, false);
+        let on = asm_nes(src, true);
+        assert!(off.source_map.is_none());
+        assert!(on.source_map.is_some());
+        assert_eq!(off.rom, on.rom, "recording must not change output bytes");
+    }
+
+    #[test]
+    fn source_map_records_byte_exact_spans() {
+        // `LDA #$01` (2 bytes) on line 3 at offset 0; `BRK` (1 byte) on line 4 at
+        // offset 2. Both coalesce into one span per line.
+        let src = ".inesprg 1\n.ineschr 1\n    LDA #$01\n    BRK\n";
+        let map = asm_nes(src, true).source_map.expect("map present");
+        let spans: Vec<_> = map
+            .spans
+            .iter()
+            .map(|s| (s.file.as_ref().to_owned(), s.line, s.rom_offset, s.len))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("stdin".to_string(), 3, 0, 2),
+                ("stdin".to_string(), 4, 2, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_map_coalesces_a_multi_byte_data_line() {
+        // A four-byte `.db` on one line is a single span of length 4.
+        let src = ".inesprg 1\n.ineschr 1\n    .db $de, $ad, $be, $ef\n";
+        let map = asm_nes(src, true).source_map.expect("map present");
+        assert_eq!(map.spans.len(), 1);
+        assert_eq!(
+            (map.spans[0].line, map.spans[0].rom_offset, map.spans[0].len),
+            (3, 0, 4)
+        );
+    }
+
+    #[test]
+    fn source_map_union_matches_write_coverage() {
+        // Every span byte is a written byte and vice versa: the total span length
+        // equals the write-coverage byte count, and spans are disjoint and
+        // in-bounds. This is the load-bearing invariant — the map accounts for
+        // exactly the bytes the `-C` bitmap marks.
+        // A single PRG bank maps at $C000; `.org $C800` jumps forward, leaving a
+        // gap of unwritten bytes the map must not claim.
+        let src = "\
+.inesprg 1\n.ineschr 1\n\
+    LDA #$01\n    STA $2000\n\
+    .db $de, $ad, $be, $ef\n\
+    .org $C800\n    RTS\n";
+        let assembly = asm_nes(src, true);
+        let map = assembly.source_map.expect("map present");
+        let cov = assembly.coverage.expect("coverage present");
+        let covered: usize = cov.prg.iter().map(|&c| c as usize).sum::<usize>()
+            + cov.chr.iter().map(|&c| c as usize).sum::<usize>();
+
+        let span_bytes: usize = map.spans.iter().map(|s| s.len).sum();
+        assert_eq!(
+            span_bytes, covered,
+            "spans must account for every written byte"
+        );
+
+        // Disjoint and within the ROM image.
+        let mut ranges: Vec<(usize, usize)> = map
+            .spans
+            .iter()
+            .map(|s| (s.rom_offset, s.rom_offset + s.len))
+            .collect();
+        ranges.sort_unstable();
+        let rom_len = assembly.rom.len() - 16; // drop the iNES header
+        let mut prev_end = 0;
+        for (start, end) in ranges {
+            assert!(start >= prev_end, "spans overlap at offset {start}");
+            assert!(end <= rom_len, "span past end of ROM image");
+            prev_end = end;
+        }
     }
 }

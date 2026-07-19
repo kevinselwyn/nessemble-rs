@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for CDL-Based Runtime Coverage
 
-> Status: **Proposed — planning only.** This document specifies a new
+> Status: **In progress — Phase 0 done.** This document specifies a new
 > `nessemble coverage` subcommand that reports **runtime execution coverage** of
 > an assembled ROM against a **CDL (Code/Data Logger)** capture from an emulator,
 > and **retires the existing `-C`/`--coverage` write-coverage flag** it supersedes
@@ -10,8 +10,9 @@
 > **FCEUX**
 > and **Mesen** NES CDL files and emits **JSON** and **LCOV** reports; **BizHawk**
 > and an HTML report are deferred follow-ups (§5, §7). Coverage also extends to
-> **Rhai pseudo-op scripts** so unexecuted script branches are visible (§8). No
-> code is written yet — this PR is the plan.
+> **Rhai pseudo-op scripts** so unexecuted script branches are visible (§8).
+> **Phase 0** (the byte-exact source-map seam in `nessemble-core`) has landed;
+> the remaining phases (§9) are still to come.
 
 ---
 
@@ -324,11 +325,13 @@ committing to it; if the matrix is awkward, a fallback is a lighter
 Each phase leaves the tree green (`cargo test` + `cargo clippy` + `xtask parity`)
 and ships as its own changeset, consistent with prior plans.
 
-- **Phase 0 — source map seam.** Add `Options::source_map`, `SourceMap`/
-  `SourceSpan`, and recording at the emission sites; expose on `Assembly`.
-  No CLI yet. Guardrail: with the flag off, byte output and parity are identical
-  (§11); with it on, spans reconstruct the exact written ranges (test asserts the
-  union of spans equals the write bitmap).
+- **Phase 0 — source map seam. ✅ Done.** Added `Options::source_map`,
+  `SourceMap`/`SourceSpan`, span recording coalesced at the single `write_byte`
+  emission site (keyed by the assembler's `cur_file`/`cur_line`), and exposed the
+  map on `Assembly`. No CLI yet. Guardrails held: with the flag off the map is
+  absent and output bytes are unchanged, parity stays **122/122**; with it on,
+  tests assert byte-exact spans and that the total span length equals the write
+  bitmap's covered-byte count (spans disjoint and in-bounds).
 - **Phase 1 — CDL core.** `CdlSource` trait, `FlatMaskCdl` (FCEUX masks),
   `classify_span`, `CoverageReport` model. Unit-tested against the ported
   range-classification cases.
