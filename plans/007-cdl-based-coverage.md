@@ -120,17 +120,19 @@ CHR section**, mirroring iNES layout (no header in the CDL). PRG bit layout
 `xPdcAADC`; CHR bit layout `xxxxxxRD`. Multiple CDLs merge by bitwise OR. This is
 the format the external utility already consumes.
 
-### 5.2 Mesen — flat ROM mask, FCEUX-superset (v1)
+### 5.2 Mesen — flat ROM mask, but bit-incompatible with FCEUX (v1)
 
-Mesen's NES CDL is **also a flat ROM-sized mask** (PRG then CHR), so it is
-structurally identical to FCEUX and a single parser reads both. Its PRG flags are
-a **superset**: bit 0 code, bit 1 data, bits 2–3 bank, plus extra bits for
-jump/JSR targets, indirect reads, and DMC/PCM reads. Because we only fold flags
-into the two coarse `code`/`data` classes (§4), Mesen's extra bits are either
-already covered by the same masks or safely ignored. **Action for v1:** confirm
-Mesen's exact bit positions against its `CodeDataLogger.h` before shipping, and
-encode them as the `Mesen` variant's masks even where they equal FCEUX's, so the
-mapping is explicit rather than assumed.
+Mesen's NES CDL is **also a flat ROM-sized mask** (PRG then CHR), so one reader
+handles the container for both. But the two are **not bit-compatible above bit 3**:
+they share bit 0 (code), bit 1 (data), and bits 2–3 (bank), then diverge —
+FCEUX's bits 4/5/6 are indirect-code / indirect-data / PCM, whereas Mesen's are
+indirect-read / DMC / JSR-target. Folding a Mesen file through FCEUX's masks would
+therefore **misclassify** (e.g. Mesen's indirect-read would be counted as code via
+FCEUX's indirect-code bit). Because nothing in either file's size or content
+distinguishes them, the format **cannot be auto-detected** — the emulator must be
+stated (§6.4). Each emulator gets its own `code_mask`/`data_mask` on the shared
+`FlatMaskCdl` reader. **Action for v1:** confirm Mesen's exact bit positions
+against its `CodeDataLogger.h` before shipping the `Mesen` masks.
 
 ### 5.3 BizHawk — named-block container (deferred)
 
@@ -153,8 +155,12 @@ leaves a clean seam for `BizHawk`.
 | Emulator | Container | PRG flags (code / data) | v1? |
 |---|---|---|---|
 | FCEUX | flat ROM mask | `0x01\|0x10` / `0x02\|0x20\|0x40` | ✅ |
-| Mesen | flat ROM mask | superset of FCEUX (verify) | ✅ |
+| Mesen | flat ROM mask | shares bits 0–3; diverges 4–6 (verify) | ✅ |
 | BizHawk | named-block header | `0x01\|0x02` / `0x04` | ⏳ later |
+
+Because FCEUX and Mesen are indistinguishable by inspection (§5.2), the emulator
+is selected explicitly (`--emulator`, default `fceux`); there is no `auto` in v1
+(it only becomes meaningful once BizHawk's detectable header lands).
 
 ## 6. Architecture
 
@@ -208,10 +214,15 @@ pub fn classify_span(cdl: &dyn CdlSource, span: &SourceSpan) -> CdlCls;
 
 `classify_span` ORs the CDL flags across `span`'s byte range and returns the
 4-way class — a direct port of the external utility's range classifier.
-`FlatMaskCdl`
-constructed with FCEUX or Mesen masks covers §5.1–5.2; `prg_len` guards
-short/oversized files (the current util rejects `< PRG_TOTAL`; nessemble knows
-the true PRG size from the assembled header and can validate exactly).
+`FlatMaskCdl` constructed with FCEUX or Mesen masks covers §5.1–5.2.
+
+**Stale-CDL guard.** A CDL is a capture of one specific build and carries no ROM
+identity, so a report against drifted source silently misaligns. nessemble knows
+the true PRG size from the assembled header, so the command **hard-errors when the
+CDL's PRG section size does not equal the assembled PRG size** — the strongest
+check the format permits. No hash check is attempted (a CDL has nothing to hash
+against); the error message notes that equal sizes still do not guarantee the same
+build, so the CDL must come from the ROM this source assembles to.
 
 ### 6.3 Report model + emitters (core)
 
@@ -244,7 +255,7 @@ New subcommand in `crates/nessemble-cli` (joining `init`, `scripts`, `reference`
 nessemble coverage <infile.asm> --cdl <file.cdl> [options]
 
   --cdl <file>          CDL capture to read (required; repeatable → OR-merge)
-  --emulator <name>     fceux | mesen | auto   (default: auto-detect; bizhawk later)
+  --emulator <name>     fceux | mesen         (default: fceux; bizhawk later)
   --format <fmt>        json | lcov | all      (default: all)
   --out <path|dir>      output file, or directory for multi-format (default: cwd)
   --scripts             also report coverage for .rhai pseudo-op scripts (§8)
@@ -252,10 +263,10 @@ nessemble coverage <infile.asm> --cdl <file.cdl> [options]
 
 `coverage` assembles `<infile.asm>` with `Options::source_map = true` (and NES
 format), loads and merges the CDL(s), classifies, and writes the report(s). It is
-a read/report command: it never writes a ROM. Auto-detection distinguishes the
-flat mask (size == ROM size) from a BizHawk container (header magic) once that
-lands; for v1 `auto` picks the flat-mask reader and `--emulator` selects FCEUX vs
-Mesen masks.
+a read/report command: it never writes a ROM. `--emulator` is explicit (default
+`fceux`) because FCEUX and Mesen flat masks are indistinguishable by inspection
+(§5.2); no `auto` mode ships in v1. When BizHawk lands, its detectable container
+header enables an `auto` that separates container from flat mask.
 
 ## 7. Report formats & the HTML question
 
@@ -288,8 +299,16 @@ is a distinct instrumentation path that lands in the same report.
 - During a coverage run, every `custom(ints, texts)` invocation the assembly
   triggers (`nessemble_script::run`) executes on an **instrumented engine** that
   records hit positions; hits are unioned across all invocations of that script.
-- Emit each `.rhai` file as a `FileCoverage` (line → hit/not-hit) into the same
+- Emit each script as a `FileCoverage` (line → hit/not-hit) into the same
   `CoverageReport`, so JSON and LCOV carry asm and script coverage together.
+
+**Scope — user scripts only.** Coverage reports **only on-disk `.rhai` files the
+project supplies** via `-p pseudo.txt`, keyed by absolute path. The **bundled**
+scripts installed to `~/.nessemble/scripts` (e.g. `ease.rhai`) are **excluded** —
+they are nessemble's own, not the project's code under test. Inline script
+snippets carried directly in a mapping file (no standalone path) are **out of
+scope for v1**, since LCOV/JSON key each entry by file path; this is a noted
+limitation, not a blocker.
 
 **Cost containment:** the `debugging` feature adds per-node overhead and is only
 wanted under `--scripts`. Plan: put it behind a Cargo feature and construct the
@@ -316,8 +335,9 @@ and ships as its own changeset, consistent with prior plans.
 - **Phase 2 — `coverage` command + JSON/LCOV.** Wire the subcommand, assemble
   with the source map, classify, emit JSON and LCOV; stdout summary. Mesen masks
   and `--emulator` selection.
-- **Phase 3 — remove `-C`.** Delete the flag, `render_coverage`, and
-  `CoverageReport`(write-coverage) per §10; adjust corpus/parity fixtures.
+- **Phase 3 — remove `-C`.** Delete the flag, `render_coverage`, and the
+  write-`CoverageReport` type per §10, and drop the one CLI test that exercises it.
+  Small and self-contained (the parity harness does not touch `-C`).
 - **Phase 4 — Rhai script coverage.** `--scripts`, debugger-based instrumentation
   behind a feature; scripts join the report (§8).
 - **Later (own releases):** BizHawk container reader (§5.3); HTML report port
@@ -335,13 +355,14 @@ Per the settled decision (§11), **the old flag is removed, not merely hidden.**
   write-`CoverageReport` type + `coverage_report()` producer
   (`crates/nessemble-core`), and the `-C` usage doc entry
   (`docs/src/usage.md §-C`).
-- **Parity impact — the one real risk.** `-C` mirrors the C reference's
-  `get_coverage`, so the parity corpus almost certainly exercises it. Removing it
-  will need the corpus/parity fixtures updated (`xtask parity`, `tests/`), and
-  the removal called out in a changeset. This is why removal is its own phase
-  (Phase 3) and gated on a green parity run afterward, not folded into the
-  feature work. If parity coupling turns out deeper than expected, fall back to
-  deprecate-and-hide and raise it before proceeding.
+- **Parity impact — none.** Although `-C` mirrors the C reference's
+  `get_coverage`, the parity harness never invokes it: the golden-ROM comparison
+  in `xtask` passes no `--coverage` flag to the oracle (the only `-C` in `xtask`
+  is an unrelated `tar` flag). The **sole** coupling is one self-contained CLI
+  integration test, `coverage_reports_per_bank_for_ines_file_output`
+  (`crates/nessemble-cli/tests/cli.rs`), which is deleted with the feature.
+  Removal is still its own phase for a clean, revertible changeset, but it is a
+  one-test change, not a fixture migration.
 - The internal per-byte **write bitmap** (`Assembler.coverage`) **stays** — the
   new source map is built from the very same emission sites, so this is shared
   plumbing, not the removed feature.
@@ -350,12 +371,19 @@ Per the settled decision (§11), **the old flag is removed, not merely hidden.**
 
 Settled with the requester before drafting:
 
-1. **Fate of `-C`:** **removed entirely** (§10), accepting the parity-fixture
-   work as its own phase.
+1. **Fate of `-C`:** **removed entirely** (§10). Confirmed low-risk — the parity
+   harness does not exercise it; removal drops one CLI test.
 2. **Format scope:** **FCEUX + Mesen in v1** (one flat-mask reader, per-emulator
    masks); **BizHawk deferred** to a later phase behind `CdlSource` (§5).
 3. **Report output:** **machine-readable JSON + LCOV** in v1 (§6.3); HTML port
    deferred (§7.3).
+4. **Emulator selection:** **explicit `--emulator`, default `fceux`**, no `auto`
+   in v1 — FCEUX and Mesen flat masks are indistinguishable and bit-incompatible
+   above bit 3 (§5.2, §6.4).
+5. **Stale-CDL guard:** **hard-error on a PRG size mismatch**; no hash check
+   (a CDL has no ROM identity to hash) (§6.2).
+6. **Rhai scope:** **user-supplied `-p` `.rhai` files only**, keyed by absolute
+   path; bundled `~/.nessemble` scripts and inline snippets excluded in v1 (§8).
 
 Open items to resolve during implementation (not blockers to the plan):
 
@@ -374,5 +402,5 @@ Open items to resolve during implementation (not blockers to the plan):
   emulate the ROM.
 - **BizHawk** and **HTML** in v1 (both explicitly deferred, §5.3/§7.3).
 - **wasm/web** coverage UI (§7).
-- Any change to assembled ROM bytes, existing diagnostics, or the parity corpus
-  beyond the `-C` removal (§10).
+- Any change to assembled ROM bytes, existing diagnostics, or the parity corpus.
+  The `-C` removal (§10) is CLI/doc-only and does not touch the parity path.
