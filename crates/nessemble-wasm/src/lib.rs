@@ -124,6 +124,7 @@ pub fn assemble(source: &str, opts_json: &str) -> AssembleResult {
         nes: opts.format.as_deref() == Some("nes"),
         undocumented: opts.undocumented,
         empty_byte: opts.empty_byte.unwrap_or(0xFF),
+        ..Options::default()
     };
 
     let resolver = build_resolver(&opts.pseudo);
