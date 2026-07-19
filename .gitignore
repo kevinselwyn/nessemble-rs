@@ -2,10 +2,6 @@
 /target
 **/*.rs.bk
 
-# Parity harness working files (downloaded oracle binaries, reports)
-/.oracle/
-/tests/parity-report.txt
-
 # Generated documentation / website output
 /docs/book/
 /site/

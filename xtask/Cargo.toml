@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Developer tasks for nessemble-rs (parity harness, oracle fetch)"
+description = "Developer tasks for nessemble-rs (wasm build, site build, release changesets)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

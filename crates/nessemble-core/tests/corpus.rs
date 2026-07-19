@@ -1,7 +1,7 @@
-//! Hermetic parity tests against the committed golden ROMs for the in-scope
-//! (Phase 2) subset of the reference corpus. No oracle binary or network is
-//! required — the `.rom` files are the goldens the reference v1.1.1 binary
-//! produces (verified separately by `xtask verify-goldens`).
+//! Hermetic tests against the committed golden ROMs for the in-scope
+//! (Phase 2) subset of the corpus. No external binary or network is required —
+//! the `.rom` files are the committed goldens the assembler must reproduce
+//! byte-for-byte.
 
 use std::path::{Path, PathBuf};
 
@@ -141,8 +141,7 @@ fn include_and_trainer_examples_match() {
 
 #[test]
 fn list_file_matches_reference() {
-    // `.rs` reservations list as labels (`BANK/VALUE = name`); this exact
-    // output was verified byte-for-byte against the v1.1.1 oracle's `-l`.
+    // `.rs` reservations list as labels (`BANK/VALUE = name`).
     let dir = corpus_dir().join("examples").join("rs");
     let a = assemble_file(&dir.join("rs.asm"), &Options::default()).unwrap();
     let expected = "[labels]\n\

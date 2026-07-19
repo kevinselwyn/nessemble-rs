@@ -105,7 +105,7 @@ crates/
   nessemble-cli/     # the `nessemble` binary
 web/                 # <nessemble-assembler> web component (wraps the wasm build)
 website/             # marketing site (deployed with the manual to GitHub Pages)
-xtask/               # developer tasks (parity harness, oracle fetch, `dist` site build)
+xtask/               # developer tasks (wasm build, `dist` site build, release changesets)
 tests/corpus/        # assemble fixtures (.asm + golden .rom)
 ```
 
@@ -120,19 +120,14 @@ cargo fmt --all --check  # formatting
 cargo clippy --all-targets --all-features
 ```
 
-## Parity harness
+## Corpus tests
 
-`nessemble` is validated against a corpus of committed golden `.rom` files —
-**all 122 reproduce byte-for-byte**. The harness can optionally cross-check the
-goldens against a reference binary.
+`nessemble` is validated against a corpus of committed golden `.rom` files under
+[`tests/corpus/`](tests/corpus/). The hermetic golden tests run as part of the
+normal test suite — no external binary or network access is required:
 
 ```bash
-# Run nessemble over the corpus and report parity (writes tests/parity-report.txt)
-cargo run -p xtask -- parity
-
-# Optional: download a reference binary and confirm it reproduces every golden
-cargo run -p xtask -- fetch-oracle
-cargo run -p xtask -- verify-goldens
+cargo test -p nessemble-core
 ```
 
 ## Documentation

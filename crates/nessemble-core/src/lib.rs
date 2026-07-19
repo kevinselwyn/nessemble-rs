@@ -21,9 +21,6 @@ pub mod tooling;
 pub use assemble::{CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
 pub use preprocess::FileOverlay;
 
-/// The reference implementation version this crate targets for output parity.
-pub const REFERENCE_VERSION: &str = "1.1.1";
-
 /// Options controlling an assembly run.
 #[derive(Debug, Clone)]
 pub struct Options {

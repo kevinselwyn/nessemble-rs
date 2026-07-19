@@ -4,7 +4,7 @@
 # and therefore never opens a PR — in a state the CI pipeline would reject.
 #
 # This mirrors .github/workflows/ci.yml:
-#   * the `check` job   -> cargo fmt / clippy / test / xtask parity / changeset check
+#   * the `check` job   -> cargo fmt / clippy / test / changeset check
 #   * the `changeset`   -> a PR must add a changeset under .changeset/
 #
 # On any failure the hook writes an explanation to stderr and exits 2, which
@@ -56,11 +56,10 @@ run() {
   fi
 }
 
-# --- `check` job: fmt / clippy / test / parity / changeset check ---------------
+# --- `check` job: fmt / clippy / test / changeset check ------------------------
 run "Format"           "cargo fmt --all"                                   -- cargo fmt --all --check
 run "Clippy"           "cargo clippy --all-targets --all-features -- -D warnings" -- cargo clippy --all-targets --all-features -- -D warnings
 run "Test"             "cargo test --all-features"                          -- cargo test --all-features
-run "Parity"           "cargo run -p xtask -- parity"                       -- cargo run -p xtask -- parity
 run "Changeset validate" "cargo run -p xtask -- changeset check"            -- cargo run -p xtask -- changeset check
 
 # --- `changeset` job: a PR must add a changeset (unless opted out) -------------

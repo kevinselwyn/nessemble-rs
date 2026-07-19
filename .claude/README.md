@@ -14,7 +14,6 @@ It mirrors both CI jobs:
 | Format                                                | `cargo fmt --all --check` |
 | Clippy                                                 | `cargo clippy --all-targets --all-features -- -D warnings` |
 | Test                                                  | `cargo test --all-features` |
-| Parity                                                | `cargo run -p xtask -- parity` |
 | Changeset validate                                    | `cargo run -p xtask -- changeset check` |
 | `changeset` job (PR must add a changeset)             | checks for a new `.changeset/*.md` on the branch |
 

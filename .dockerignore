@@ -4,7 +4,6 @@
 **/*.rs.bk
 .git
 .github
-.oracle
 docs/book/
 site/
 crates/nessemble-wasm/pkg/
