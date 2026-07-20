@@ -51,14 +51,15 @@ use lsp_types::{
     DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     FoldingRange, FoldingRangeKind, FoldingRangeParams, FoldingRangeProviderCapability,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, ReferenceParams,
-    RenameParams, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit,
+    MarkupContent, MarkupKind, NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range,
+    ReferenceParams, RenameParams, SemanticToken, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
+    WorkspaceEdit,
 };
 
-use nessemble_core::tooling::{self, LexKind};
+use nessemble_core::tooling::{self, LexKind, RuleSeverity};
 use nessemble_core::{
     diagnose_project_with, diagnose_source_with, lenient_custom_resolver, parse_pseudo_mapping,
     Diag, ListSymbol, Options, ProjectDiagnostics,
@@ -172,7 +173,7 @@ impl Server {
     /// refresh its symbol table, and produce the publishes to send — including
     /// empty sets that clear files whose problems are now gone.
     fn analyze_and_publish(&mut self, changed: &Url) -> Vec<PublishDiagnosticsParams> {
-        let results = self.compute_diagnostics(changed);
+        let results = self.with_lint(self.compute_diagnostics(changed));
 
         // Project-wide symbols enable cross-file completion/hover; keep the
         // previous set when a transient error yielded none, so they don't blink.
@@ -198,6 +199,20 @@ impl Server {
         }
         self.published = now;
         out
+    }
+
+    /// Append lint findings to every document being (re)published this round.
+    /// Linting is intra-file, so each open buffer is scanned on its own — no
+    /// include graph — honoring the `.nessemblerc` `lint` config discovered from
+    /// the buffer's path. The findings are added on top of the assemble
+    /// diagnostics already gathered for that document.
+    fn with_lint(&self, mut results: DiagResults) -> DiagResults {
+        for (uri, diags) in &mut results.per_file {
+            if let Some(doc) = self.documents.get(uri) {
+                diags.extend(lint_diagnostics(uri, &doc.text));
+            }
+        }
+        results
     }
 
     /// The raw `.include`/`.inestrn` targets of `file`. An open buffer is scanned
@@ -736,6 +751,55 @@ fn project_diag_to_lsp(d: &Diag, severity: DiagnosticSeverity, text: &str) -> Di
         source: Some("nessemble".to_string()),
         message: d.message.clone(),
         ..Default::default()
+    }
+}
+
+/// Lint the buffer `text` (identified by `uri`) and return its findings as LSP
+/// diagnostics. The `.nessemblerc` `lint` config is discovered from the buffer's
+/// path (best-effort: a missing/invalid config yields the built-in defaults or,
+/// on a hard config error, no lint diagnostics — never a crash). Findings are
+/// published at a deliberately gentle severity (`INFORMATION`/`HINT`) with
+/// `source = "nessemble-lint"` and the rule id in `code`, so editors render them
+/// as suggestions distinct from the assembler's errors and warnings.
+fn lint_diagnostics(uri: &Url, text: &str) -> Vec<Diagnostic> {
+    let path = uri_to_path(uri);
+    let Ok(config) = nessemble_rc::Config::resolve(&path, &nessemble_rc::Choice::Discover) else {
+        return Vec::new();
+    };
+    let lint_cfg = config.lint_for(&path);
+    let ignore = |name: &str| lint_cfg.is_ignored_name(name);
+    let opts = tooling::LintOptions {
+        severities: lint_cfg.severities.clone(),
+        window: lint_cfg.window,
+        ignore: &ignore,
+    };
+    tooling::lint(text, &opts)
+        .into_iter()
+        .map(|f| {
+            let severity = lint_severity(lint_cfg.severities.get(f.rule));
+            // A backtick-quoted subject lets `diagnostic_range` narrow to the
+            // label token on the line.
+            let message = format!("code block `{}` has no nearby comment", f.subject);
+            let line = f.line.saturating_sub(1);
+            Diagnostic {
+                range: diagnostic_range(text, line, &message),
+                severity: Some(severity),
+                source: Some("nessemble-lint".to_string()),
+                code: Some(NumberOrString::String(f.rule.id().to_string())),
+                message,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// Map a lint rule's severity onto a gentle LSP severity: an `error` rule reads
+/// as `INFORMATION`, a `warn` rule as `HINT` — both quieter than the assembler's
+/// `WARNING`/`ERROR`. (`off` rules never produce findings.)
+fn lint_severity(severity: RuleSeverity) -> DiagnosticSeverity {
+    match severity {
+        RuleSeverity::Error => DiagnosticSeverity::INFORMATION,
+        _ => DiagnosticSeverity::HINT,
     }
 }
 
@@ -2566,5 +2630,120 @@ mod tests {
         assert!(!d.is_empty(), "unknown custom pseudo-op should be flagged");
 
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    // ─── Lint diagnostics ─────────────────────────────────────────────────────
+
+    /// The lint diagnostics of `text` (those sourced from `nessemble-lint`).
+    fn lint_only(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+        diags
+            .iter()
+            .filter(|d| d.source.as_deref() == Some("nessemble-lint"))
+            .collect()
+    }
+
+    #[test]
+    fn lint_flags_an_undocumented_block_at_a_gentle_severity() {
+        let uri = Url::parse("file:///lint_undoc.asm").unwrap();
+        // No `.nessemblerc` up the tree → built-in defaults (warn, window 3).
+        let diags = lint_diagnostics(&uri, "\nwidget:\n    rts\n");
+        assert_eq!(diags.len(), 1);
+        let d = &diags[0];
+        assert_eq!(d.source.as_deref(), Some("nessemble-lint"));
+        assert_eq!(d.severity, Some(DiagnosticSeverity::HINT));
+        assert_eq!(
+            d.code,
+            Some(NumberOrString::String("require-block-comment".into()))
+        );
+        // Range narrows to the `widget` label on line 1 (0-based).
+        assert_eq!(d.range.start.line, 1);
+        assert_eq!(d.range.start.character, 0);
+        assert_eq!(d.range.end.character, 6);
+    }
+
+    #[test]
+    fn lint_is_clean_when_a_comment_is_near() {
+        let uri = Url::parse("file:///lint_clean.asm").unwrap();
+        let diags = lint_diagnostics(&uri, "\n; documents the routine\nwidget:\n    rts\n");
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn lint_diagnostics_publish_on_open_and_clear_when_documented() {
+        let dir = workspace("lint-open");
+        let file = dir.join("a.asm");
+        let mut server = Server::default();
+
+        // Open an undocumented block → a lint diagnostic is published.
+        let pubs = did_open(&mut server, &file, "\nwidget:\n    rts\n");
+        let d = diags_for(&pubs, &file).expect("a.asm published");
+        assert_eq!(lint_only(d).len(), 1);
+
+        // Change the buffer to add a nearby comment → the lint diagnostic clears.
+        let uri = Url::from_file_path(&file).unwrap();
+        let pubs = server.apply_notification(
+            DidChangeTextDocument::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": "\n; now documented\nwidget:\n    rts\n" }]
+            }),
+        );
+        let d = diags_for(&pubs, &file).expect("a.asm republished");
+        assert!(
+            lint_only(d).is_empty(),
+            "comment should clear the lint finding"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lint_honors_nessemblerc_ignore() {
+        let dir = workspace("lint-ignore");
+        write(&dir, ".nessemblerc", r#"{"lint":{"ignore":["^loc_"]}}"#);
+        let file = dir.join("a.asm");
+        let uri = Url::from_file_path(&file).unwrap();
+        let diags = lint_diagnostics(&uri, "\nloc_c000:\n    nop\n    rts\n\nreal:\n    rts\n");
+        let subjects: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            !subjects.iter().any(|m| m.contains("loc_c000")),
+            "{subjects:?}"
+        );
+        assert!(subjects.iter().any(|m| m.contains("real")), "{subjects:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lint_off_rule_is_silent() {
+        let dir = workspace("lint-off");
+        write(
+            &dir,
+            ".nessemblerc",
+            r#"{"lint":{"rules":{"require-block-comment":"off"}}}"#,
+        );
+        let file = dir.join("a.asm");
+        let uri = Url::from_file_path(&file).unwrap();
+        let diags = lint_diagnostics(&uri, "\nwidget:\n    rts\n");
+        assert!(diags.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lint_error_rule_maps_to_information() {
+        let dir = workspace("lint-err");
+        write(
+            &dir,
+            ".nessemblerc",
+            r#"{"lint":{"rules":{"require-block-comment":"error"}}}"#,
+        );
+        let file = dir.join("a.asm");
+        let uri = Url::from_file_path(&file).unwrap();
+        let diags = lint_diagnostics(&uri, "\nwidget:\n    rts\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::INFORMATION));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

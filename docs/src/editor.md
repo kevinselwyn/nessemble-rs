@@ -22,6 +22,12 @@ Once connected, the server provides:
 - **Diagnostics** — errors and warnings as you type, each underlined at the
   offending token. Several problems are reported at once (the analyzer recovers
   past the first error), and includes are followed.
+- **Lint hints** — the same style findings as the
+  [`nessemble lint`](usage.md#lint-opt--path-) CLI appear inline, at a gentler
+  severity (Information/Hint) and tagged with the `nessemble-lint` source so they
+  read as suggestions distinct from assembler errors. They honor the project's
+  [`.nessemblerc` `lint`](usage.md#lint) config (rule severities, comment window,
+  ignored label names), and clear as soon as you document the flagged block.
 - **Project-aware analysis** — when a workspace folder is open, a file that is
   `.include`d into a larger program is analyzed *in the context of that program*,
   so symbols defined in sibling or parent files are not reported as undefined.
