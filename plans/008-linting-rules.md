@@ -6,8 +6,9 @@
 > **a code block that opens without an explanatory comment is flagged.** It is
 > the ESLint to the formatter's Prettier — the two are deliberately separate
 > tools that share one lexer and one `.nessemblerc`. All open decisions have been
-> settled with the maintainer (see [§11](#11-decisions)); the remaining choices
-> are implementation details called out inline.
+> settled with the maintainer (see [§11](#11-decisions)), including the two
+> former implementation choices: the ignore regex uses **`regex-lite`**, and the
+> config layer is **promoted to a shared `nessemble-rc` crate**.
 
 ---
 
@@ -291,16 +292,15 @@ stay out of core — exactly the boundary the formatter drew for `serde`.
 
 **Config (where `regex` lives).** The `.nessemblerc` `lint` section is parsed
 with `serde` and compiled to a `LintOptions` — including turning the `ignore`
-regex list into the `&dyn Fn(&str) -> bool` predicate core wants. `regex`
+regex list into the `&dyn Fn(&str) -> bool` predicate core wants. `regex-lite`
 compilation is the **only** new third-party dependency, and it belongs in the
-config layer, **added as a direct dependency of `nessemble-cli` (and the shared
-config crate below), never of core** — the same pattern as `serde`.
+shared `nessemble-rc` config crate (below), **never in core** — the same pattern
+as `serde`.
 
-> **Open implementation choice (regex crate):** default to **`regex-lite`**
-> (pure-Rust, zero transitive deps, in keeping with the "core stays
-> dependency-light" ethos and small binary size) unless full-`regex` performance
-> or features are later needed; anchored name patterns don't need the big engine.
-> Decide when Phase 2 lands; either way it's a leaf dep of the config layer.
+> **Regex crate (settled): `regex-lite`.** Pure-Rust, zero transitive deps, in
+> keeping with the "core stays dependency-light" ethos and small binary size;
+> anchored name patterns don't need the full `regex` engine. It's a leaf
+> dependency of the `nessemble-rc` config crate only — never of core.
 
 **CLI (`nessemble-cli/src/lint.rs`) — new module.** Argument parsing
 (`LintArgs`: paths, `--config`, `--no-config`, `--max-warnings`, `--quiet`) in
@@ -320,15 +320,14 @@ users filter or dim them. This is a per-buffer, single-file analysis (no include
 graph needed — the rule is intra-file), so it also runs when no workspace root is
 open.
 
-> **Sharing config between CLI and LSP.** The LSP must read the same
+> **Sharing config between CLI and LSP (settled).** The LSP must read the same
 > `.nessemblerc` `lint` section the CLI does, but `rc.rs` currently lives inside
-> `nessemble-cli` (which the LSP can't depend on). Phase 3 **promotes the config
-> layer into a small shared crate** (e.g. `nessemble-rc`) that owns
-> `.nessemblerc` discovery + parsing + regex compilation, depended on by both the
-> CLI and the LSP. Bonus: this also lets the LSP honor the *formatter*'s
-> `.nessemblerc` options later, which it doesn't today. (Lighter fallback if the
-> crate split proves heavy: the LSP does its own minimal discovery of just the
-> `lint` block — but the shared crate is the cleaner target.)
+> `nessemble-cli` (which the LSP can't depend on). The plan **promotes the config
+> layer into a new shared crate, `nessemble-rc`**, that owns `.nessemblerc`
+> discovery + parsing + `regex-lite` compilation, depended on by both the CLI and
+> the LSP. `nessemble-cli` re-exports or thinly wraps it so the existing
+> `format` config path keeps working unchanged. Bonus: this also lets the LSP
+> honor the *formatter*'s `.nessemblerc` options later, which it doesn't today.
 
 **Wiring.** `main.rs`: `Lint(lint::LintArgs)` variant + dispatch arm.
 `docs/src/usage.md`: a `lint` command section and a `.nessemblerc` `lint`
@@ -352,23 +351,27 @@ report, and exit codes — using built-in defaults (rule at `warn`, window 3, no
 ignores). *Verify:* CLI integration tests for grouped output, the summary footer,
 `--quiet`, `--max-warnings`, a clean file, a directory walk, and a missing path.
 
-**Phase 2 — `.nessemblerc` `lint` section + regex ignore.** Extend the config
-schema (`rules` severity map with `[severity, options]`, `window`, `ignore`) with
-`deny_unknown_fields` + post-parse rule-name validation; add the `regex`
-(`regex-lite`) dependency to the config layer; compile `ignore` into the
-predicate; map severities to display/exit. Support `lint` inside `overrides`.
-*Verify:* config unit tests (severity parse, unknown-key and unknown-rule errors,
-malformed-regex error, override layering) + CLI integration tests (ignore regex
-exempts matching labels, per-rule `off`, `error` → non-zero exit,
-`--max-warnings`).
+**Phase 2 — `nessemble-rc` shared crate + `.nessemblerc` `lint` section + regex
+ignore.** Extract the existing `nessemble-cli/src/rc.rs` config layer into a new
+**`nessemble-rc`** crate (`.nessemblerc` discovery, parsing, glob matching,
+`overrides`), and have `nessemble-cli` depend on it so the `format` config path
+is unchanged. Extend the schema with the `lint` block (`rules` severity map with
+`[severity, options]`, `window`, `ignore`), `deny_unknown_fields` + post-parse
+rule-name validation; add the **`regex-lite`** dependency to `nessemble-rc` and
+compile `ignore` into the predicate; map severities to display/exit. Support
+`lint` inside `overrides`. *Verify:* `nessemble-rc` unit tests (severity parse,
+unknown-key and unknown-rule errors, malformed-regex error, override layering,
+glob matching moved with the crate) + CLI integration tests (ignore regex exempts
+matching labels, per-rule `off`, `error` → non-zero exit, `--max-warnings`).
 
-**Phase 3 — LSP diagnostics + shared config crate.** Promote the config layer to
-a shared crate consumed by both CLI and LSP; run `tooling::lint` per open buffer;
-publish findings as `INFORMATION`/`HINT` diagnostics with `source =
-"nessemble-lint"`, honoring the discovered `lint` config; clear them when a
-comment is added. *Verify:* LSP tests that an undocumented block produces a
-low-severity lint diagnostic, that adding a nearby comment clears it, that an
-`ignore`-matched label produces none, and that an `off` rule is silent.
+**Phase 3 — LSP diagnostics.** Add a `nessemble-rc` dependency to
+`nessemble-lsp`; resolve each open buffer's `.nessemblerc` `lint` config through
+it; run `tooling::lint` per buffer; publish findings as `INFORMATION`/`HINT`
+diagnostics with `source = "nessemble-lint"`, honoring the discovered config;
+clear them when a comment is added. *Verify:* LSP tests that an undocumented
+block produces a low-severity lint diagnostic, that adding a nearby comment
+clears it, that an `ignore`-matched label produces none, and that an `off` rule
+is silent.
 
 **Phase 4 — Docs + changeset.** `usage.md` `lint` section and `.nessemblerc`
 `lint` reference; `editor.md` note; `SUMMARY.md` entry if a standalone page is
@@ -421,7 +424,7 @@ warranted; a `minor` changeset for the new subcommand, the new
 
 ## 11. Decisions
 
-**Settled (with the maintainer):**
+All settled with the maintainer:
 
 1. **Command surface** — a **separate `nessemble lint` subcommand** *plus*
    **LSP diagnostics**. Lint and format stay distinct (ESLint vs. Prettier);
@@ -444,12 +447,11 @@ warranted; a `minor` changeset for the new subcommand, the new
 8. **Console output** — **ESLint-style, grouped by file**, with a
    `LINE:COL  severity  label  rule-id` body and a problem-count footer.
 
-**Open implementation details (decide as phases land):**
-
-- **Regex crate** — `regex-lite` (recommended) vs. full `regex`; a leaf
-  dependency of the config layer either way (§7).
-- **Shared config crate** — promote `rc.rs` to a `nessemble-rc` crate shared by
-  CLI + LSP (recommended) vs. minimal LSP-local discovery (§7, Phase 3).
+9. **Regex crate** — **`regex-lite`** (pure-Rust, zero transitive deps); a leaf
+   dependency of the `nessemble-rc` config crate, never of core (§7).
+10. **Shared config crate** — **promote `rc.rs` to a new `nessemble-rc` crate**
+    shared by the CLI and the LSP, so both honor the same `.nessemblerc` (§7,
+    Phase 2); the formatter's config path moves with it, unchanged.
 
 ---
 
