@@ -690,3 +690,193 @@ fn bundled_ease_script_resolves_after_install() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// ─── lint ─────────────────────────────────────────────────────────────────────
+
+/// A fresh temp dir keyed by a unique test suffix (process id is shared across a
+/// binary's tests, so the suffix keeps parallel tests from colliding).
+fn lint_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("nessemble-lint-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn lint_reports_grouped_warnings_and_exits_zero() {
+    let dir = lint_dir("warn");
+    let file = dir.join("a.asm");
+    // Two undocumented block labels, well clear of any comment.
+    std::fs::write(
+        &file,
+        "\nsound_engine:\n    lda #$00\n    sta $2000\n    rts\n\nnote_table:\n    .db $01\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    // Warnings alone do not fail the run.
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("sound_engine  require-block-comment"),
+        "{text}"
+    );
+    assert!(text.contains("note_table  require-block-comment"), "{text}");
+    assert!(text.contains("2 problems (0 errors, 2 warnings)"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_clean_file_reports_no_problems() {
+    let dir = lint_dir("clean");
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "\n; documents the routine\nmain:\n    rts\n").unwrap();
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8(out.stdout)
+        .unwrap()
+        .contains("No problems"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_error_severity_fails_the_run() {
+    let dir = lint_dir("error");
+    std::fs::write(
+        dir.join(".nessemblerc"),
+        r#"{"lint":{"rules":{"require-block-comment":"error"}}}"#,
+    )
+    .unwrap();
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "\nwidget:\n    rts\n").unwrap();
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("error    widget  require-block-comment"),
+        "{text}"
+    );
+    assert!(text.contains("(1 error, 0 warnings)"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_ignore_regex_exempts_matching_labels() {
+    let dir = lint_dir("ignore");
+    std::fs::write(dir.join(".nessemblerc"), r#"{"lint":{"ignore":["^loc_"]}}"#).unwrap();
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "\nloc_c000:\n    nop\n    rts\n\nreal:\n    rts\n").unwrap();
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains("loc_c000"), "ignored label leaked: {text}");
+    assert!(text.contains("real  require-block-comment"), "{text}");
+    assert!(text.contains("(0 errors, 1 warning)"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_quiet_suppresses_warnings() {
+    let dir = lint_dir("quiet");
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "\nwidget:\n    rts\n").unwrap();
+
+    let out = bin()
+        .args(["lint", "--quiet", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8(out.stdout)
+        .unwrap()
+        .contains("No problems"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_max_warnings_gate_fails() {
+    let dir = lint_dir("maxwarn");
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "\nalpha:\n    rts\n\nbeta:\n    rts\n").unwrap();
+
+    let out = bin()
+        .args(["lint", "--max-warnings", "1", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_walks_a_directory() {
+    let dir = lint_dir("walk");
+    std::fs::write(dir.join("a.asm"), "\nalpha:\n    rts\n").unwrap();
+    std::fs::write(dir.join("b.asm"), "\nbeta:\n    rts\n").unwrap();
+    // A non-.asm file is skipped by the directory walk.
+    std::fs::write(dir.join("notes.txt"), "gamma:\n").unwrap();
+
+    let out = bin()
+        .args(["lint", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("alpha  require-block-comment"), "{text}");
+    assert!(text.contains("beta  require-block-comment"), "{text}");
+    assert!(!text.contains("gamma"), "non-asm file linted: {text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_unknown_config_rule_is_an_error() {
+    let dir = lint_dir("badrule");
+    std::fs::write(
+        dir.join(".nessemblerc"),
+        r#"{"lint":{"rules":{"require-block-commnt":"warn"}}}"#,
+    )
+    .unwrap();
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "\nwidget:\n    rts\n").unwrap();
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("unknown lint rule"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_help_lists_options() {
+    let out = bin().args(["lint", "-h"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(129));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("--max-warnings"));
+    assert!(text.contains("--quiet"));
+    assert!(text.contains("--no-config"));
+}

@@ -589,9 +589,8 @@ dependencies = [
  "nessemble-i18n",
  "nessemble-isa",
  "nessemble-lsp",
+ "nessemble-rc",
  "nessemble-script",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -632,6 +631,16 @@ name = "nessemble-media"
 version = "2.14.0"
 dependencies = [
  "image",
+]
+
+[[package]]
+name = "nessemble-rc"
+version = "2.14.0"
+dependencies = [
+ "nessemble-core",
+ "regex-lite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -749,6 +758,12 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "rhai"

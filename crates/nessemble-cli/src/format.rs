@@ -5,7 +5,7 @@
 //! non-zero, write nothing). A directory is walked recursively (for the
 //! configured extensions) and requires `--write` or `--check`.
 //!
-//! Formatting is governed by a discovered `.nessemblerc` (see [`crate::rc`]);
+//! Formatting is governed by a discovered `.nessemblerc` (see [`nessemble_rc`]);
 //! `--config <file>` forces one and `--no-config` uses built-in defaults.
 //! `.nessembleignore` globs exclude paths from directory walks, and per-glob
 //! `overrides` refine options per file.
@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use nessemble_core::tooling::{format_with, FormatOptions};
 
-use crate::rc::{Choice, Config};
+use nessemble_rc::{Choice, Config};
+
 use crate::{RETURN_EPERM, RETURN_OK, RETURN_USAGE};
 
 /// Parsed `format` options. clap enforces the `--write`/`--check` and
@@ -174,8 +175,9 @@ fn check_mode(jobs: &[Job]) -> u8 {
 }
 
 /// Recursively collect formattable files under `dir`: those whose extension is
-/// configured and that are not excluded by `.nessembleignore`.
-fn collect_files(dir: &Path, config: &Config, out: &mut Vec<PathBuf>) {
+/// configured and that are not excluded by `.nessembleignore`. Shared with the
+/// `lint` subcommand, which walks trees the same way.
+pub(crate) fn collect_files(dir: &Path, config: &Config, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
