@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.15.0 - 2026-07-20
+
+### Minor changes
+
+- The language server now surfaces `nessemble lint` findings inline as you type. Lint diagnostics use a gentle severity (Information/Hint) and a `nessemble-lint` source so they read as suggestions distinct from assembler errors, honor the project's `.nessemblerc` `lint` config, and clear as soon as the flagged block is documented. Also documents the `lint` command and its `.nessemblerc` config in the manual.
+- Add a `nessemble lint` subcommand that reports style problems without rewriting source — the ESLint to `nessemble format`'s Prettier. Its first rule, `require-block-comment`, flags a block-opening label that has no comment nearby. Configure it in `.nessemblerc` under a `lint` block: per-rule `off`/`warn`/`error` severities, a comment `window`, and an `ignore` list of regexes that exempt matching label names (e.g. machine-generated `loc_`/`data_` labels). Errors fail the run; warnings do not unless `--max-warnings` is exceeded.
+
 ## 2.14.0 - 2026-07-19
 
 ### Minor changes
