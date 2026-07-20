@@ -18,8 +18,8 @@ mod custom;
 mod format;
 mod home;
 mod init;
+mod lint;
 mod lsp;
-mod rc;
 mod reference;
 mod scripts;
 mod usage;
@@ -123,6 +123,8 @@ enum Command {
     Lsp,
     /// format assembly source
     Format(format::FormatArgs),
+    /// lint assembly source
+    Lint(lint::LintArgs),
     /// report runtime coverage from a CDL capture
     Coverage(coverage::CoverageArgs),
 }
@@ -169,6 +171,7 @@ fn dispatch(cli: Cli) -> u8 {
             code
         }
         Some(Command::Format(args)) => format::run(&args),
+        Some(Command::Lint(args)) => lint::run(&args),
         Some(Command::Coverage(args)) => coverage::run(&args),
         None => assemble_mode(&cli),
     }

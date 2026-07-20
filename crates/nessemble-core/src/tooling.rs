@@ -163,6 +163,24 @@ fn utf8_char_len(b: u8) -> usize {
     }
 }
 
+/// Split a lexeme stream into physical lines: every [`LexKind::Newline`] ends a
+/// line (and is dropped). A trailing newline yields a final empty line, so the
+/// caller can tell whether the source ended in `\n`. Shared by the formatter and
+/// the linter so both see the same line structure.
+fn split_lines(lexemes: &[Lexeme]) -> Vec<Vec<Lexeme>> {
+    let mut lines: Vec<Vec<Lexeme>> = Vec::new();
+    let mut current: Vec<Lexeme> = Vec::new();
+    for &lx in lexemes {
+        if lx.kind == LexKind::Newline {
+            lines.push(std::mem::take(&mut current));
+        } else {
+            current.push(lx);
+        }
+    }
+    lines.push(current);
+    lines
+}
+
 /// Lower-cased 6502 mnemonics (documented + undocumented), for telling an
 /// instruction identifier apart from a label/constant/register during
 /// classification.
@@ -477,16 +495,7 @@ pub fn format_with(source: &str, opts: &FormatOptions) -> String {
     // Split into physical lines (a `Newline` ends a line; a trailing newline
     // yields a final empty line, so the split records whether the file ends in
     // `\n`).
-    let mut lines: Vec<Vec<Lexeme>> = Vec::new();
-    let mut current: Vec<Lexeme> = Vec::new();
-    for lx in lexemes {
-        if lx.kind == LexKind::Newline {
-            lines.push(std::mem::take(&mut current));
-        } else {
-            current.push(lx);
-        }
-    }
-    lines.push(current);
+    let lines = split_lines(&lexemes);
 
     // Pass 0 — normalize each physical line. Continuation lines of a multi-line
     // statement (an operand list carried across lines by a trailing comma) are
@@ -1063,6 +1072,224 @@ fn collapse_blank_lines(lines: Vec<String>, opts: &FormatOptions) -> Vec<String>
         }
     }
     out
+}
+
+// ─── Linting ─────────────────────────────────────────────────────────────────
+//
+// A read-only lint pass over the same lossless lexeme stream the formatter uses.
+// Unlike `format`, `lint` never rewrites source — it reports findings. It is the
+// ESLint to the formatter's Prettier (see `plans/008-linting-rules.md`).
+
+/// A lint rule identifier. The rule registry ([`RULES`]) is keyed by this;
+/// adding a rule is a new variant here plus a registry entry and an `id`
+/// mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleId {
+    /// A block-opening label with no comment within the configured window.
+    RequireBlockComment,
+}
+
+impl RuleId {
+    /// Every rule, in a stable order (also the [`SeverityMap`] index order).
+    pub const ALL: [RuleId; 1] = [RuleId::RequireBlockComment];
+
+    /// The stable kebab-case identifier used in `.nessemblerc` and in reports.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            RuleId::RequireBlockComment => "require-block-comment",
+        }
+    }
+
+    /// Parse a rule id string, returning `None` if it names no known rule.
+    #[must_use]
+    pub fn from_id(s: &str) -> Option<RuleId> {
+        RuleId::ALL.into_iter().find(|r| r.id() == s)
+    }
+
+    /// This rule's index into a [`SeverityMap`].
+    fn index(self) -> usize {
+        match self {
+            RuleId::RequireBlockComment => 0,
+        }
+    }
+}
+
+/// A rule's configured severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuleSeverity {
+    /// Do not run the rule.
+    Off,
+    /// Run the rule; findings are advisory warnings (do not fail the run).
+    #[default]
+    Warn,
+    /// Run the rule; findings are errors (fail the run).
+    Error,
+}
+
+/// Per-rule severities, one slot per [`RuleId`]. Defaults to every rule at
+/// [`RuleSeverity::Warn`] — the linter is on out of the box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeverityMap([RuleSeverity; RuleId::ALL.len()]);
+
+impl Default for SeverityMap {
+    fn default() -> Self {
+        SeverityMap([RuleSeverity::Warn; RuleId::ALL.len()])
+    }
+}
+
+impl SeverityMap {
+    /// The severity configured for `rule`.
+    #[must_use]
+    pub fn get(&self, rule: RuleId) -> RuleSeverity {
+        self.0[rule.index()]
+    }
+
+    /// Set the severity for `rule`.
+    pub fn set(&mut self, rule: RuleId, severity: RuleSeverity) {
+        self.0[rule.index()] = severity;
+    }
+}
+
+/// A single lint finding: which rule fired, where (1-based line/column), and the
+/// subject (the offending label name). Severity is deliberately absent — core
+/// emits raw findings tagged with their [`RuleId`], and the caller maps
+/// rule → severity for display, exit codes, and editor squiggles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub rule: RuleId,
+    pub line: u32,
+    pub column: u32,
+    pub subject: String,
+}
+
+/// Configuration for [`lint`]. Plain data plus an `ignore` predicate: the regex
+/// compilation backing `ignore` lives in the caller (the `nessemble-rc` config
+/// layer), keeping `regex` out of this crate — the same boundary the formatter
+/// draws for `serde`.
+pub struct LintOptions<'a> {
+    /// Per-rule severities; a rule at [`RuleSeverity::Off`] is not run.
+    pub severities: SeverityMap,
+    /// Comment search radius (lines above/below) for `require-block-comment`.
+    pub window: usize,
+    /// A label whose name matches is exempt from every rule.
+    pub ignore: &'a dyn Fn(&str) -> bool,
+}
+
+/// A rule implementation: scan `lines` (with `source` for token text) and push
+/// any findings. Runs only when its severity is not [`RuleSeverity::Off`].
+type RuleFn = fn(&str, &[Vec<Lexeme>], &LintOptions, &mut Vec<Finding>);
+
+/// The rule registry. Adding a rule is one entry here plus its function.
+const RULES: &[(RuleId, RuleFn)] = &[(RuleId::RequireBlockComment, rule_require_block_comment)];
+
+/// Lint `source`, returning findings sorted by position. Every rule whose
+/// severity is not [`RuleSeverity::Off`] is run. This never mutates source.
+#[must_use]
+pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
+    let lexemes = lex(source);
+    let lines = split_lines(&lexemes);
+    let mut findings = Vec::new();
+    for &(rule, run) in RULES {
+        if opts.severities.get(rule) != RuleSeverity::Off {
+            run(source, &lines, opts, &mut findings);
+        }
+    }
+    findings.sort_by_key(|f| (f.line, f.column));
+    findings
+}
+
+/// `require-block-comment`: warn on a block-opening label with no comment within
+/// `±window` lines. Internal branch-target labels (a label directly after code)
+/// and anonymous labels are never flagged; a name matching `ignore` is skipped.
+fn rule_require_block_comment(
+    source: &str,
+    lines: &[Vec<Lexeme>],
+    opts: &LintOptions,
+    out: &mut Vec<Finding>,
+) {
+    for (idx, line) in lines.iter().enumerate() {
+        let Some((name, column)) = block_label(source, line) else {
+            continue;
+        };
+        if (opts.ignore)(name) {
+            continue;
+        }
+        if !is_block_entry(lines, idx) {
+            continue;
+        }
+        if has_comment_within(lines, idx, opts.window) {
+            continue;
+        }
+        out.push(Finding {
+            rule: RuleId::RequireBlockComment,
+            line: (idx + 1) as u32,
+            column,
+            subject: name.to_string(),
+        });
+    }
+}
+
+/// If `line` is exactly a named label definition (`name:`), return the label
+/// name and its 1-based character column. Anonymous labels (`:`, `:++`), `@local`
+/// temp labels, and labels sharing a line with code all return `None`.
+fn block_label<'a>(source: &'a str, line: &[Lexeme]) -> Option<(&'a str, u32)> {
+    let sig: Vec<&Lexeme> = line
+        .iter()
+        .filter(|l| l.kind != LexKind::Whitespace && l.kind != LexKind::Comment)
+        .collect();
+    if sig.len() != 2 || sig[0].kind != LexKind::Ident || !is_punct(source, sig[1], ":") {
+        return None;
+    }
+    let name = text(source, sig[0]);
+    // Match the "document every code block" convention: a real label name starts
+    // with an ASCII letter or `_`, so `@local` temp labels read as anonymous.
+    let first = name.as_bytes().first().copied().unwrap_or(0);
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let line_start = line.first().map_or(sig[0].start, |l| l.start);
+    // A label line's only prefix is optional whitespace, so char-count == column.
+    let column = source[line_start..sig[0].start].chars().count() as u32 + 1;
+    Some((name, column))
+}
+
+/// Whether the label at `idx` opens a new block: scanning backwards over
+/// comment-only lines, the first non-comment line is blank or the top of the
+/// file. A label directly following code is an internal branch target, not a
+/// documented block entry.
+fn is_block_entry(lines: &[Vec<Lexeme>], idx: usize) -> bool {
+    for i in (0..idx).rev() {
+        if is_blank(&lines[i]) {
+            return true;
+        }
+        if is_comment_only(&lines[i]) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+/// Whether a line has no significant tokens (only whitespace, or empty).
+fn is_blank(line: &[Lexeme]) -> bool {
+    line.iter().all(|l| l.kind == LexKind::Whitespace)
+}
+
+/// Whether a line's first significant token is a comment (a `; …`-only line,
+/// possibly indented). A code line with a trailing comment is not comment-only.
+fn is_comment_only(line: &[Lexeme]) -> bool {
+    match line.iter().find(|l| l.kind != LexKind::Whitespace) {
+        Some(l) => l.kind == LexKind::Comment,
+        None => false,
+    }
+}
+
+/// Whether any line within `±window` of `idx` carries a comment.
+fn has_comment_within(lines: &[Vec<Lexeme>], idx: usize, window: usize) -> bool {
+    let lo = idx.saturating_sub(window);
+    let hi = (idx + window).min(lines.len().saturating_sub(1));
+    (lo..=hi).any(|i| lines[i].iter().any(|l| l.kind == LexKind::Comment))
 }
 
 #[cfg(test)]
@@ -1757,5 +1984,141 @@ data:
                 }, // nop
             ]
         );
+    }
+
+    // ─── Linting ──────────────────────────────────────────────────────────────
+
+    /// Lint with default severities, the given window, and no ignores.
+    fn lint_default(source: &str, window: usize) -> Vec<Finding> {
+        let no_ignore = |_: &str| false;
+        let opts = LintOptions {
+            severities: SeverityMap::default(),
+            window,
+            ignore: &no_ignore,
+        };
+        lint(source, &opts)
+    }
+
+    fn labels(findings: &[Finding]) -> Vec<&str> {
+        findings.iter().map(|f| f.subject.as_str()).collect()
+    }
+
+    fn line_of(source: &str, idx: usize) -> Vec<Lexeme> {
+        split_lines(&lex(source)).into_iter().nth(idx).unwrap()
+    }
+
+    #[test]
+    fn block_entry_top_of_file() {
+        let lines = split_lines(&lex("label:\n"));
+        assert!(is_block_entry(&lines, 0));
+    }
+
+    #[test]
+    fn block_entry_after_blank_or_comment_run() {
+        // blank directly above
+        let lines = split_lines(&lex("    nop\n\nlabel:\n"));
+        assert!(is_block_entry(&lines, 2));
+        // comment run back to the top
+        let lines = split_lines(&lex("; a\n; b\nlabel:\n"));
+        assert!(is_block_entry(&lines, 2));
+        // blank, then a comment, then the label
+        let lines = split_lines(&lex("\n; note\nlabel:\n"));
+        assert!(is_block_entry(&lines, 2));
+    }
+
+    #[test]
+    fn block_entry_false_when_code_precedes() {
+        let lines = split_lines(&lex("    nop\nlabel:\n"));
+        assert!(!is_block_entry(&lines, 1));
+        // code, then a comment, then the label → still an internal target
+        let lines = split_lines(&lex("    nop\n; c\nlabel:\n"));
+        assert!(!is_block_entry(&lines, 2));
+    }
+
+    #[test]
+    fn has_comment_within_respects_window_and_clamps() {
+        let src = "; doc\n    nop\n    nop\nlabel:\n";
+        let lines = split_lines(&lex(src));
+        // label at idx 3: window 3 reaches idx 0 (comment); window 2 does not.
+        assert!(has_comment_within(&lines, 3, 3));
+        assert!(!has_comment_within(&lines, 3, 2));
+    }
+
+    #[test]
+    fn block_label_detects_named_labels_only() {
+        assert_eq!(
+            block_label("label:", &line_of("label:", 0)).map(|(n, _)| n),
+            Some("label")
+        );
+        // anonymous / temp labels and code-sharing lines are not block labels
+        assert!(block_label(":", &line_of(":", 0)).is_none());
+        assert!(block_label(":++", &line_of(":++", 0)).is_none());
+        assert!(block_label("@local:", &line_of("@local:", 0)).is_none());
+        assert!(block_label("label: nop", &line_of("label: nop", 0)).is_none());
+        // a trailing comment leaves it a valid block label (Ident + `:`)
+        assert_eq!(
+            block_label("label: ; hi", &line_of("label: ; hi", 0)).map(|(n, _)| n),
+            Some("label")
+        );
+    }
+
+    #[test]
+    fn lint_warns_on_undocumented_block_label() {
+        let findings = lint_default("\nmy_label:\n    nop\n", 3);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].subject, "my_label");
+        assert_eq!(findings[0].line, 2);
+        assert_eq!(findings[0].rule, RuleId::RequireBlockComment);
+    }
+
+    #[test]
+    fn lint_clean_when_comment_is_near() {
+        assert!(lint_default("\n; documents the routine\nmy_label:\n    nop\n", 3).is_empty());
+        // comment after the label, within the window
+        assert!(lint_default("\nmy_label:\n    nop\n; trailing doc\n", 3).is_empty());
+    }
+
+    #[test]
+    fn lint_skips_branch_targets_and_anonymous_labels() {
+        // internal branch target (label immediately after code)
+        assert!(lint_default("    bne target\ntarget:\n    nop\n", 3).is_empty());
+        // anonymous labels are never checked
+        assert!(lint_default("\n:\n    nop\n:++\n", 3).is_empty());
+    }
+
+    #[test]
+    fn lint_reports_multiple_labels_in_order() {
+        let findings = lint_default("\nalpha:\n    nop\n\nbeta:\n    rts\n", 3);
+        assert_eq!(labels(&findings), vec!["alpha", "beta"]);
+        assert_eq!(
+            findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![2, 5]
+        );
+    }
+
+    #[test]
+    fn lint_honors_the_ignore_predicate() {
+        let ignore = |name: &str| name.starts_with("loc_");
+        let opts = LintOptions {
+            severities: SeverityMap::default(),
+            window: 3,
+            ignore: &ignore,
+        };
+        // loc_ label is exempt; the other still warns.
+        let findings = lint("\nloc_8000:\n    nop\n\nreal_label:\n    nop\n", &opts);
+        assert_eq!(labels(&findings), vec!["real_label"]);
+    }
+
+    #[test]
+    fn lint_off_rule_produces_nothing() {
+        let no_ignore = |_: &str| false;
+        let mut severities = SeverityMap::default();
+        severities.set(RuleId::RequireBlockComment, RuleSeverity::Off);
+        let opts = LintOptions {
+            severities,
+            window: 3,
+            ignore: &no_ignore,
+        };
+        assert!(lint("\nmy_label:\n    nop\n", &opts).is_empty());
     }
 }
