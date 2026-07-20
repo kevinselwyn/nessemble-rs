@@ -1,22 +1,22 @@
 # nessemble-rs: A Plan for Built-in Linting Rules
 
-> Status: **Phases 0–2 done; Phase 3 (LSP) & Phase 4 (docs) remain.** This
-> document specifies a `nessemble lint` subcommand and an in-editor lint pass
-> that report — but never rewrite — style problems in nessemble assembly,
-> starting with a single rule: **a code block that opens without an explanatory
-> comment is flagged.** It is the ESLint to the formatter's Prettier — the two
-> are deliberately separate tools that share one lexer and one `.nessemblerc`.
-> **Phase 0** landed the `nessemble-core::tooling::lint` engine (rule registry +
-> `require-block-comment`); **Phase 1** the `nessemble lint` CLI subcommand
-> (ESLint-style grouped report, `--quiet`/`--max-warnings`/`--config`/
-> `--no-config`, exit codes); **Phase 2** the `nessemble-rc` shared crate
-> (extracted from `nessemble-cli/src/rc.rs`) with the `.nessemblerc` `lint`
-> section, per-rule severities, per-glob `overrides`, and `regex-lite`-compiled
-> `ignore` patterns. The two former implementation choices are settled as built:
-> the ignore regex uses **`regex-lite`**, and the config layer is the shared
-> **`nessemble-rc` crate** (see [§11](#11-decisions)). **Phase 3** wires findings
-> into the language server as low-severity diagnostics; **Phase 4** adds the user
-> docs — both still to do.
+> Status: **Complete — Phases 0–4 done.** This document specifies a
+> `nessemble lint` subcommand and an in-editor lint pass that report — but never
+> rewrite — style problems in nessemble assembly, starting with a single rule:
+> **a code block that opens without an explanatory comment is flagged.** It is
+> the ESLint to the formatter's Prettier — the two are deliberately separate
+> tools that share one lexer and one `.nessemblerc`. **Phase 0** landed the
+> `nessemble-core::tooling::lint` engine (rule registry + `require-block-comment`);
+> **Phase 1** the `nessemble lint` CLI subcommand (ESLint-style grouped report,
+> `--quiet`/`--max-warnings`/`--config`/`--no-config`, exit codes); **Phase 2**
+> the `nessemble-rc` shared crate (extracted from `nessemble-cli/src/rc.rs`) with
+> the `.nessemblerc` `lint` section, per-rule severities, per-glob `overrides`,
+> and `regex-lite`-compiled `ignore` patterns; **Phase 3** wired findings into
+> the language server as low-severity (`INFORMATION`/`HINT`) diagnostics sourced
+> `nessemble-lint`; **Phase 4** the user docs (`usage.md`, `editor.md`). The two
+> former implementation choices are settled as built: the ignore regex uses
+> **`regex-lite`**, and the config layer is the shared **`nessemble-rc` crate**
+> (see [§11](#11-decisions)).
 
 ---
 
@@ -377,20 +377,27 @@ ignore compile+match, unknown-rule/unknown-key/bad-severity/bad-regex/
 unknown-option errors, per-glob override layering, glob matching) + the CLI
 integration tests above.
 
-**Phase 3 — LSP diagnostics. — ⏳ todo.** Add a `nessemble-rc` dependency to
-`nessemble-lsp`; resolve each open buffer's `.nessemblerc` `lint` config through
-it; run `tooling::lint` per buffer; publish findings as `INFORMATION`/`HINT`
-diagnostics with `source = "nessemble-lint"`, honoring the discovered config;
-clear them when a comment is added. *Verify:* LSP tests that an undocumented
-block produces a low-severity lint diagnostic, that adding a nearby comment
-clears it, that an `ignore`-matched label produces none, and that an `off` rule
-is silent.
+**Phase 3 — LSP diagnostics. — ✅ done.** Added a `nessemble-rc` dependency to
+`nessemble-lsp`; a `with_lint` step folds `tooling::lint` findings into every
+document (re)published this round, resolving each buffer's `.nessemblerc` `lint`
+config through `nessemble-rc` (best-effort — a hard config error yields no lint
+diagnostics, never a crash). Findings publish as `HINT` (`warn`) / `INFORMATION`
+(`error`) diagnostics with `source = "nessemble-lint"` and the rule id in `code`,
+narrowed to the label token. Since the rule is intra-file this runs in
+single-file mode too (no workspace root needed). *Verified:* LSP tests that an
+undocumented block produces one low-severity `nessemble-lint` diagnostic on the
+label, that a `didChange` adding a nearby comment clears it, that an
+`ignore`-matched label produces none, that an `off` rule is silent, and that an
+`error`-severity rule maps to `INFORMATION`.
 
-**Phase 4 — Docs. — ⏳ todo.** `usage.md` `lint` section and `.nessemblerc`
-`lint` reference; `editor.md` note; `SUMMARY.md` entry if a standalone page is
-warranted. (Phases 0–2 already ship a `minor` changeset for the new subcommand,
-the new `nessemble-core::tooling` public API, and the `nessemble-rc` crate; the
-LSP diagnostic source adds its own changeset in Phase 3.)
+**Phase 4 — Docs. — ✅ done.** `docs/src/usage.md` gained a `lint` command
+section (report format, exit codes, `--quiet`/`--max-warnings`/`--config`/
+`--no-config`) and a `.nessemblerc` `lint` reference (rules/severities, `window`,
+`ignore`, and `lint` inside `overrides`); the command list and intro were
+updated. `docs/src/editor.md` notes the inline lint hints. No standalone
+`SUMMARY.md` page was warranted — the reference lives in the existing usage page.
+Phases 1–2 shipped a `minor` changeset for the subcommand + `nessemble-rc`
+crate; Phase 3 adds its own `minor` changeset for the LSP diagnostic source.
 
 ## 9. Testing strategy
 

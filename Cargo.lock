@@ -623,6 +623,7 @@ dependencies = [
  "lsp-types",
  "nessemble-core",
  "nessemble-isa",
+ "nessemble-rc",
  "serde_json",
 ]
 
