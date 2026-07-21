@@ -72,6 +72,10 @@ struct Cli {
     #[arg(short = 'l', long, value_name = "listfile.txt")]
     list: Option<String>,
 
+    /// include labels created by macros in the list file
+    #[arg(long)]
+    mlist: bool,
+
     /// use custom pseudo-instruction functions
     #[arg(short = 'p', long, value_name = "pseudo.txt")]
     pseudo: Option<String>,
@@ -232,7 +236,8 @@ fn assemble_mode(cli: &Cli) -> u8 {
                 return RETURN_EPERM;
             }
             if let Some(list) = cli.list.as_deref() {
-                if let Err(e) = std::fs::write(list, render_list_file(&assembly.symbols)) {
+                if let Err(e) = std::fs::write(list, render_list_file(&assembly.symbols, cli.mlist))
+                {
                     eprintln!("nessemble: could not write list file: {e}");
                     return RETURN_EPERM;
                 }

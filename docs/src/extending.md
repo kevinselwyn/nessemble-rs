@@ -5,6 +5,42 @@
 read and write files (see [Filesystem access](#filesystem-access)), so run only
 scripts you trust.
 
+## Macros or scripts?
+
+`nessemble` offers two ways to generate code and data from your own logic:
+[macros](syntax.md#macros) (built in) and custom-pseudo-op scripts (this page).
+They overlap, but each is better at different things.
+
+**Reach for a macro when** the task is *assembly-shaped* — repeating a sequence
+of instructions, filling in a few parameters, or defining local labels that the
+rest of your program can branch to:
+
+- It emits real assembly: instructions, labels (including `\@`-uniquified ones),
+  and directives, expanded inline where you call it.
+- Its parameters are numbers or label variables (`\1`, `\2`, …), and `\#` / `\@`
+  cover argument counts and per-call unique ids.
+- It needs no external file, no `--pseudo` mapping, and nothing outside the
+  assembler — it is part of the source.
+
+**Reach for a script when** the task is *computational* — anything that would be
+painful or impossible to express as assembly text:
+
+- Non-trivial math (easing curves, checksums, trig tables), string handling, or
+  data transforms that macros' single-precedence integer expressions can't do.
+- Reading assets from disk and converting them (PNG → CHR, WAV → DPCM, arbitrary
+  binary blobs) via the [filesystem](#filesystem-access) and
+  [PNG](#decoding-pngs) helpers.
+- Randomized or procedurally generated data (see [Random
+  numbers](#random-numbers)).
+- Logic you'd rather write, test, and reuse as a real program.
+
+A rule of thumb: if you're mostly *stamping out assembly*, use a macro; if you're
+mostly *computing bytes*, use a script. The two compose freely — a macro can wrap
+a `.custom`-style directive, and a script emits raw bytes that assembly around it
+refers to by label. Note the trade-offs: macro-created labels are hidden from the
+list file unless you pass [`--mlist`](usage.md#mlist), and scripts run arbitrary
+code with filesystem access, so only run ones you trust.
+
 ## Usage
 
 Pass the `--pseudo` flag to point at a mapping file that associates each custom
@@ -198,6 +234,46 @@ accepts an array:
 ```rust,ignore
 let shades = nes_shade(img.tile(0, 0, 8, 8));
 ```
+
+### Random numbers
+
+Scripts can draw random values through the
+[`rhai-rand`](https://docs.rs/rhai-rand) package — handy for procedural noise,
+scrambled data tables, or randomized test fixtures:
+
+- `rand()` — a random integer.
+- `rand(min, max)` — a random integer in the **inclusive** range `min..=max`.
+- `rand_float()` — a random float in `0.0..1.0`.
+- `rand_bool()` — a random `true`/`false`.
+- `rand_bool(p)` — `true` with probability `p` (a float in `0.0..1.0`).
+- On arrays: `array.shuffle()` shuffles in place, and `array.sample()` /
+  `array.sample(n)` draw one or `n` random elements.
+
+A `.noise` directive that emits `\1` random bytes:
+
+```rust,ignore
+fn custom(ints, texts) {
+    let out = [];
+    for i in 0..ints[0] {
+        out.push(rand(0, 255));
+    }
+    out
+}
+```
+
+```nessemble
+.noise 16   ; emits 16 random bytes
+```
+
+> **Random output is not reproducible.** Each assembly draws fresh values, so a
+> script using these functions produces a different ROM every run. Keep them out
+> of builds that must be deterministic (or seed your own generator in the script
+> instead).
+
+The random functions are available on native builds. They are absent from the
+WebAssembly build (which has no system entropy source), where calling one raises
+a "function not found" error — the same way [filesystem
+access](#filesystem-access) is unavailable there.
 
 ## Bundled scripts
 

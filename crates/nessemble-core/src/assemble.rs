@@ -109,6 +109,9 @@ pub struct ListSymbol {
     /// Whether this is a label (vs. a constant), which selects its list
     /// section and formatting.
     pub label: bool,
+    /// Whether the symbol was defined by expanding a `.macro`. The list file
+    /// (`-l`) hides macro-defined labels unless `--mlist` is given.
+    pub from_macro: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +120,8 @@ struct Symbol {
     value: i64,
     kind: SymType,
     bank: usize,
+    /// Set when the symbol was defined on a macro-expanded source line.
+    from_macro: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,6 +254,9 @@ pub struct Assembler {
     collect_all: bool,
     cur_line: u32,
     cur_file: u32,
+    /// Whether the current source line came from a macro expansion, propagated
+    /// from [`Line::from_macro`] so symbols defined here are flagged.
+    cur_from_macro: bool,
     files: Vec<String>,
     /// Directory each source file resolves filename-based directives
     /// (`.incbin`/`.incpng`/… and custom pseudo-ops) against, parallel to
@@ -319,6 +327,7 @@ impl Assembler {
             collect_all: false,
             cur_line: 1,
             cur_file: 0,
+            cur_from_macro: false,
             files,
             dirs,
             paths,
@@ -415,6 +424,7 @@ impl Assembler {
                 // `.rs` reservations list as labels; `.enum` entries and plain
                 // constants list as constants.
                 label: matches!(s.kind, SymType::Label | SymType::Rs),
+                from_macro: s.from_macro,
             })
             .collect()
     }
@@ -709,6 +719,7 @@ impl Assembler {
             }
             self.cur_line = line.line;
             self.cur_file = line.file;
+            self.cur_from_macro = line.from_macro;
             self.exec_stmt(&line.stmt);
         }
     }
@@ -771,12 +782,14 @@ impl Assembler {
                 self.symbols[id].value = value;
                 self.symbols[id].bank = bank;
                 self.symbols[id].kind = kind;
+                self.symbols[id].from_macro = self.cur_from_macro;
             }
             None => self.symbols.push(Symbol {
                 name: name.to_string(),
                 value,
                 kind,
                 bank,
+                from_macro: self.cur_from_macro,
             }),
         }
     }

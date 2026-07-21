@@ -214,4 +214,8 @@ pub struct Line {
     pub stmt: Stmt,
     pub line: u32,
     pub file: u32,
+    /// Whether this statement came from expanding a `.macro` invocation. Set from
+    /// the statement's first token (see [`crate::lexer::Token::from_macro`]) so
+    /// the assembler can flag labels defined in macros for the list file (`-l`).
+    pub from_macro: bool,
 }

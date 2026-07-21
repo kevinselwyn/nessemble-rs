@@ -26,6 +26,7 @@ Options:
   -e, --empty <hex>           empty byte value
   -u, --undocumented          use undocumented opcodes
   -l, --list <listfile.txt>   generate list of labels and constants
+      --mlist                 include labels created by macros in the list file
   -p, --pseudo <pseudo.txt>   use custom pseudo-instruction functions
   -c, --check                 check syntax only
   -v, --version               display program version
@@ -79,6 +80,23 @@ Allows the use of undocumented ("illegal") opcodes.
 ### -l, --list &lt;listfile.txt&gt;
 
 Writes a list of labels and constants to the given file.
+
+Labels defined inside a macro body are **omitted** by default, so the list is
+not cluttered with the per-invocation labels a macro emits each time it is called
+(for example a loop target uniquified with `\@`). Pass `--mlist` to include them.
+
+### --mlist
+
+Includes labels created by macro expansion in the `--list` output. Has no effect
+unless `--list` is also given.
+
+```text
+nessemble infile.asm --list listing.txt --mlist
+```
+
+Constants defined in macros always appear in the list; `--mlist` affects only the
+`[labels]` section. See [Macros](syntax.md#macros) for more on macro-defined
+labels.
 
 ### -p, --pseudo &lt;pseudo.txt&gt;
 

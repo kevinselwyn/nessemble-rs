@@ -78,8 +78,12 @@ pub struct Assembly {
 /// reference `output_list` format: a `[constants]` section (`VALUE = NAME`) and
 /// a `[labels]` section (`BANK/VALUE = NAME`), each sorted lexicographically by
 /// its formatted line, separated by a blank line when both are present.
+///
+/// Labels defined by expanding a `.macro` are omitted from the `[labels]`
+/// section unless `include_macro_labels` is set (the CLI's `--mlist` flag), so
+/// the default list is not cluttered with per-invocation macro-internal labels.
 #[must_use]
-pub fn render_list_file(symbols: &[ListSymbol]) -> String {
+pub fn render_list_file(symbols: &[ListSymbol], include_macro_labels: bool) -> String {
     let mut constants: Vec<String> = symbols
         .iter()
         .filter(|s| !s.label)
@@ -87,7 +91,7 @@ pub fn render_list_file(symbols: &[ListSymbol]) -> String {
         .collect();
     let mut labels: Vec<String> = symbols
         .iter()
-        .filter(|s| s.label)
+        .filter(|s| s.label && (include_macro_labels || !s.from_macro))
         .map(|s| format!("{:02X}/{:04X} = {}", s.bank as u32, s.value as u32, s.name))
         .collect();
     constants.sort();
@@ -713,6 +717,42 @@ bad line without equals
     fn text_macro_expands_with_args() {
         let src = ".macrodef SET\n    LDA #\\1\n    STA <\\2\n.endm\n    .macro SET, $12, $34\n";
         assert_eq!(asm(src), vec![0xA9, 0x12, 0x85, 0x34]);
+    }
+
+    #[test]
+    fn macro_labels_are_hidden_from_list_unless_requested() {
+        // A label defined inside a macro body (uniquified with `\@`) is flagged
+        // as macro-originated. `render_list_file` hides such labels by default
+        // and includes them when asked (the CLI's `--mlist`), while a top-level
+        // label always appears.
+        let src = "\
+.macrodef MARK\n\
+spot\\@:\n\
+    .db $00\n\
+.endm\n\
+top:\n\
+    .macro MARK\n\
+    .macro MARK\n";
+        let a = assemble(src, &Options::default()).unwrap();
+
+        // The top-level label and both macro-created labels are all symbols, but
+        // only the macro ones carry the `from_macro` flag.
+        let sym = |name: &str| a.symbols.iter().find(|s| s.name == name).unwrap();
+        assert!(!sym("top").from_macro);
+        assert!(sym("spot1").from_macro);
+        assert!(sym("spot2").from_macro);
+
+        // Default list: only the non-macro label appears.
+        let default = render_list_file(&a.symbols, false);
+        assert!(default.contains("top"));
+        assert!(!default.contains("spot1"));
+        assert!(!default.contains("spot2"));
+
+        // With macro labels requested: all three appear.
+        let full = render_list_file(&a.symbols, true);
+        assert!(full.contains("top"));
+        assert!(full.contains("spot1"));
+        assert!(full.contains("spot2"));
     }
 
     #[test]
