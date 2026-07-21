@@ -148,7 +148,10 @@ fn list_file_matches_reference() {
                     00/0012 = label_01\n\
                     00/3456 = label_02\n\
                     00/3458 = label_03\n";
-    assert_eq!(nessemble_core::render_list_file(&a.symbols), expected);
+    assert_eq!(
+        nessemble_core::render_list_file(&a.symbols, false),
+        expected
+    );
 }
 
 #[test]

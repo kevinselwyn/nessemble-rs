@@ -31,16 +31,23 @@
 //! - `quantize(value, thresholds)` (also over an array of values) and
 //!   `nes_shade(value)` (the NES 4-shade case; also over an array) to snap a
 //!   grayscale value to a palette index.
+//! - The [`rhai-rand`](https://docs.rs/rhai-rand) package (feature `rand`):
+//!   `rand()`, `rand(min, max)`, `rand_float()`, `rand_bool()`, and the array
+//!   `shuffle()` / `sample()` helpers, for procedural noise and randomized data
+//!   tables. Compiled out on targets without a system entropy source (e.g.
+//!   `wasm32-unknown-unknown`), where the functions are absent.
 
 use std::path::Path;
 #[cfg(feature = "fs")]
 use std::path::PathBuf;
 
-#[cfg(feature = "fs")]
+#[cfg(any(feature = "fs", feature = "rand"))]
 use rhai::packages::Package;
 use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
 #[cfg(feature = "fs")]
 use rhai_fs::FilesystemPackage;
+#[cfg(feature = "rand")]
+use rhai_rand::RandomPackage;
 
 #[cfg(feature = "coverage")]
 pub mod coverage;
@@ -137,6 +144,14 @@ fn engine(base_dir: &Path) -> Engine {
     }
     #[cfg(not(feature = "fs"))]
     let _ = base_dir;
+
+    // Random-number functions (`rand`, `rand(min, max)`, `rand_float`,
+    // `rand_bool`, and array `shuffle`/`sample`) for scripts that need
+    // procedural noise or randomized data tables. Compiled out on targets
+    // without a system entropy source (feature `rand` off), where the functions
+    // are simply absent.
+    #[cfg(feature = "rand")]
+    RandomPackage::new().register_into_engine(&mut engine);
 
     // PNG decoding for scripts: `decode_png(blob)` → a map of width/height and
     // interleaved RGBA pixels (typically fed an `open_file(...).read_blob()`).
@@ -616,6 +631,34 @@ mod tests {
             run(src, &[], &[], cwd()).unwrap(),
             vec![0, 1, 2, 3, 1, 0, 1, 2, 3]
         );
+    }
+
+    #[cfg(feature = "rand")]
+    #[test]
+    fn rand_functions_are_registered_and_bounded() {
+        // `rhai-rand` supplies `rand(min, max)` (inclusive), `rand_bool`, and the
+        // array `shuffle`/`sample` helpers. Draw several values into a fixed
+        // range and assert each byte lands inside it — the values are random but
+        // the bounds are not.
+        let src = r"
+            fn custom(ints, texts) {
+                let out = [];
+                for i in 0..8 {
+                    out.push(rand(10, 20));     // 10..=20
+                }
+                out.push(if rand_bool() { 1 } else { 0 });  // 0 or 1
+                out
+            }
+        ";
+        let out = run(src, &[], &[], cwd()).unwrap();
+        assert_eq!(out.len(), 9);
+        for &b in &out[..8] {
+            assert!(
+                (10..=20).contains(&b),
+                "rand(10, 20) produced {b}, out of range"
+            );
+        }
+        assert!(out[8] <= 1, "rand_bool mapped to {}", out[8]);
     }
 
     #[test]

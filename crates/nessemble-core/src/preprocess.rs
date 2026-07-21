@@ -148,6 +148,9 @@ impl Pre<'_> {
                 tok: toks[i].tok.clone(),
                 line: toks[i].line,
                 file: file_id as u32,
+                // Preserve the macro-origin flag: tokens re-emitted from a macro
+                // body (via `substitute`) carry it, so it survives re-processing.
+                from_macro: toks[i].from_macro,
             });
             i += 1;
         }
@@ -181,11 +184,13 @@ impl Pre<'_> {
                     tok: Tok::Pseudo("inestrn".to_string()),
                     line,
                     file: file_id as u32,
+                    from_macro: false,
                 });
                 self.out.push(Token {
                     tok: Tok::Endl,
                     line,
                     file: file_id as u32,
+                    from_macro: false,
                 });
                 self.do_include(&target, depth, file_id, line)?;
                 Ok(next)
@@ -434,5 +439,8 @@ fn mk(tok: Tok, line: u32, file_id: usize) -> Token {
         tok,
         line,
         file: file_id as u32,
+        // `mk` builds only the tokens re-emitted from a macro body (`substitute`),
+        // so every token it produces is macro-originated.
+        from_macro: true,
     }
 }

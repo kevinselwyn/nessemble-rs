@@ -12,13 +12,19 @@ authors.workspace = true
 nessemble-media.workspace = true
 rhai = { version = "1", default-features = false, features = ["std"] }
 rhai-fs = { version = "0.1.5", default-features = false, optional = true }
+rhai-rand = { version = "0.1.6", default-features = false, features = ["float", "array"], optional = true }
 
 [features]
-default = ["fs"]
+default = ["fs", "rand"]
 # Filesystem access for scripts (`open_file`, `File` I/O) via `rhai-fs`. On by
 # default; disabled for targets without a filesystem (e.g. `wasm32-unknown-unknown`),
 # where scripts that call the file API get a clear "function not found" error.
 fs = ["dep:rhai-fs"]
+# Random-number functions (`rand`, `rand_float`, `shuffle`, …) for scripts via
+# `rhai-rand`. On by default; disabled for targets without a system entropy
+# source (e.g. `wasm32-unknown-unknown`), where the random functions are simply
+# absent and calling one gives a clear "function not found" error.
+rand = ["dep:rhai-rand"]
 # Line coverage for scripts (`coverage` module): enables Rhai's debugger and AST
 # walk. Off by default — only the `nessemble coverage --scripts` path needs it,
 # and it is never used unless a debugger is explicitly registered, so ordinary

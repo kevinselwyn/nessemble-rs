@@ -67,11 +67,18 @@ pub enum Tok {
 /// The `file` id indexes a table of file display names maintained by the
 /// preprocessor (see `preprocess`); the lexer itself always emits `0` and the
 /// preprocessor rewrites it as it splices includes and expands macros.
+///
+/// `from_macro` marks a token produced by expanding a `.macro` invocation (the
+/// lexer always emits `false`; the preprocessor sets it while re-emitting a
+/// macro body). It rides through the parser onto the [`crate::ast::Line`] so the
+/// assembler can flag labels defined inside macros and the list file (`-l`) can
+/// hide them unless `--mlist` is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub tok: Tok,
     pub line: u32,
     pub file: u32,
+    pub from_macro: bool,
 }
 
 /// Known pseudo-op names (without the leading dot).
@@ -130,6 +137,7 @@ impl<'a> Lexer<'a> {
             tok,
             line: self.line,
             file: 0,
+            from_macro: false,
         }
     }
 
@@ -157,6 +165,7 @@ impl<'a> Lexer<'a> {
                         tok: Tok::Endl,
                         line,
                         file: 0,
+                        from_macro: false,
                     });
                 }
                 b'\r' => {
@@ -167,6 +176,7 @@ impl<'a> Lexer<'a> {
                         tok: Tok::Endl,
                         line,
                         file: 0,
+                        from_macro: false,
                     });
                 }
                 b' ' | b'\t' => {
@@ -204,6 +214,7 @@ impl<'a> Lexer<'a> {
             tok: Tok::CharReg(c.to_ascii_uppercase() as char),
             line: self.line,
             file: 0,
+            from_macro: false,
         }
     }
 
@@ -253,7 +264,12 @@ impl<'a> Lexer<'a> {
         };
         let line = self.line;
         self.pos += len;
-        Some(Token { tok, line, file: 0 })
+        Some(Token {
+            tok,
+            line,
+            file: 0,
+            from_macro: false,
+        })
     }
 
     /// Longest-match over the numeric/identifier/string/register rules, with
@@ -422,7 +438,12 @@ impl<'a> Lexer<'a> {
         let (len, tok) = best?;
         let line = self.line;
         self.pos += len;
-        Some(Token { tok, line, file: 0 })
+        Some(Token {
+            tok,
+            line,
+            file: 0,
+            from_macro: false,
+        })
     }
 }
 

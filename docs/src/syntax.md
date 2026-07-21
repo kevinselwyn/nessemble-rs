@@ -2005,3 +2005,8 @@ Output:
 00000000  a2 08 ca d0 fd a2 08 ca  d0 fd a2 08 ca d0 fd     |...............|
 0000000f
 ```
+
+A `\@`-uniquified label (such as `label_\@` above) is a real label — it lands in
+the symbol table with a distinct name per invocation. To keep list files (`-l`)
+readable, these macro-created labels are **omitted from the list by default**;
+pass [`--mlist`](usage.md#mlist) to include them.

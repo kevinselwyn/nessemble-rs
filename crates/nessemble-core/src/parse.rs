@@ -66,6 +66,15 @@ impl Parser {
             .map_or(0, |t| t.file)
     }
 
+    /// Whether the token at the start of the current statement came from a macro
+    /// expansion. Used to propagate the flag onto the [`Line`].
+    fn cur_from_macro(&self) -> bool {
+        self.toks
+            .get(self.pos)
+            .or_else(|| self.toks.last())
+            .is_some_and(|t| t.from_macro)
+    }
+
     fn bump(&mut self) -> Option<Tok> {
         let t = self.toks.get(self.pos).map(|t| t.tok.clone());
         if t.is_some() {
@@ -102,11 +111,13 @@ impl Parser {
             }
             let line_no = self.cur_line();
             let file_no = self.cur_file();
+            let from_macro = self.cur_from_macro();
             if let Some(stmt) = self.parse_stmt(indented)? {
                 lines.push(Line {
                     stmt,
                     line: line_no,
                     file: file_no,
+                    from_macro,
                 });
             }
             // Consume through end-of-line.
@@ -142,11 +153,13 @@ impl Parser {
             }
             let line_no = self.cur_line();
             let file_no = self.cur_file();
+            let from_macro = self.cur_from_macro();
             match self.parse_stmt(indented) {
                 Ok(Some(stmt)) => lines.push(Line {
                     stmt,
                     line: line_no,
                     file: file_no,
+                    from_macro,
                 }),
                 Ok(None) => {}
                 Err(e) => errors.push(e),
