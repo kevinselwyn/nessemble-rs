@@ -76,6 +76,10 @@ impl AddressingMode {
 /// individual directive spellings.
 pub const DIRECTIVES: &[(&str, &str)] = &[
     (".org", "set the program counter"),
+    (
+        ".phase / .dephase",
+        "assemble for a different run-time address",
+    ),
     (".db / .byte", "define bytes"),
     (".dw / .word", "define words (little-endian)"),
     (".ascii", "define bytes from a string"),

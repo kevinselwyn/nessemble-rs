@@ -291,6 +291,7 @@ Read more about 6502 addressing modes
 | [.color](#color)       | Convert hex color to NES color                                                      |
 | [.db](#db)             | Define 8-bit byte(s)                                                                |
 | [.defchr](#defchr)     | Define CHR tile                                                                     |
+| [.dephase](#dephase)   | End a [`.phase`](#phase) block                                                      |
 | [.dw](#dw)             | Define 16-bit word(s)                                                               |
 | [.else](#else)         | Else condition of an [`.if`](#if)/[`.ifdef`](#ifdef)/[`.ifndef`](#ifndef) statement |
 | [.endenum](#endenum)   | End [`.enum`](#enum)                                                                |
@@ -336,6 +337,7 @@ Read more about 6502 addressing modes
 | [.macrodef](#macrodef) | Start macro definition                                                              |
 | [.org](#org)           | Organize code                                                                       |
 | [.out](#out)           | Output debugging message                                                            |
+| [.phase](#phase)       | Assemble code for a different run-time address                                      |
 | [.prg](#prg)           | Set PRG bank index                                                                  |
 | [.random](#random)     | Output random byte(s)                                                               |
 | [.rsset](#rsset)       | Set initial value for [`.rs`](#rs) declarations                                     |
@@ -598,6 +600,18 @@ Try it:
         300000003,
         333333333
 </nessemble-assembler>
+
+### .dephase
+
+End a [`.phase`](#phase) block. Labels defined after `.dephase` revert to their
+physical load address. A bank or segment switch ([`.prg`](#prg), [`.chr`](#chr),
+[`.segment`](#segment)) also ends any active phase.
+
+Usage:
+
+```nessemble
+.dephase
+```
 
 ### .dw
 
@@ -1699,6 +1713,44 @@ Example:
 
 ```nessemble
 .org $C000
+```
+
+### .phase
+
+Assemble code for a different run-time address.
+
+When a PRG bank is swapped in at a different address than the one it is laid out
+at, the address labels receive (its [`.org`](#org)) does not match where the code
+actually runs. `.phase ADDRESS` overrides the address labels receive so it
+reflects the run-time (post-swap) location, while ROM layout keeps flowing from
+`.org` unchanged. This removes the need to subtract the swap offset from every
+label by hand.
+
+The override stays in effect until [`.dephase`](#dephase) or a bank/segment
+switch ([`.prg`](#prg), [`.chr`](#chr), [`.segment`](#segment)). It applies only
+to symbol values; branch targets and emitted bytes are unaffected, since the
+offset cancels in any address difference.
+
+Usage:
+
+```nessemble
+.phase ADDRESS
+```
+
+* `ADDRESS` - Number, required. The run-time address the current location maps to.
+
+Example:
+
+```nessemble
+.prg 1
+.org $C000       ; laid out at $C000 in ROM
+.phase $8000     ; but swapped in at $8000 at run time
+
+label_def:       ; label_def == $8000
+    NOP
+    JMP label_def
+
+.dephase
 ```
 
 ### .prg

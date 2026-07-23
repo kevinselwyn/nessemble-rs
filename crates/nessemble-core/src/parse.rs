@@ -308,6 +308,8 @@ impl Parser {
         }
         let p = match name {
             "org" => Pseudo::Org(self.parse_expr()?),
+            "phase" => Pseudo::Phase(self.parse_expr()?),
+            "dephase" => Pseudo::Dephase,
             "db" | "byte" => Pseudo::Db(self.parse_expr_list()?),
             "dw" | "word" => Pseudo::Dw(self.parse_expr_list()?),
             "hibytes" => Pseudo::Hibytes(self.parse_expr_list()?),
