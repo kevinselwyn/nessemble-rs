@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.16.0 - 2026-07-23
+
+### Minor changes
+
+- Expose random-number functions to the pseudo-op scripting engine via the
+  [`rhai-rand`](https://docs.rs/rhai-rand) package: scripts can now call `rand()`,
+  `rand(min, max)`, `rand_float()`, `rand_bool()`, and the array `shuffle`/`sample`
+  helpers for procedural noise and randomized data tables. Available on native
+  builds; absent from the WebAssembly build (no system entropy source), the same as
+  filesystem access. Also add a `--mlist` flag that includes macro-created labels
+  in the `-l`/`--list` output — such labels (e.g. `\@`-uniquified loop targets) are
+  hidden from the list by default so it stays readable. Documents both changes and
+  adds guidance on choosing macros vs. scripts.
+- Add `.phase` / `.dephase` directives for bank-swapped code. Labels defined inside
+  a `.phase ADDRESS` block take the run-time (post-swap) address while ROM layout
+  keeps flowing from `.org`, so there's no need to subtract the swap offset from
+  every label by hand. The block ends at `.dephase` or a bank/segment switch.
+
 ## 2.15.0 - 2026-07-20
 
 ### Minor changes
