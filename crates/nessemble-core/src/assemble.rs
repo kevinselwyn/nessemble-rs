@@ -213,6 +213,11 @@ pub struct Assembler {
     chr_index: usize,
     segment_prg: bool,
 
+    /// Delta added to the physical load address (`address_offset`) to yield the
+    /// address labels receive, set by `.phase` and cleared by `.dephase` (or a
+    /// bank/segment switch). Zero when no phase is active. See [`Pseudo::Phase`].
+    phase_delta: i64,
+
     rom: Vec<u8>,
     /// Per-ROM-byte write bitmap (which bytes were written). Used to bound
     /// second-pass writes and as the basis for the source map's recording.
@@ -307,6 +312,7 @@ impl Assembler {
             prg_index: 0,
             chr_index: 0,
             segment_prg: true,
+            phase_delta: 0,
             rom: Vec::new(),
             coverage: Vec::new(),
             offset_max: 0,
@@ -479,6 +485,7 @@ impl Assembler {
         self.prg_index = 0;
         self.chr_index = 0;
         self.segment_prg = true;
+        self.phase_delta = 0;
         self.ines = Ines::default();
         self.enum_active = false;
         self.enum_value = 0;
@@ -846,7 +853,17 @@ impl Assembler {
         index.max(0) as usize
     }
 
+    /// The address a label defined at the current location receives. This is the
+    /// physical load address ([`Self::address_offset_raw`]) shifted by any active
+    /// `.phase` delta, so within a `.phase` block labels read as their run-time
+    /// (post-swap) address while ROM layout is unchanged.
     fn address_offset(&self) -> i64 {
+        self.address_offset_raw() + self.phase_delta
+    }
+
+    /// The physical load address of the current location, ignoring any `.phase`
+    /// override. This is what drives `.org` bounds and ROM placement.
+    fn address_offset_raw(&self) -> i64 {
         if self.segment_prg {
             if self.nes {
                 if self.ines.prg < 2 {
@@ -955,6 +972,16 @@ impl Assembler {
             Pseudo::Org(e) => {
                 let addr = self.eval(e);
                 self.exec_org(addr);
+            }
+            Pseudo::Phase(e) => {
+                // Store the delta against the *un-phased* load address so the run
+                // address stays correct as the location counter (and later `.org`s
+                // within the block) advance, and so re-phasing recomputes cleanly.
+                let run = self.eval(e);
+                self.phase_delta = run - self.address_offset_raw();
+            }
+            Pseudo::Dephase => {
+                self.phase_delta = 0;
             }
             Pseudo::Db(list) | Pseudo::Lobytes(list) => {
                 let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
@@ -1093,10 +1120,12 @@ impl Assembler {
             Pseudo::Prg(e) => {
                 self.segment_prg = true;
                 self.prg_index = self.eval(e).max(0) as usize % MAX_BANKS;
+                self.phase_delta = 0;
             }
             Pseudo::Chr(e) => {
                 self.segment_prg = false;
                 self.chr_index = self.eval(e).max(0) as usize % MAX_BANKS;
+                self.phase_delta = 0;
             }
             Pseudo::InesTrn => {
                 self.nes = true;
@@ -1129,9 +1158,11 @@ impl Assembler {
                 if let Some(rest) = name.strip_prefix("PRG") {
                     self.segment_prg = true;
                     self.prg_index = rest.parse::<usize>().unwrap_or(0) % MAX_BANKS;
+                    self.phase_delta = 0;
                 } else if let Some(rest) = name.strip_prefix("CHR") {
                     self.segment_prg = false;
                     self.chr_index = rest.parse::<usize>().unwrap_or(0) % MAX_BANKS;
+                    self.phase_delta = 0;
                 }
             }
             Pseudo::Incbin(file, offset, limit) => {

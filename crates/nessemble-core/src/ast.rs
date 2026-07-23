@@ -81,6 +81,12 @@ pub enum RandTerm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pseudo {
     Org(Expr),
+    /// `.phase <expr>` — override the address labels receive so it reflects the
+    /// bank's run-time (post-swap) location while ROM layout keeps flowing from
+    /// `.org`. Remains in effect until `.dephase` or a bank/segment switch.
+    Phase(Expr),
+    /// `.dephase` — end a `.phase` block; labels revert to their load address.
+    Dephase,
     Db(Vec<Expr>),
     Dw(Vec<Expr>),
     Ascii(AsciiArg),
