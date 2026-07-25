@@ -2561,9 +2561,7 @@ mod tests {
             && r.end_line == 3
             && r.kind == Some(FoldingRangeKind::Region)));
         // `loop` runs to the end of the buffer (no trailing blank line).
-        assert!(ranges
-            .iter()
-            .any(|r| r.start_line == 5 && r.end_line == 6));
+        assert!(ranges.iter().any(|r| r.start_line == 5 && r.end_line == 6));
     }
 
     #[test]
