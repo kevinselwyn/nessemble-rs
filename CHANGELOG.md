@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.17.0 - 2026-07-25
+
+### Minor changes
+
+- The language server now folds subroutine bodies: a label collapses from its `label:` header down to the first following blank line.
+
 ## 2.16.0 - 2026-07-23
 
 ### Minor changes
