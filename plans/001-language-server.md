@@ -269,7 +269,8 @@ undefined. The fix analyzes each open file *in the context of its project*.
 
 ### Phase 8 — Editing aids (folding, rename, code actions) — ✅ done
 - **Folding ranges** (`textDocument/foldingRange`): `.macrodef`…`.endm` and
-  `.if*`…`.endif` blocks (nested via a stack) plus runs of consecutive line
+  `.if*`…`.endif` blocks (nested via a stack), subroutine bodies (a label
+  definition down to the first blank line), plus runs of consecutive line
   comments. ✅
 - **Rename** (`textDocument/rename`): rename the symbol under the cursor across
   every **open** buffer (nessemble's symbol scope is global); the new name is

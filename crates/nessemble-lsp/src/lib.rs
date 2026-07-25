@@ -27,7 +27,7 @@
 //!   a file is analyzed in the context of the `.include` project it belongs to,
 //!   so cross-file symbols aren't flagged as undefined.
 //! - **Editing aids** (Phase 8): `textDocument/foldingRange` (macro/conditional
-//!   blocks and comment runs), `textDocument/rename` (a symbol across open
+//!   blocks, subroutine bodies, and comment runs), `textDocument/rename` (a symbol across open
 //!   buffers), and `textDocument/codeAction` (numeric base conversions).
 
 use std::cell::RefCell;
@@ -540,7 +540,8 @@ impl Server {
     }
 
     /// Foldable regions in the document at `uri`: macro and conditional blocks,
-    /// and runs of consecutive line comments. `None` if `uri` is unknown.
+    /// subroutine bodies (a label down to the first blank line), and runs of
+    /// consecutive line comments. `None` if `uri` is unknown.
     fn folding_ranges(&self, uri: &Url) -> Option<Vec<FoldingRange>> {
         Some(folding_ranges(&self.documents.get(uri)?.text))
     }
@@ -1389,7 +1390,8 @@ enum BlockTag {
 }
 
 /// Foldable regions: `.macrodef`…`.endm` and `.if*`…`.endif` blocks (nested via
-/// a stack), plus runs of two or more consecutive line comments.
+/// a stack), subroutine bodies (a label definition down to the first blank
+/// line), plus runs of two or more consecutive line comments.
 fn folding_ranges(text: &str) -> Vec<FoldingRange> {
     let mut ranges = Vec::new();
     let mut stack: Vec<(BlockTag, u32)> = Vec::new();
@@ -1423,6 +1425,36 @@ fn folding_ranges(text: &str) -> Vec<FoldingRange> {
         let last = lines.len().saturating_sub(1) as u32;
         if last > start {
             ranges.push(fold(start, last, FoldingRangeKind::Comment));
+        }
+    }
+
+    ranges.extend(subroutine_ranges(text, &lines));
+    ranges
+}
+
+/// Subroutine folds: each label definition down to the first following blank
+/// line (the first `\n\n`), or the end of the buffer when none follows. The
+/// fold spans the label line through the last non-blank line of its body, so a
+/// subroutine collapses to just its `label:` header. A label with no body line
+/// before the blank (`end == start`) yields nothing, since there is nothing to
+/// hide.
+fn subroutine_ranges(text: &str, lines: &[&str]) -> Vec<FoldingRange> {
+    let mut ranges = Vec::new();
+    for def in definitions(text) {
+        if def.kind != DefKind::Label {
+            continue;
+        }
+        let start = def.range.start.line;
+        // Extend to the last non-blank line before the first blank line.
+        let mut end = start;
+        for (offset, line) in lines.iter().enumerate().skip(start as usize + 1) {
+            if line.trim().is_empty() {
+                break;
+            }
+            end = offset as u32;
+        }
+        if end > start {
+            ranges.push(fold(start, end, FoldingRangeKind::Region));
         }
     }
     ranges
@@ -2509,6 +2541,35 @@ mod tests {
             && r.kind == Some(FoldingRangeKind::Region)));
         // Conditional block 5..7.
         assert!(ranges.iter().any(|r| r.start_line == 5 && r.end_line == 7));
+    }
+
+    #[test]
+    fn folding_ranges_fold_subroutines_to_the_blank_line() {
+        let text = concat!(
+            "reset:\n",     // 0
+            "  sei\n",      // 1
+            "  cld\n",      // 2
+            "  rts\n",      // 3
+            "\n",           // 4  (the first \n\n after `reset`)
+            "loop:\n",      // 5
+            "  jmp loop\n", // 6
+        );
+        let ranges = folding_ranges(text);
+        // `reset` folds from its label (0) through its last body line (3), the
+        // line before the blank at 4.
+        assert!(ranges.iter().any(|r| r.start_line == 0
+            && r.end_line == 3
+            && r.kind == Some(FoldingRangeKind::Region)));
+        // `loop` runs to the end of the buffer (no trailing blank line).
+        assert!(ranges.iter().any(|r| r.start_line == 5 && r.end_line == 6));
+    }
+
+    #[test]
+    fn folding_ranges_skip_a_bodyless_label() {
+        // A label immediately followed by a blank line has nothing to fold.
+        let text = "empty:\n\n  nop\n";
+        let ranges = folding_ranges(text);
+        assert!(!ranges.iter().any(|r| r.start_line == 0));
     }
 
     #[test]
