@@ -415,7 +415,8 @@ pub struct FormatOptions {
     /// Consolidate adjacent `.db`/`.dw`/`.color` lines to this many values per
     /// line. `0` disables consolidation (data lines are left as-is).
     pub data_per_line: usize,
-    /// Honor `; @fmt stride=N[,N,...]` hint comments that override
+    /// Honor `; @nessemble-format stride=N[,N,...]` hint comments (and the
+    /// deprecated `; @fmt` spelling) that override
     /// [`Self::data_per_line`] for the following data block.
     pub respect_stride_hints: bool,
     /// Insert one blank line after every `RTS`/`RTI` (a routine boundary).
@@ -818,33 +819,19 @@ fn is_label_or_constant(line: &str) -> bool {
     is_named_label(line, &sig) || sig.get(1).is_some_and(|l| is_punct(line, l, "="))
 }
 
-/// Parse a `; @fmt stride=N[,N,...]` hint comment into its stride list.
+/// Parse a `; @nessemble-format stride=N[,N,...]` hint comment — or its
+/// deprecated `; @fmt` spelling — into its stride list. Both spellings arrive
+/// through the one directive scanner, so they cannot drift apart.
+///
+/// A hint in a *trailing* comment is inert (`own_line`), preserving the original
+/// behavior that only a comment-only line carries a hint.
 fn parse_hint(line: &str) -> Option<Vec<usize>> {
-    let rest = line.trim().strip_prefix(';')?.trim_start();
-    let rest = rest.strip_prefix("@fmt")?;
-    if !rest.starts_with([' ', '\t']) {
-        return None;
-    }
-    let rest = rest.trim_start().strip_prefix("stride=")?;
-    let spec: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == ',')
-        .collect();
-    // After the stride spec, only whitespace or a trailing comment may follow.
-    let tail = rest[spec.len()..].trim_start();
-    if !tail.is_empty() && !tail.starts_with(';') {
-        return None;
-    }
-    let strides: Vec<usize> = spec
-        .split(',')
-        .filter(|p| !p.is_empty())
-        .map(|p| p.parse().ok())
-        .collect::<Option<Vec<_>>>()?;
-    if strides.is_empty() {
-        None
-    } else {
-        Some(strides)
-    }
+    scan_directives(line)
+        .into_iter()
+        .find_map(|d| match d.args {
+            DirectiveArgs::Strides(strides) if d.own_line => Some(strides),
+            _ => None,
+        })
 }
 
 /// A single buffered value under an active stride hint: `(directive, indent,
@@ -913,7 +900,7 @@ fn flush_hint(
 }
 
 /// Consolidate adjacent `.db`/`.dw`/`.color` lines into `data_per_line`-value
-/// lines, honoring `; @fmt stride=N` hints. Grouping semantics: a directive-type
+/// lines, honoring `; @nessemble-format stride=N` hints. Grouping semantics: a directive-type
 /// change, a label/constant, an instruction, a blank line, or a trailing comment
 /// all flush the current group; hinted blocks buffer values and re-flow them by
 /// their strides.
@@ -1072,6 +1059,300 @@ fn collapse_blank_lines(lines: Vec<String>, opts: &FormatOptions) -> Vec<String>
         }
     }
     out
+}
+
+// ─── Comment directives ──────────────────────────────────────────────────────
+//
+// Comments addressed to a nessemble tool, in one namespaced grammar:
+//
+//     ; @nessemble-<name> [args]   [; trailing prose]
+//
+// The registry is **closed**: a comment whose first token is an unrecognized
+// `@nessemble-…` name is reported as malformed rather than silently ignored,
+// which is the whole point of the namespace — a mistyped directive used to be
+// indistinguishable from prose. Tokens outside the namespace (`@todo`,
+// `@param`) are prose and are never touched.
+//
+// See `plans/009-comment-directives.md`.
+
+/// A directive's registry name — its identity, independent of its arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectiveName {
+    /// `@nessemble-format` — a formatter hint (deprecated spelling: `@fmt`).
+    Format,
+    /// `@nessemble-coverage-ignore` — a coverage exclusion region boundary.
+    CoverageIgnore,
+    /// `@nessemble-coverage-ignore-next-line` — a one-line coverage exclusion.
+    CoverageIgnoreNextLine,
+}
+
+/// The directive registry: token → name, plus whether the token is a deprecated
+/// alias. Adding a directive is an entry here, a [`DirectiveName`] variant, and
+/// an arm in [`parse_args`].
+///
+/// Lookup is by **exact** token match, so `@nessemble-coverage-ignore-next-line`
+/// can never resolve as `@nessemble-coverage-ignore` with a stray argument.
+const DIRECTIVES: &[(&str, DirectiveName, bool)] = &[
+    ("@nessemble-format", DirectiveName::Format, false),
+    (
+        "@nessemble-coverage-ignore",
+        DirectiveName::CoverageIgnore,
+        false,
+    ),
+    (
+        "@nessemble-coverage-ignore-next-line",
+        DirectiveName::CoverageIgnoreNextLine,
+        false,
+    ),
+    // Deprecated alias, honored indefinitely: `@fmt` is a shipped, documented
+    // spelling, and dropping it would silently re-flow every project that uses
+    // it. Reported by the linter, never by the formatter.
+    ("@fmt", DirectiveName::Format, true),
+];
+
+/// The namespace every directive shares. A comment token starting with this and
+/// not in [`DIRECTIVES`] is a mistake worth reporting; anything else is prose.
+const DIRECTIVE_NAMESPACE: &str = "@nessemble-";
+
+impl DirectiveName {
+    /// Every directive name, in registry order.
+    pub const ALL: [DirectiveName; 3] = [
+        DirectiveName::Format,
+        DirectiveName::CoverageIgnore,
+        DirectiveName::CoverageIgnoreNextLine,
+    ];
+
+    /// The canonical (non-deprecated) spelling, including the `@`.
+    #[must_use]
+    pub fn canonical(self) -> &'static str {
+        match self {
+            DirectiveName::Format => "@nessemble-format",
+            DirectiveName::CoverageIgnore => "@nessemble-coverage-ignore",
+            DirectiveName::CoverageIgnoreNextLine => "@nessemble-coverage-ignore-next-line",
+        }
+    }
+
+    /// This directive's argument syntax, for diagnostics and hovers; empty when
+    /// it takes none.
+    #[must_use]
+    pub fn arg_syntax(self) -> &'static str {
+        match self {
+            DirectiveName::Format => "stride=N[,N,...]",
+            DirectiveName::CoverageIgnore => "start|end",
+            DirectiveName::CoverageIgnoreNextLine => "",
+        }
+    }
+
+    /// Resolve a comment's first token to a directive name, reporting whether
+    /// the token was a deprecated alias. Case-sensitive: `@NESSEMBLE-FORMAT` is
+    /// prose.
+    fn lookup(token: &str) -> Option<(DirectiveName, bool)> {
+        DIRECTIVES
+            .iter()
+            .find(|(t, _, _)| *t == token)
+            .map(|&(_, name, deprecated)| (name, deprecated))
+    }
+}
+
+/// Which end of a coverage exclusion region a
+/// [`CoverageIgnore`](DirectiveName::CoverageIgnore) directive marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionBound {
+    /// `start` — open a region (an unclosed one runs to end of file).
+    Start,
+    /// `end` — close the open region.
+    End,
+}
+
+/// A directive's parsed arguments. Parsing happens once, in the scanner, so no
+/// consumer re-parses argument text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectiveArgs {
+    /// `@nessemble-format stride=N[,N,…]`; never empty.
+    Strides(Vec<usize>),
+    /// `@nessemble-coverage-ignore start` / `end`.
+    Region(RegionBound),
+    /// The directive takes no arguments.
+    None,
+}
+
+/// A well-formed directive comment found in source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Directive {
+    pub name: DirectiveName,
+    pub args: DirectiveArgs,
+    /// 1-based line of the comment carrying the directive.
+    pub line: u32,
+    /// 1-based character column of the `@`.
+    pub column: u32,
+    /// Byte range of the directive token itself (`@…`), for editors that narrow
+    /// a diagnostic or rewrite the token.
+    pub start: usize,
+    pub end: usize,
+    /// The source spelled a deprecated alias (`@fmt`).
+    pub deprecated: bool,
+    /// The comment is the only significant content on its line. A directive in a
+    /// trailing comment is **inert** — consumers must skip it — and the linter
+    /// reports it.
+    pub own_line: bool,
+}
+
+/// Why a comment addressed to nessemble is not a usable directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MalformedReason {
+    /// An `@nessemble-…` token that is not in the registry (a typo, or a
+    /// directive from a newer nessemble).
+    UnknownName,
+    /// A known directive whose arguments are missing, unparseable, or extra.
+    /// Carries the name so a message can quote [`arg_syntax`](DirectiveName::arg_syntax).
+    BadArgs(DirectiveName),
+}
+
+/// A comment that meant to be a directive but is not one. Byte range and
+/// position match [`Directive`], so both render the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedDirective {
+    pub reason: MalformedReason,
+    pub line: u32,
+    pub column: u32,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every well-formed directive comment in `source`, in source order.
+///
+/// Malformed ones are dropped; use [`scan_directives_with_errors`] to report
+/// them. Note that a returned directive may be `own_line: false` (a trailing
+/// comment), which consumers treat as inert.
+#[must_use]
+pub fn scan_directives(source: &str) -> Vec<Directive> {
+    scan_directives_with_errors(source).0
+}
+
+/// [`scan_directives`], plus the comments that tried to be directives and
+/// failed — the input to the linter's directive rules.
+#[must_use]
+pub fn scan_directives_with_errors(source: &str) -> (Vec<Directive>, Vec<MalformedDirective>) {
+    let lexemes = lex(source);
+    let lines = split_lines(&lexemes);
+    let mut found = Vec::new();
+    let mut malformed = Vec::new();
+
+    for (idx, line) in lines.iter().enumerate() {
+        // A comment runs to end of line, so a line holds at most one — but scan
+        // for it rather than assuming a position.
+        let own_line = line
+            .iter()
+            .all(|l| matches!(l.kind, LexKind::Whitespace | LexKind::Comment));
+        for lx in line.iter().filter(|l| l.kind == LexKind::Comment) {
+            let Some((parsed, offset, len)) = parse_directive_comment(text(source, lx)) else {
+                continue;
+            };
+            let start = lx.start + offset;
+            let end = start + len;
+            let line_start = line.first().map_or(lx.start, |l| l.start);
+            // The prefix of a comment line is whitespace and `;`s, so counting
+            // characters gives the column directly.
+            let column = source[line_start..start].chars().count() as u32 + 1;
+            let line_no = (idx + 1) as u32;
+            match parsed {
+                Parsed::Directive(name, deprecated, args) => found.push(Directive {
+                    name,
+                    args,
+                    line: line_no,
+                    column,
+                    start,
+                    end,
+                    deprecated,
+                    own_line,
+                }),
+                Parsed::Malformed(reason) => malformed.push(MalformedDirective {
+                    reason,
+                    line: line_no,
+                    column,
+                    start,
+                    end,
+                }),
+            }
+        }
+    }
+
+    (found, malformed)
+}
+
+/// The outcome of reading one comment: a directive, or a namespaced token that
+/// isn't a usable one.
+enum Parsed {
+    Directive(DirectiveName, bool, DirectiveArgs),
+    Malformed(MalformedReason),
+}
+
+/// Read a single comment's text (`; …`, leading `;`s included). Returns the
+/// outcome plus the directive token's offset and length **within the comment**,
+/// or `None` when the comment is ordinary prose.
+fn parse_directive_comment(comment: &str) -> Option<(Parsed, usize, usize)> {
+    // Skip the leading `;` run (so `;;`-banner comments carry directives too)
+    // and any whitespace after it.
+    let after_semis = comment.trim_start_matches(';');
+    let body = after_semis.trim_start();
+    let offset = comment.len() - body.len();
+    if !body.starts_with('@') {
+        return None;
+    }
+
+    // The token runs to whitespace or a nested `;` (which opens trailing prose).
+    let token = body
+        .split(|c: char| c.is_whitespace() || c == ';')
+        .next()
+        .unwrap_or(body);
+    // Arguments are what remains before any trailing prose comment.
+    let args = body[token.len()..].split(';').next().unwrap_or("").trim();
+
+    let parsed = match DirectiveName::lookup(token) {
+        Some((name, deprecated)) => match parse_args(name, args) {
+            Some(args) => Parsed::Directive(name, deprecated, args),
+            None => Parsed::Malformed(MalformedReason::BadArgs(name)),
+        },
+        // Only report tokens inside the namespace; `@todo` and friends are prose.
+        None if token.starts_with(DIRECTIVE_NAMESPACE) => {
+            Parsed::Malformed(MalformedReason::UnknownName)
+        }
+        None => return None,
+    };
+    Some((parsed, offset, token.len()))
+}
+
+/// Parse a directive's argument text (trailing prose already stripped), or
+/// `None` if it does not match the directive's syntax.
+fn parse_args(name: DirectiveName, args: &str) -> Option<DirectiveArgs> {
+    match name {
+        DirectiveName::Format => parse_strides(args).map(DirectiveArgs::Strides),
+        DirectiveName::CoverageIgnore => match args {
+            "start" => Some(DirectiveArgs::Region(RegionBound::Start)),
+            "end" => Some(DirectiveArgs::Region(RegionBound::End)),
+            _ => None,
+        },
+        DirectiveName::CoverageIgnoreNextLine => args.is_empty().then_some(DirectiveArgs::None),
+    }
+}
+
+/// Parse a `stride=N[,N,...]` argument into its stride list. Empty entries are
+/// skipped (`stride=2,,3` is `[2, 3]`), matching the original `@fmt` parser.
+fn parse_strides(args: &str) -> Option<Vec<usize>> {
+    let spec = args.strip_prefix("stride=")?;
+    if spec.is_empty() || !spec.bytes().all(|b| b.is_ascii_digit() || b == b',') {
+        return None;
+    }
+    let strides: Vec<usize> = spec
+        .split(',')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if strides.is_empty() {
+        None
+    } else {
+        Some(strides)
+    }
 }
 
 // ─── Linting ─────────────────────────────────────────────────────────────────
@@ -1660,6 +1941,224 @@ mod tests {
         assert_eq!(
             format(src),
             "; @fmt stride=2,1\n.db $01, $02\n.db $03\n.db $04\n"
+        );
+    }
+
+    #[test]
+    fn namespaced_stride_hint_overrides_data_per_line() {
+        let src = "; @nessemble-format stride=2\n.db $01, $02, $03, $04\n";
+        assert_eq!(
+            format(src),
+            "; @nessemble-format stride=2\n.db $01, $02\n.db $03, $04\n"
+        );
+    }
+
+    #[test]
+    fn namespaced_stride_hint_last_value_repeats() {
+        let src = "; @nessemble-format stride=2,1\n.db $01, $02, $03, $04\n";
+        assert_eq!(
+            format(src),
+            "; @nessemble-format stride=2,1\n.db $01, $02\n.db $03\n.db $04\n"
+        );
+    }
+
+    #[test]
+    fn both_stride_hint_spellings_are_disabled_together() {
+        let opts = FormatOptions {
+            respect_stride_hints: false,
+            ..FormatOptions::default()
+        };
+        for hint in ["; @fmt stride=2", "; @nessemble-format stride=2"] {
+            let src = format!("{hint}\n.db $01, $02, $03, $04\n");
+            assert_eq!(
+                format_with(&src, &opts),
+                format!("{hint}\n.db $01, $02, $03, $04\n")
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_stride_hint_is_inert() {
+        // Only a comment-only line carries a hint — unchanged from `@fmt`.
+        let src = ".db $01 ; @nessemble-format stride=1\n.db $02\n";
+        assert_eq!(
+            format(src),
+            ".db $01 ; @nessemble-format stride=1\n.db $02\n"
+        );
+    }
+
+    // ── Comment directives ──────────────────────────────────────────────────
+
+    fn scan(source: &str) -> Vec<Directive> {
+        scan_directives(source)
+    }
+
+    fn bad(source: &str) -> Vec<MalformedDirective> {
+        scan_directives_with_errors(source).1
+    }
+
+    #[test]
+    fn scans_a_format_directive_with_strides() {
+        let found = scan("; @nessemble-format stride=2,1\n");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, DirectiveName::Format);
+        assert_eq!(found[0].args, DirectiveArgs::Strides(vec![2, 1]));
+        assert!(!found[0].deprecated);
+        assert!(found[0].own_line);
+    }
+
+    #[test]
+    fn scans_both_region_bounds() {
+        let found = scan("; @nessemble-coverage-ignore start\n; @nessemble-coverage-ignore end\n");
+        let bounds: Vec<_> = found.iter().map(|d| d.args.clone()).collect();
+        assert_eq!(
+            bounds,
+            vec![
+                DirectiveArgs::Region(RegionBound::Start),
+                DirectiveArgs::Region(RegionBound::End)
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|d| d.name == DirectiveName::CoverageIgnore));
+    }
+
+    #[test]
+    fn scans_an_argument_less_directive() {
+        let found = scan("; @nessemble-coverage-ignore-next-line\n    LDA #$00\n");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, DirectiveName::CoverageIgnoreNextLine);
+        assert_eq!(found[0].args, DirectiveArgs::None);
+    }
+
+    #[test]
+    fn next_line_never_resolves_as_the_region_directive() {
+        // Exact-token lookup: the longer name is its own directive, not the
+        // shorter one with a stray `-next-line` argument.
+        let found = scan("; @nessemble-coverage-ignore-next-line\n");
+        assert_eq!(found[0].name, DirectiveName::CoverageIgnoreNextLine);
+        assert!(bad("; @nessemble-coverage-ignore-next-line\n").is_empty());
+    }
+
+    #[test]
+    fn a_deprecated_alias_is_flagged_but_honored() {
+        let found = scan("; @fmt stride=4\n");
+        assert_eq!(found[0].name, DirectiveName::Format);
+        assert_eq!(found[0].args, DirectiveArgs::Strides(vec![4]));
+        assert!(found[0].deprecated);
+    }
+
+    #[test]
+    fn indentation_and_repeated_semicolons_still_carry_a_directive() {
+        for src in [
+            "    ; @nessemble-coverage-ignore start\n",
+            ";; @nessemble-coverage-ignore start\n",
+            ";;;   @nessemble-coverage-ignore start\n",
+        ] {
+            assert_eq!(scan(src).len(), 1, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn trailing_prose_after_arguments_is_ignored() {
+        let found = scan("; @nessemble-format stride=2 ; two bytes per line\n");
+        assert_eq!(found[0].args, DirectiveArgs::Strides(vec![2]));
+        let found = scan("; @nessemble-coverage-ignore start ; dead mapper path\n");
+        assert_eq!(found[0].args, DirectiveArgs::Region(RegionBound::Start));
+    }
+
+    #[test]
+    fn a_trailing_comment_directive_is_marked_not_own_line() {
+        let found = scan("    LDA #$00 ; @nessemble-coverage-ignore-next-line\n");
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].own_line);
+    }
+
+    #[test]
+    fn ordinary_prose_is_never_a_directive() {
+        for src in [
+            "; @todo fix this\n",
+            "; @param x the value\n",
+            "; see @nessemble-format for details\n",
+            "; @NESSEMBLE-FORMAT stride=2\n",
+            "; @fmtstride=2\n",
+            "    LDA #$00\n",
+        ] {
+            let (found, malformed) = scan_directives_with_errors(src);
+            assert!(found.is_empty() && malformed.is_empty(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_directive_inside_a_string_is_not_scanned() {
+        let src = "    .db \"; @nessemble-coverage-ignore start\"\n";
+        let (found, malformed) = scan_directives_with_errors(src);
+        assert!(found.is_empty() && malformed.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_namespaced_name_is_malformed() {
+        let malformed = bad("; @nessemble-formt stride=2\n");
+        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed[0].reason, MalformedReason::UnknownName);
+    }
+
+    #[test]
+    fn bad_arguments_are_malformed_and_yield_no_directive() {
+        let cases = [
+            ("; @nessemble-format\n", DirectiveName::Format),
+            ("; @nessemble-format stride=x\n", DirectiveName::Format),
+            ("; @nessemble-format stride=\n", DirectiveName::Format),
+            ("; @nessemble-format 2\n", DirectiveName::Format),
+            ("; @fmt\n", DirectiveName::Format),
+            (
+                "; @nessemble-coverage-ignore\n",
+                DirectiveName::CoverageIgnore,
+            ),
+            (
+                "; @nessemble-coverage-ignore begin\n",
+                DirectiveName::CoverageIgnore,
+            ),
+            (
+                "; @nessemble-coverage-ignore-next-line please\n",
+                DirectiveName::CoverageIgnoreNextLine,
+            ),
+        ];
+        for (src, name) in cases {
+            let (found, malformed) = scan_directives_with_errors(src);
+            assert!(found.is_empty(), "{src:?}");
+            assert_eq!(malformed.len(), 1, "{src:?}");
+            assert_eq!(
+                malformed[0].reason,
+                MalformedReason::BadArgs(name),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directives_carry_their_position_and_token_range() {
+        let src = "    LDA #$00\n  ;; @nessemble-format stride=2\n";
+        let found = scan(src);
+        assert_eq!((found[0].line, found[0].column), (2, 6));
+        assert_eq!(&src[found[0].start..found[0].end], "@nessemble-format");
+    }
+
+    #[test]
+    fn directives_come_back_in_source_order() {
+        let src = "; @nessemble-coverage-ignore start\n; @nessemble-format stride=2\n.db $01\n; @nessemble-coverage-ignore end\n";
+        let lines: Vec<u32> = scan(src).iter().map(|d| d.line).collect();
+        assert_eq!(lines, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn every_registry_name_round_trips_through_lookup() {
+        for name in DirectiveName::ALL {
+            assert_eq!(DirectiveName::lookup(name.canonical()), Some((name, false)));
+        }
+        assert_eq!(
+            DirectiveName::lookup("@fmt"),
+            Some((DirectiveName::Format, true))
         );
     }
 
