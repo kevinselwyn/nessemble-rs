@@ -1646,9 +1646,11 @@ fn directive_completion(label: String, documentation: &str) -> CompletionItem {
 fn directive_docs(name: tooling::DirectiveName) -> &'static str {
     match name {
         tooling::DirectiveName::Format => {
-            "Format the following `.db`/`.dw`/`.color` run with these values per line, \
+            "Format the next `.db`/`.dw`/`.color` run with these values per line, \
              overriding `dataPerLine`. Multiple strides cycle and the last one repeats \
-             (`stride=2,1`)."
+             (`stride=2,1`). Blank lines, comment lines, and label or constant \
+             definitions in between are skipped, so the hint can sit above the run's \
+             label and carry an explanation."
         }
         tooling::DirectiveName::CoverageIgnore => {
             "Bound a region excluded from `nessemble coverage`. `start` opens it, `end` \

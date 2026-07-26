@@ -819,6 +819,61 @@ fn is_label_or_constant(line: &str) -> bool {
     is_named_label(line, &sig) || sig.get(1).is_some_and(|l| is_punct(line, l, "="))
 }
 
+// ── Directive binding (shared by the formatter and the linter) ───────────────
+//
+// Where a `; @nessemble-format` directive attaches. This lived twice before —
+// once in the formatter's stride state machine, once in the
+// `ineffective-comment-directive` rule — and the two skip sets drifted apart, so
+// the formatter silently ignored a directive the linter called fine and warned
+// about one the formatter applied. One definition now; keep it that way.
+
+/// Whether `line` sits **transparently** between a `@nessemble-format` directive
+/// and the data run it governs — the skip set both callers share:
+///
+/// - a **blank** line, so a directive may breathe above its run;
+/// - a **comment-only** line, so an explanation may follow the directive (the
+///   same courtesy `@nessemble-coverage-ignore-next-line` documents);
+/// - a **label or constant definition**, because a label is how a data run is
+///   named, which makes `; @nessemble-format` above the label the natural
+///   spelling.
+fn is_transparent_before_data(line: &str) -> bool {
+    let lexemes = lex(line);
+    if is_blank(&lexemes) || is_comment_only(&lexemes) {
+        return true;
+    }
+    is_label_or_constant(line)
+}
+
+/// Whether `line`'s first significant token is a data directive (`.db`, `.dw`,
+/// `.color`) — the thing a stride hint applies to. A trailing comment does not
+/// matter: such a line is pinned rather than merged, but the directive still
+/// binds to it.
+fn is_data_line(line: &str) -> bool {
+    lex(line)
+        .iter()
+        .find(|l| l.kind != LexKind::Whitespace)
+        .filter(|l| l.kind == LexKind::Directive)
+        .and_then(|l| text(line, l).strip_prefix('.'))
+        .is_some_and(is_data_directive)
+}
+
+/// The offset, within the lines **following** a `@nessemble-format` directive,
+/// of the data run it governs — or `None` when it governs nothing, which is what
+/// makes the directive ineffective.
+///
+/// The single definition of "which line does this directive bind to", called by
+/// both [`consolidate_data`] and `ineffective-comment-directive` so a directive
+/// the formatter applies is exactly a directive the linter calls effective.
+fn format_directive_target<'a>(following: impl IntoIterator<Item = &'a str>) -> Option<usize> {
+    for (offset, line) in following.into_iter().enumerate() {
+        if is_transparent_before_data(line) {
+            continue;
+        }
+        return is_data_line(line).then_some(offset);
+    }
+    None
+}
+
 /// Parse a `; @nessemble-format stride=N[,N,...]` hint comment — or its
 /// deprecated `; @fmt` spelling — into its stride list. Both spellings arrive
 /// through the one directive scanner, so they cannot drift apart.
@@ -904,6 +959,10 @@ fn flush_hint(
 /// change, a label/constant, an instruction, a blank line, or a trailing comment
 /// all flush the current group; hinted blocks buffer values and re-flow them by
 /// their strides.
+///
+/// A hint activates only when [`format_directive_target`] finds the run it binds
+/// to; the transparent lines in between (blank, comment, label/constant) pass
+/// through untouched while the hint waits for its data.
 fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
     if opts.data_per_line == 0 {
         return lines.to_vec();
@@ -918,20 +977,36 @@ fn consolidate_data(lines: &[String], opts: &FormatOptions) -> Vec<String> {
     let mut stride_idx = 0usize;
     let mut hint_buffer: Vec<HintValue> = Vec::new();
     let mut consecutive_blanks = 0usize;
+    // Lines still to pass through between an activated hint and its data run.
+    let mut pending_gap = 0usize;
 
-    for line in lines {
+    for (idx, line) in lines.iter().enumerate() {
         if hints_on {
             if let Some(strides) = parse_hint(line) {
                 flush_group(&mut out, &mut group, per, sep);
                 if let Some(hs) = &hint_strides {
                     flush_hint(&mut out, &mut hint_buffer, hs, &mut stride_idx, sep);
                 }
-                hint_strides = Some(strides);
+                // A hint that binds to nothing is inert — the linter reports it
+                // as `ineffective-comment-directive` from the same lookahead.
+                let target = format_directive_target(lines[idx + 1..].iter().map(String::as_str));
+                hint_strides = target.is_some().then_some(strides);
+                pending_gap = target.unwrap_or(0);
                 stride_idx = 0;
                 consecutive_blanks = 0;
                 out.push(line.clone());
                 continue;
             }
+        }
+
+        // Inside the gap a hint is waiting across. Every such line is transparent
+        // by construction, and nothing is buffered yet (the hint line flushed),
+        // so emit it verbatim without disturbing the pending hint.
+        if pending_gap > 0 {
+            pending_gap -= 1;
+            consecutive_blanks = 0;
+            out.push(line.clone());
+            continue;
         }
 
         if line.trim().is_empty() {
@@ -1702,9 +1777,12 @@ fn rule_ineffective_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &
                         .then(|| "has no following line to ignore".to_string())
                 }
                 (DirectiveName::Format, _) => {
-                    let followed_by_data = significant_line_after(ctx.lines, d.line)
-                        .is_some_and(|idx| is_data_line(ctx.source, &ctx.lines[idx]));
-                    (!followed_by_data).then(|| {
+                    // The formatter's own lookahead: effective here means the
+                    // formatter will actually re-flow that run.
+                    let following = ctx.lines[d.line as usize..]
+                        .iter()
+                        .map(|l| line_text(ctx.source, l));
+                    format_directive_target(following).is_none().then(|| {
                         "is not followed by a data line (`.db`, `.dw`, `.color`)".to_string()
                     })
                 }
@@ -1748,14 +1826,13 @@ fn significant_line_after(lines: &[Vec<Lexeme>], line: u32) -> Option<usize> {
         .map(|(idx, _)| idx)
 }
 
-/// Whether a line's first significant token is a data directive (`.db`, `.dw`,
-/// `.color`) — the thing a stride hint applies to.
-fn is_data_line(source: &str, line: &[Lexeme]) -> bool {
-    line.iter()
-        .find(|l| l.kind != LexKind::Whitespace)
-        .filter(|l| l.kind == LexKind::Directive)
-        .and_then(|l| text(source, l).strip_prefix('.'))
-        .is_some_and(is_data_directive)
+/// The source text of one physical line (the span of its lexemes), so the
+/// linter can hand a line to the text-based helpers the formatter uses.
+fn line_text<'a>(source: &'a str, line: &[Lexeme]) -> &'a str {
+    match (line.first(), line.last()) {
+        (Some(first), Some(last)) => &source[first.start..last.end],
+        _ => "",
+    }
 }
 
 /// If `line` is exactly a named label definition (`name:`), return the label
@@ -2232,6 +2309,127 @@ mod tests {
             format(src),
             ".db $01 ; @nessemble-format stride=1\n.db $02\n"
         );
+    }
+
+    // ── Directive binding ───────────────────────────────────────────────────
+    //
+    // The formatter and `ineffective-comment-directive` share one lookahead, so
+    // every case here is asserted on *both* sides: the stride is applied and the
+    // linter is clean, or neither. They disagreed before — the formatter skipped
+    // { blank, label }, the linter { blank, comment } — which made a label a
+    // false positive and a comment a silent no-op.
+
+    /// Every line that must be transparent between a directive and its run,
+    /// named and in the gap-text form the fixtures splice in.
+    const GAPS: &[(&str, &str)] = &[
+        ("immediate", ""),
+        ("blank", "\n"),
+        ("label", "foo:\n"),
+        ("comment", "; explanation\n"),
+        ("label then comment", "foo:\n; explanation\n"),
+        ("comment then label", "; explanation\nfoo:\n"),
+        ("two blanks", "\n\n"),
+        ("constant", "FOO = $10\n"),
+    ];
+
+    #[test]
+    fn a_stride_hint_binds_across_blank_comment_and_label_lines() {
+        for (name, gap) in GAPS {
+            let src = format!("; @nessemble-format stride=1\n{gap}.db $01, $02, $03\n");
+            assert_eq!(
+                format(&src),
+                format!("; @nessemble-format stride=1\n{gap}.db $01\n.db $02\n.db $03\n"),
+                "formatter, gap = {name}"
+            );
+            assert!(lint_directives(&src).is_empty(), "lint, gap = {name}");
+            // Binding across a gap must stay idempotent — the run is already
+            // strided the second time through.
+            let once = format(&src);
+            assert_eq!(format(&once), once, "idempotence, gap = {name}");
+        }
+    }
+
+    #[test]
+    fn a_stride_hint_binds_the_same_way_for_dw_and_color() {
+        for (dir, values, strided) in [
+            ("dw", "$8000, $8010", "$8000\n.dw $8010"),
+            ("color", "$0F, $30", "$0F\n.color $30"),
+        ] {
+            for (name, gap) in GAPS {
+                let src = format!("; @nessemble-format stride=1\n{gap}.{dir} {values}\n");
+                assert_eq!(
+                    format(&src),
+                    format!("; @nessemble-format stride=1\n{gap}.{dir} {strided}\n"),
+                    "formatter, .{dir} with gap = {name}"
+                );
+                assert!(
+                    lint_directives(&src).is_empty(),
+                    "lint, .{dir} with gap = {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_deprecated_alias_binds_identically_and_still_reports() {
+        for (name, gap) in GAPS {
+            let src = format!("; @fmt stride=1\n{gap}.db $01, $02\n");
+            assert_eq!(
+                format(&src),
+                format!("; @fmt stride=1\n{gap}.db $01\n.db $02\n"),
+                "formatter, gap = {name}"
+            );
+            let findings = lint_directives(&src);
+            assert_eq!(findings.len(), 1, "lint, gap = {name}: {findings:?}");
+            assert_eq!(findings[0].rule, RuleId::DeprecatedCommentDirective);
+        }
+    }
+
+    #[test]
+    fn a_hint_that_binds_to_no_data_run_is_inert_on_both_sides() {
+        // Each case pairs the lines after the directive with the data run that
+        // must come back untouched (empty when there is no run at all).
+        for (name, rest, intact) in [
+            (
+                "instruction",
+                "    nop\n.db $01, $02, $03\n",
+                ".db $01, $02, $03",
+            ),
+            (
+                "label sharing its line with code",
+                "foo: nop\n.db $01, $02, $03\n",
+                ".db $01, $02, $03",
+            ),
+            (
+                "data sharing a label's line",
+                "foo: .db $01\n.db $02, $03\n",
+                ".db $02, $03",
+            ),
+            ("end of file", "", ""),
+        ] {
+            let src = format!("; @nessemble-format stride=1\n{rest}");
+            let formatted = format(&src);
+            assert!(
+                formatted.contains(intact),
+                "formatter re-flowed past a barrier, {name}: {formatted}"
+            );
+            let findings = lint_directives(&src);
+            assert_eq!(findings.len(), 1, "lint, {name}: {findings:?}");
+            assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
+            assert!(findings[0].message.contains("data line"), "lint, {name}");
+        }
+    }
+
+    #[test]
+    fn the_shared_lookahead_is_the_one_definition_of_binding() {
+        let target = |lines: &[&str]| format_directive_target(lines.iter().copied());
+        // Transparent lines are skipped; the offset names the bound run.
+        assert_eq!(target(&[".db $01"]), Some(0));
+        assert_eq!(target(&["", "; why", "foo:", "    .dw $8000"]), Some(3));
+        assert_eq!(target(&["foo:", ".color $0F ; pinned"]), Some(1));
+        // A barrier, or nothing at all, binds to nothing.
+        assert_eq!(target(&["    nop", ".db $01"]), None);
+        assert_eq!(target(&[]), None);
     }
 
     // ── Comment directives ──────────────────────────────────────────────────
