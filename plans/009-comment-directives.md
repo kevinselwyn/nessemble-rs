@@ -1,7 +1,7 @@
 # nessemble-rs: A Plan for Comment Directives
 
-> Status: **Approved — decisions settled ([§13](#13-decisions)); implementation
-> not started.** This document codifies the tool-directive comments nessemble
+> Status: **In progress — Phase 0 done ([§10](#10-phased-plan)); decisions
+> settled ([§13](#13-decisions)).** This document codifies the tool-directive comments nessemble
 > reads out of assembly source. It (a) promotes the formatter's existing ad-hoc
 > `; @fmt stride=N` hint to a namespaced **`; @nessemble-format stride=N`** (with
 > `@fmt` kept as a deprecated alias), (b) adds coverage directives —
@@ -260,36 +260,69 @@ nessemble does not format Rhai.
 
 ## 6. Architecture
 
-### 6.1 Core: `tooling::directive` (new submodule)
+### 6.1 Core: the directive registry — **as built (Phase 0)**
+
+A "Comment directives" section of `nessemble-core/src/tooling.rs`, placed just
+before the linting section — matching how plan 008's rule engine landed (a
+section of the same file, items at the `tooling::` path) rather than a separate
+submodule file:
 
 ```rust
-/// A directive's identity. One variant per registry row (§4).
-pub enum DirectiveKind { Format, CoverageIgnore, CoverageIgnoreNextLine }
+/// A directive's registry name — its identity, independent of arguments.
+pub enum DirectiveName { Format, CoverageIgnore, CoverageIgnoreNextLine }
+impl DirectiveName {
+    pub const ALL: [DirectiveName; 3];
+    pub fn canonical(self) -> &'static str;   // "@nessemble-format", …
+    pub fn arg_syntax(self) -> &'static str;  // "stride=N[,N,...]" | "start|end" | ""
+}
 
-/// A directive comment found in source.
-pub struct Directive<'a> {
-    pub kind: DirectiveKind,
-    pub args: &'a str,       // remainder, trailing prose stripped
+/// Arguments, parsed once in the scanner so no consumer re-parses text.
+pub enum DirectiveArgs { Strides(Vec<usize>), Region(RegionBound), None }
+pub enum RegionBound { Start, End }
+
+pub struct Directive {
+    pub name: DirectiveName,
+    pub args: DirectiveArgs,
     pub line: u32,           // 1-based, the comment's own line
-    pub column: u32,         // 1-based, the `@`
+    pub column: u32,         // 1-based char column of the `@`
+    pub start: usize,        // byte range of the `@…` token, for editors that
+    pub end: usize,          //   narrow a diagnostic or rewrite the token
     pub deprecated: bool,    // matched a legacy alias (`@fmt`)
     pub own_line: bool,      // false ⇒ trailing comment ⇒ inert (§4.2)
 }
 
-/// Every well-formed directive in `source`, in source order.
-pub fn scan_directives(source: &str) -> Vec<Directive<'_>>;
+pub enum MalformedReason { UnknownName, BadArgs(DirectiveName) }
+pub struct MalformedDirective { pub reason: MalformedReason, pub line: u32,
+                                pub column: u32, pub start: usize, pub end: usize }
 
-/// A comment addressed to nessemble that is *not* a valid directive — the
-/// input to the `unknown-comment-directive` rule (§7).
-pub struct MalformedDirective { pub line: u32, pub column: u32,
-                                pub token: String, pub reason: MalformedReason }
+pub fn scan_directives(source: &str) -> Vec<Directive>;
 pub fn scan_directives_with_errors(source: &str)
-    -> (Vec<Directive<'_>>, Vec<MalformedDirective>);
+    -> (Vec<Directive>, Vec<MalformedDirective>);
 ```
+
+Two deviations from the sketch this plan opened with, both settled by writing it:
+
+- **Typed, pre-parsed arguments** instead of a raw `args: &str`. Stride lists and
+  `start`/`end` are parsed inside the scanner, which is what lets it distinguish
+  "malformed" from "prose" at all — the `BadArgs` reason falls out of the same
+  parse. It also drops the lifetime, so `Directive` is owned and easy to hold.
+- **The token's byte range** (`start`/`end`) rides along, because the LSP quick
+  fix (Phase 3) has to rewrite exactly that span, and diagnostics narrow to it.
+
+The registry itself is a `const DIRECTIVES: &[(&str, DirectiveName, bool)]` —
+token, name, is-deprecated-alias — looked up by **exact** token match, so
+`@nessemble-coverage-ignore-next-line` can never resolve as
+`@nessemble-coverage-ignore` with a stray argument.
 
 Built on the existing `lex` + `split_lines` helpers, so it sees exactly what the
 formatter, highlighter, and linter see. **No new dependencies** — this is string
 handling over the lexeme stream.
+
+**One deliberate widening over `@fmt`:** the scanner skips the whole leading `;`
+run, so `;; @nessemble-format stride=2` is a directive, where the old parser
+(single `;` only) treated it as prose. This makes `;;`-banner comment styles
+work, at the cost of one idiom: "comment out a hint by adding a `;`" no longer
+disables it. Reversible in one line if that trade reads wrong.
 
 `parse_hint` is re-founded on it: `consolidate_data` asks the scanner for a
 `DirectiveKind::Format` on the line and parses `stride=` from its `args`. Both
@@ -471,11 +504,27 @@ gutters in the LSP.
 Each phase leaves the tree green (`cargo test`, `cargo clippy`, `xtask parity`)
 and carries its own changeset, per house style.
 
-**Phase 0 — the directive registry in core.** `tooling::directive`
-(`DirectiveKind`, `Directive`, `MalformedDirective`, `scan_directives`,
-`scan_directives_with_errors`); `parse_hint` re-founded on it so
-`@nessemble-format` and `@fmt` share one path. No user-visible change beyond the
-new accepted spelling. *Changeset: `minor`.*
+**Phase 0 — the directive registry in core. — ✅ done.** Added the "Comment
+directives" section to `nessemble-core::tooling`: `DirectiveName` (+ the
+`DIRECTIVES` registry, `canonical`, `arg_syntax`), `DirectiveArgs`,
+`RegionBound`, `Directive`, `MalformedReason`, `MalformedDirective`,
+`scan_directives`, and `scan_directives_with_errors`, all over the existing
+lossless lexer with no new dependencies (§6.1). `parse_hint` is re-founded on the
+scanner, so `@nessemble-format` and `@fmt` share one parse and cannot drift; the
+`FormatOptions::respect_stride_hints` docs name the new spelling. *Verified:*
+directive unit tests (every registry name; `start`/`end`; exact-match so
+`-next-line` never resolves as the region directive; the `@fmt` alias flagged
+deprecated but honored; indentation and `;;`/`;;;` leaders; trailing prose after
+args; a trailing-comment directive marked `own_line: false`; prose `@todo`/
+`@param`/mid-sentence/`@NESSEMBLE-FORMAT`/`@fmtstride=2` untouched; a directive
+inside a string literal not scanned; unknown namespaced name → `UnknownName`;
+eight bad-argument cases → `BadArgs` with no directive emitted; position and
+token byte range; source order; registry round-trip), plus formatter regressions
+proving the old `@fmt` tests still pass byte-for-byte, the same fixtures pass
+with `@nessemble-format`, `respectStrideHints: false` disables both spellings,
+and a trailing hint stays inert. Full workspace suite green (`cargo fmt --check`,
+`cargo clippy --workspace --all-targets`, `cargo test --workspace`, including the
+golden-ROM corpus). *Changeset: `minor`.*
 
 **Phase 1 — validation.** The three lint rules (§7), their `RuleId`s, registry
 entries, and `.nessemblerc` names in `nessemble-rc`. Lands `nessemble lint`
@@ -500,16 +549,16 @@ half — they are independent after Phase 0.
 
 ## 11. Testing strategy
 
-- **Core scanner unit tests** — each registry name; `;;`/`;;;` leaders and
-  leading whitespace; trailing prose after args; a trailing (non-own-line)
-  directive marked `own_line: false`; `@todo`/`@param` untouched; an unknown
-  `@nessemble-*` name and each `MalformedReason`; `@fmt` flagged `deprecated`;
-  case sensitivity; the exact-match property that
+- **Core scanner unit tests** *(done, Phase 0)* — each registry name; `;;`/`;;;`
+  leaders and leading whitespace; trailing prose after args; a trailing
+  (non-own-line) directive marked `own_line: false`; `@todo`/`@param` untouched;
+  an unknown `@nessemble-*` name and each `MalformedReason`; `@fmt` flagged
+  `deprecated`; case sensitivity; the exact-match property that
   `@nessemble-coverage-ignore-next-line` never resolves as
   `@nessemble-coverage-ignore`.
-- **Formatter regression** — every existing `@fmt` stride test keeps passing
-  byte-for-byte, duplicated for `@nessemble-format`; `respectStrideHints: false`
-  disables both.
+- **Formatter regression** *(done, Phase 0)* — every existing `@fmt` stride test
+  keeps passing byte-for-byte, duplicated for `@nessemble-format`;
+  `respectStrideHints: false` disables both.
 - **Lint** — one fixture per rule, plus a clean fixture with prose `@`-comments
   proving no false positives; each rule `off`; per-glob override.
 - **Coverage** — fixtures for an ignored line, a closed region, an **unclosed**
