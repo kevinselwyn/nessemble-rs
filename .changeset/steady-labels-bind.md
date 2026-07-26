@@ -1,5 +1,5 @@
 ---
-nessemble: minor
+nessemble: patch
 ---
 `; @nessemble-format stride=N` now binds to its data run through one lookahead
 shared by `format` and `lint`, so the two can no longer disagree about which run
