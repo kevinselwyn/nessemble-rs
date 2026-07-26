@@ -1701,10 +1701,13 @@ fn rule_ineffective_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &
                         .is_none()
                         .then(|| "has no following line to ignore".to_string())
                 }
-                (DirectiveName::Format, _) => significant_line_after(ctx.lines, d.line)
-                    .filter(|&idx| is_data_line(ctx.source, &ctx.lines[idx]))
-                    .is_none()
-                    .then(|| "is not followed by a data line (`.db`, `.dw`, `.color`)".to_string()),
+                (DirectiveName::Format, _) => {
+                    let followed_by_data = significant_line_after(ctx.lines, d.line)
+                        .is_some_and(|idx| is_data_line(ctx.source, &ctx.lines[idx]));
+                    (!followed_by_data).then(|| {
+                        "is not followed by a data line (`.db`, `.dw`, `.color`)".to_string()
+                    })
+                }
                 (DirectiveName::CoverageIgnore, DirectiveArgs::Region(bound)) => {
                     let ineffective = match bound {
                         RegionBound::Start => region_open
