@@ -972,6 +972,40 @@ fn lint_walks_a_directory() {
 }
 
 #[test]
+fn format_and_lint_agree_on_where_a_stride_hint_binds() {
+    // `format` and `lint` resolve the directive's target through one shared
+    // lookahead: blank, comment, and label lines are transparent to both. Before
+    // that, a label was a lint false positive and a comment a formatter no-op.
+    let dir = lint_dir("binding");
+    let file = dir.join("a.asm");
+    std::fs::write(
+        &file,
+        "; @nessemble-format stride=1\nfoo:\n; explanation\n    .db $01, $02, $03\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .args(["format", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "; @nessemble-format stride=1\nfoo:\n; explanation\n.db $01\n.db $02\n.db $03\n"
+    );
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("✓ No problems."), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn lint_reports_comment_directive_problems() {
     let dir = lint_dir("directives");
     let file = dir.join("a.asm");

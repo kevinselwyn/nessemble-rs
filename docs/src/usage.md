@@ -269,7 +269,7 @@ do.
 
 | Directive | Applies to | Tool |
 | --- | --- | --- |
-| `@nessemble-format stride=N[,N,...]` | the data run that follows | [`format`](#format-opt--path-) |
+| `@nessemble-format stride=N[,N,...]` | the next data run (skipping blank, comment, and label lines) | [`format`](#format-opt--path-) |
 | `@nessemble-coverage-ignore-next-line` | the next significant line | [`coverage`](#coverage-infileasm---cdl-filecdl-) |
 | `@nessemble-coverage-ignore start` \| `end` | every line between the two | [`coverage`](#coverage-infileasm---cdl-filecdl-) |
 | `@fmt stride=N[,N,...]` | *deprecated alias of `@nessemble-format`* | [`format`](#format-opt--path-) |
@@ -282,6 +282,10 @@ The rules are the same for every directive:
   and any spaces. A directive mentioned mid-sentence is prose.
 - Names are **exact and lower-case**; anything after the arguments and a second
   `;` is free-text prose.
+- A directive applies to what **follows** it, and blank lines, comment lines, and
+  label or constant definitions in between are skipped — so a directive can sit
+  above the label that names its subject, and an explanation can follow the
+  directive.
 - An unrecognized `@nessemble-…` name, or a known one with wrong arguments, is
   **reported by [`lint`](#lint-opt--path-) and in the editor** rather than
   silently ignored — that is what the namespace buys you. Ordinary `@`-comments
@@ -380,13 +384,31 @@ about them.
 
 To override `dataPerLine` for one data block, place a
 `; @nessemble-format stride=N` [comment directive](#comment-directives)
-immediately before it. Multiple strides cycle in order and the last one repeats:
+before it. Multiple strides cycle in order and the last one repeats:
 
 ```asm
 ; @nessemble-format stride=2
     .db $01, $02
     .db $03, $04
 ```
+
+The hint binds to the **next data run**, skipping blank lines, comment lines, and
+label or constant definitions on the way — the run's own label and an
+explanatory comment are both transparent:
+
+```asm
+; @nessemble-format stride=3
+; one row of the tile per line
+palette_rows:
+    .db $01, $02, $03
+    .db $04, $05, $06
+```
+
+If the first thing that is *not* one of those is anything but a `.db`/`.dw`/
+`.color` line, the hint applies to nothing and
+[`lint`](#lint-opt--path-) reports it as `ineffective-comment-directive`.
+`format` and `lint` resolve the target the same way, so a hint the formatter
+honors is exactly a hint the linter calls effective.
 
 > **Deprecated spelling.** The original `; @fmt stride=N` still works and always
 > will — it is an alias, not a removal. It is reported by the
