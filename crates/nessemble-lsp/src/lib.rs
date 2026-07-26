@@ -52,11 +52,11 @@ use lsp_types::{
     FoldingRange, FoldingRangeKind, FoldingRangeParams, FoldingRangeProviderCapability,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
     MarkupContent, MarkupKind, NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range,
-    ReferenceParams, RenameParams, SemanticToken, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
-    WorkspaceEdit,
+    ReferenceParams, RenameParams, SemanticToken, SemanticTokenModifier, SemanticTokenType,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 
 use nessemble_core::tooling::{self, LexKind, RuleSeverity};
@@ -78,6 +78,16 @@ const TOKEN_TYPES: [SemanticTokenType; 7] = [
     SemanticTokenType::COMMENT,  // 5
     SemanticTokenType::OPERATOR, // 6: punctuation/operator
 ];
+
+/// Semantic-token **modifier** legend. Modifiers are a separate axis from token
+/// types, so this is purely additive: a comment carrying a nessemble directive
+/// stays `COMMENT` (wire id 5) and merely gains this bit, leaving
+/// `TokenClass::wire_id` — a contract shared with the wasm highlighter — frozen.
+const TOKEN_MODIFIERS: [SemanticTokenModifier; 1] = [SemanticTokenModifier::DOCUMENTATION];
+
+/// The bit for [`SemanticTokenModifier::DOCUMENTATION`] in a token's modifier
+/// bitset (index 0 of [`TOKEN_MODIFIERS`]).
+const MODIFIER_DOCUMENTATION: u32 = 1 << 0;
 
 /// A boxed, thread-safe error, matching what the stdio transport surfaces.
 type LspError = Box<dyn std::error::Error + Sync + Send>;
@@ -378,13 +388,21 @@ impl Server {
     /// Completion candidates for the document at `uri`: instruction mnemonics
     /// and directives (always), plus that document's in-scope labels/constants
     /// and macro names. Filtering by the typed prefix is left to the client.
-    fn complete(&self, uri: &Url) -> Vec<CompletionItem> {
+    fn complete(&self, uri: &Url, pos: Position) -> Vec<CompletionItem> {
+        let Some(doc) = self.documents.get(uri) else {
+            let mut items = mnemonic_items();
+            items.extend(directive_items());
+            return items;
+        };
+        // Inside a comment, code completions are noise — offer the comment
+        // directives instead, which are otherwise undiscoverable.
+        if in_comment(&doc.text, pos) {
+            return comment_directive_items();
+        }
         let mut items = mnemonic_items();
         items.extend(directive_items());
-        if let Some(doc) = self.documents.get(uri) {
-            items.extend(doc.symbols.iter().map(|s| symbol_item(&s.name)));
-            items.extend(macro_names(&doc.text).iter().map(|name| macro_item(name)));
-        }
+        items.extend(doc.symbols.iter().map(|s| symbol_item(&s.name)));
+        items.extend(macro_names(&doc.text).iter().map(|name| macro_item(name)));
         items
     }
 
@@ -528,6 +546,7 @@ impl Server {
         let markdown = match token.kind {
             LexKind::Directive => directive_hover(token.text)?,
             LexKind::Ident => ident_hover(token.text, &doc.text, &doc.symbols)?,
+            LexKind::Comment => return comment_directive_hover(&doc.text, pos),
             _ => return None,
         };
         Some(Hover {
@@ -581,6 +600,12 @@ impl Server {
         let Some(doc) = self.documents.get(uri) else {
             return Vec::new();
         };
+        // A deprecated directive on the requested line gets a rename fix; it is
+        // what makes the deprecation actionable rather than nagging.
+        let fixes = deprecated_directive_fixes(uri, &doc.text, range);
+        if !fixes.is_empty() {
+            return fixes;
+        }
         let Some(token) = token_at(&doc.text, range.start) else {
             return Vec::new();
         };
@@ -778,9 +803,10 @@ fn lint_diagnostics(uri: &Url, text: &str) -> Vec<Diagnostic> {
         .into_iter()
         .map(|f| {
             let severity = lint_severity(lint_cfg.severities.get(f.rule));
-            // A backtick-quoted subject lets `diagnostic_range` narrow to the
-            // label token on the line.
-            let message = format!("code block `{}` has no nearby comment", f.subject);
+            // The rule writes the message (so the CLI report and the editor say
+            // the same thing); it backtick-quotes the subject, which lets
+            // `diagnostic_range` narrow to the offending token on the line.
+            let message = f.message;
             let line = f.line.saturating_sub(1);
             Diagnostic {
                 range: diagnostic_range(text, line, &message),
@@ -1097,6 +1123,14 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
     let mut data = Vec::new();
     let (mut line, mut col) = (0u32, 0u32);
     let (mut prev_line, mut prev_col) = (0u32, 0u32);
+    // Lines whose comment carries a nessemble directive (well-formed or not):
+    // both are marked, so a typo'd directive still reads as one.
+    let (directives, malformed) = tooling::scan_directives_with_errors(text);
+    let directive_lines: HashSet<u32> = directives
+        .iter()
+        .map(|d| d.line)
+        .chain(malformed.iter().map(|m| m.line))
+        .collect();
     for lx in tooling::lex(text) {
         let piece = &text[lx.start..lx.end];
         match lx.kind {
@@ -1109,6 +1143,8 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
                 let len = utf16_len(piece);
                 let delta_line = line - prev_line;
                 let delta_start = if delta_line == 0 { col - prev_col } else { col };
+                let is_directive_comment =
+                    kind == LexKind::Comment && directive_lines.contains(&(line + 1));
                 data.push(SemanticToken {
                     delta_line,
                     delta_start,
@@ -1118,7 +1154,13 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
                     // `TokenClass::wire_id`); the LSP keeps its own delta encoding
                     // and maps that id through `TOKEN_TYPES`.
                     token_type: tooling::classify(kind, piece).wire_id(),
-                    token_modifiers_bitset: 0,
+                    // A directive comment keeps the `COMMENT` type and is
+                    // distinguished by a modifier, so no wire id moves.
+                    token_modifiers_bitset: if is_directive_comment {
+                        MODIFIER_DOCUMENTATION
+                    } else {
+                        0
+                    },
                 });
                 (prev_line, prev_col) = (line, col);
                 col += len;
@@ -1543,6 +1585,152 @@ fn number_conversions(uri: &Url, text: &str, range: Range) -> Vec<CodeActionOrCo
     .collect()
 }
 
+/// Whether `pos` sits inside a comment — the context in which comment
+/// directives, rather than code, are worth completing.
+fn in_comment(text: &str, pos: Position) -> bool {
+    located_lexemes(text).into_iter().any(|t| {
+        t.kind == LexKind::Comment
+            && t.range.start.line == pos.line
+            && pos.character > t.range.start.character
+            && pos.character <= t.range.end.character
+    })
+}
+
+/// The comment-directive completions: every registry name, with
+/// `@nessemble-coverage-ignore` offered pre-filled as `start` and as `end`
+/// rather than as a bare stem the user would be left to complete (and get
+/// flagged for).
+fn comment_directive_items() -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    for name in tooling::DirectiveName::ALL {
+        let canonical = name.canonical();
+        match name {
+            tooling::DirectiveName::CoverageIgnore => {
+                for bound in ["start", "end"] {
+                    items.push(directive_completion(
+                        format!("{canonical} {bound}"),
+                        directive_docs(name),
+                    ));
+                }
+            }
+            tooling::DirectiveName::Format => items.push(directive_completion(
+                format!("{canonical} stride="),
+                directive_docs(name),
+            )),
+            tooling::DirectiveName::CoverageIgnoreNextLine => {
+                items.push(directive_completion(
+                    canonical.to_string(),
+                    directive_docs(name),
+                ));
+            }
+        }
+    }
+    items
+}
+
+fn directive_completion(label: String, documentation: &str) -> CompletionItem {
+    CompletionItem {
+        label,
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some("nessemble comment directive".to_string()),
+        documentation: Some(lsp_types::Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: documentation.to_string(),
+        })),
+        ..Default::default()
+    }
+}
+
+/// One paragraph of documentation per directive — the single source of truth
+/// behind both completion and hover.
+fn directive_docs(name: tooling::DirectiveName) -> &'static str {
+    match name {
+        tooling::DirectiveName::Format => {
+            "Format the following `.db`/`.dw`/`.color` run with these values per line, \
+             overriding `dataPerLine`. Multiple strides cycle and the last one repeats \
+             (`stride=2,1`)."
+        }
+        tooling::DirectiveName::CoverageIgnore => {
+            "Bound a region excluded from `nessemble coverage`. `start` opens it, `end` \
+             closes it; a region left unclosed runs to the end of the file, which is how a \
+             whole file opts out."
+        }
+        tooling::DirectiveName::CoverageIgnoreNextLine => {
+            "Exclude the next significant line from `nessemble coverage` (blank and comment \
+             lines in between are skipped, so an explanation may follow this directive)."
+        }
+    }
+}
+
+/// Hover for a directive comment: the directive's documentation plus its
+/// canonical spelling and argument syntax. `None` for ordinary prose comments.
+fn comment_directive_hover(text: &str, pos: Position) -> Option<Hover> {
+    use std::fmt::Write as _;
+
+    let (directives, _) = tooling::scan_directives_with_errors(text);
+    let d = directives.into_iter().find(|d| d.line == pos.line + 1)?;
+    let syntax = match d.name.arg_syntax() {
+        "" => d.name.canonical().to_string(),
+        args => format!("{} {args}", d.name.canonical()),
+    };
+    let mut value = format!("```asm\n; {syntax}\n```\n\n{}", directive_docs(d.name));
+    if d.deprecated {
+        let _ = write!(
+            value,
+            "\n\n**Deprecated spelling** — use `{}`.",
+            d.name.canonical()
+        );
+    }
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: None,
+    })
+}
+
+/// A quick fix rewriting a deprecated directive token (`@fmt`) to its canonical
+/// spelling, for any deprecated directive on the requested range's line.
+fn deprecated_directive_fixes(uri: &Url, text: &str, range: Range) -> Vec<CodeActionOrCommand> {
+    let (directives, _) = tooling::scan_directives_with_errors(text);
+    directives
+        .into_iter()
+        .filter(|d| d.deprecated && d.line == range.start.line + 1)
+        .map(|d| {
+            let token_range = byte_range_to_lsp(text, d.start, d.end);
+            let canonical = d.name.canonical();
+            let mut changes = HashMap::new();
+            changes.insert(
+                uri.clone(),
+                vec![TextEdit {
+                    range: token_range,
+                    new_text: canonical.to_string(),
+                }],
+            );
+            CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Rename to `{canonical}`"),
+                kind: Some(CodeActionKind::QUICKFIX),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// Convert a byte range that lies within one line into an LSP [`Range`]
+/// (UTF-16 columns).
+fn byte_range_to_lsp(text: &str, start: usize, end: usize) -> Range {
+    let line = text[..start].matches('\n').count() as u32;
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let col = utf16_len(&text[line_start..start]);
+    let len = utf16_len(&text[start..end]);
+    Range::new(Position::new(line, col), Position::new(line, col + len))
+}
+
 /// Numeric literal base.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Base {
@@ -1671,7 +1859,7 @@ fn server_capabilities() -> ServerCapabilities {
                 work_done_progress_options: WorkDoneProgressOptions::default(),
                 legend: SemanticTokensLegend {
                     token_types: TOKEN_TYPES.to_vec(),
-                    token_modifiers: Vec::new(),
+                    token_modifiers: TOKEN_MODIFIERS.to_vec(),
                 },
                 range: Some(false),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
@@ -1755,7 +1943,12 @@ fn main_loop(connection: &Connection, workspace_roots: Vec<PathBuf>) -> LspResul
                 let resp = match req.method.as_str() {
                     Completion::METHOD => {
                         let items = serde_json::from_value::<CompletionParams>(req.params)
-                            .map(|p| server.complete(&p.text_document_position.text_document.uri))
+                            .map(|p| {
+                                server.complete(
+                                    &p.text_document_position.text_document.uri,
+                                    p.text_document_position.position,
+                                )
+                            })
                             .unwrap_or_default();
                         Response::new_ok(req.id, CompletionResponse::Array(items))
                     }
@@ -1939,7 +2132,7 @@ mod tests {
             open_params("file:///c.asm", text),
         );
         let uri = Url::parse("file:///c.asm").unwrap();
-        let ls = labels(server.complete(&uri));
+        let ls = labels(server.complete(&uri, Position::new(4, 2)));
         assert!(ls.iter().any(|l| l == "lda"), "missing mnemonic");
         assert!(ls.iter().any(|l| l == ".db"), "missing directive");
         assert!(ls.iter().any(|l| l == "start"), "missing label");
@@ -2789,6 +2982,142 @@ mod tests {
         assert!(diags.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Comment directives ──────────────────────────────────────────────────
+
+    #[test]
+    fn lint_publishes_a_directive_diagnostic() {
+        let dir = workspace("lint-directive");
+        let file = dir.join("a.asm");
+        let uri = Url::from_file_path(&file).unwrap();
+        let diags = lint_diagnostics(&uri, "; @nessemble-formt stride=2\n.db $01\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].source.as_deref(), Some("nessemble-lint"));
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String("unknown-comment-directive".into()))
+        );
+        assert!(diags[0].message.contains("@nessemble-formt"), "{diags:?}");
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::HINT));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completion_inside_a_comment_offers_directives_not_mnemonics() {
+        let mut server = Server::default();
+        open(&mut server, "file:///d.asm", "; @\n  lda #$00\n");
+        let uri = Url::parse("file:///d.asm").unwrap();
+        let ls = labels(server.complete(&uri, Position::new(0, 3)));
+        assert!(
+            ls.iter().any(|l| l == "@nessemble-coverage-ignore start"),
+            "{ls:?}"
+        );
+        assert!(
+            ls.iter().any(|l| l == "@nessemble-coverage-ignore end"),
+            "{ls:?}"
+        );
+        assert!(
+            ls.iter()
+                .any(|l| l == "@nessemble-coverage-ignore-next-line"),
+            "{ls:?}"
+        );
+        assert!(
+            ls.iter().any(|l| l == "@nessemble-format stride="),
+            "{ls:?}"
+        );
+        assert!(!ls.iter().any(|l| l == "lda"), "code leaked into a comment");
+
+        // Outside a comment the ordinary completions still apply.
+        let ls = labels(server.complete(&uri, Position::new(1, 5)));
+        assert!(ls.iter().any(|l| l == "lda"), "{ls:?}");
+    }
+
+    #[test]
+    fn hover_documents_a_comment_directive() {
+        let mut server = Server::default();
+        open(
+            &mut server,
+            "file:///h.asm",
+            "; @nessemble-coverage-ignore start\n  nop\n",
+        );
+        let uri = Url::parse("file:///h.asm").unwrap();
+        let hover = server.hover(&uri, Position::new(0, 10)).expect("hover");
+        let HoverContents::Markup(m) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(m.value.contains("@nessemble-coverage-ignore start|end"));
+        assert!(m.value.contains("end of the file"));
+
+        // A deprecated spelling says so, and an ordinary comment has no hover.
+        open(&mut server, "file:///h2.asm", "; @fmt stride=2\n.db $01\n");
+        let uri2 = Url::parse("file:///h2.asm").unwrap();
+        let hover = server.hover(&uri2, Position::new(0, 4)).expect("hover");
+        let HoverContents::Markup(m) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(m.value.contains("Deprecated"), "{}", m.value);
+
+        open(&mut server, "file:///h3.asm", "; just a note\n  nop\n");
+        let uri3 = Url::parse("file:///h3.asm").unwrap();
+        assert!(server.hover(&uri3, Position::new(0, 5)).is_none());
+    }
+
+    #[test]
+    fn code_action_renames_a_deprecated_directive() {
+        let mut server = Server::default();
+        open(&mut server, "file:///q.asm", "  ; @fmt stride=2\n.db $01\n");
+        let uri = Url::parse("file:///q.asm").unwrap();
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(0, 5), Position::new(0, 5)));
+        let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(action.title, "Rename to `@nessemble-format`");
+        let edits = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+        let edit = &edits[&uri][0];
+        assert_eq!(edit.new_text, "@nessemble-format");
+        // The edit covers exactly the `@fmt` token.
+        assert_eq!(
+            edit.range,
+            Range::new(Position::new(0, 4), Position::new(0, 8))
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_mark_a_directive_comment_with_a_modifier() {
+        let text = "; @nessemble-format stride=2\n; ordinary note\n.db $01\n";
+        let tokens = semantic_tokens(text);
+        // Both comments keep the COMMENT type (wire id 5); only the directive
+        // one carries the documentation modifier.
+        let comment_type = tooling::TokenClass::Comment.wire_id();
+        let comments: Vec<&SemanticToken> = tokens
+            .iter()
+            .filter(|t| t.token_type == comment_type)
+            .collect();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].token_modifiers_bitset, MODIFIER_DOCUMENTATION);
+        assert_eq!(comments[1].token_modifiers_bitset, 0);
+        // A mistyped directive is marked too, so it does not read as prose.
+        let tokens = semantic_tokens("; @nessemble-formt\n");
+        assert_eq!(tokens[0].token_modifiers_bitset, MODIFIER_DOCUMENTATION);
+    }
+
+    #[test]
+    fn semantic_token_legend_declares_the_modifier() {
+        let caps = server_capabilities();
+        let Some(SemanticTokensServerCapabilities::SemanticTokensOptions(opts)) =
+            caps.semantic_tokens_provider
+        else {
+            panic!("expected semantic tokens options");
+        };
+        assert_eq!(
+            opts.legend.token_modifiers,
+            vec![SemanticTokenModifier::DOCUMENTATION]
+        );
+        // The type legend is unchanged — the wire ids stay frozen.
+        assert_eq!(opts.legend.token_types.len(), 7);
     }
 
     #[test]

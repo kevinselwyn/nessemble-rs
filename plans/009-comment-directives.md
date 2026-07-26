@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for Comment Directives
 
-> Status: **In progress — Phase 0 done ([§10](#10-phased-plan)); decisions
+> Status: **Complete — Phases 0–4 done ([§10](#10-phased-plan)); decisions
 > settled ([§13](#13-decisions)).** This document codifies the tool-directive comments nessemble
 > reads out of assembly source. It (a) promotes the formatter's existing ad-hoc
 > `; @fmt stride=N` hint to a namespaced **`; @nessemble-format stride=N`** (with
@@ -411,8 +411,10 @@ coverage.
 - Detection is **scoped to the `@nessemble-` prefix plus the `@fmt` alias**, so
   `@todo`/`@author`/Doxygen-style prose is never flagged. This is the guard
   against the "linter yells about my comments" failure mode.
-- `Finding.subject` carries the directive token (the field is documented as the
-  offending label name; the doc comment widens to "the offending subject").
+- `Finding.subject` carries the directive token, and (as built) `Finding` also
+  gained a **`message`** written by the rule — the reason a directive is unusable
+  is rule-specific, and duplicating that text in the CLI and the LSP would have
+  guaranteed drift.
 - Each rule is independently `off`-able and glob-overridable through the
   existing `.nessemblerc` `lint` section — no new config shape.
 
@@ -526,26 +528,72 @@ and a trailing hint stays inert. Full workspace suite green (`cargo fmt --check`
 `cargo clippy --workspace --all-targets`, `cargo test --workspace`, including the
 golden-ROM corpus). *Changeset: `minor`.*
 
-**Phase 1 — validation.** The three lint rules (§7), their `RuleId`s, registry
-entries, and `.nessemblerc` names in `nessemble-rc`. Lands `nessemble lint`
-reporting **and** LSP diagnostics simultaneously (§8 tier 1). *Changeset:
-`minor`.*
+**Phase 1 — validation. — ✅ done.** Added the three lint rules (§7) as
+`RuleId::{UnknownCommentDirective, DeprecatedCommentDirective,
+IneffectiveCommentDirective}` with registry entries and a shared `LintCtx` that
+carries one directive scan to every rule (skipped entirely when all three are
+`off`). `nessemble-rc` needed **no change** — it validates rule names against
+`RuleId::ALL`, so the new ids are configurable the day they exist. `Finding`
+gained a `message` field written by the rule that fired, so the CLI report and
+the editor say the same thing; the CLI row is now ESLint's
+`LINE:COL severity message rule-id`. *Verified:* core tests per rule (unknown
+name, three bad-argument shapes, the deprecated alias, five ineffective cases,
+an unclosed region **not** flagged, prose untouched, each rule independently
+`off`, cross-rule source ordering, rule-id round-trip) plus CLI integration tests
+for the report and an `off` rule.
 
-**Phase 2 — coverage ignores.** `CoverageIgnores` (line + region ranges) +
-`build_report_with_ignores` in core (`build_report` kept as a shim); the CLI's
-directive→range state machine, source-file scanning, Rhai `//` scanning,
-`ignored`/`ignoredFiles` in JSON, dropping fully-ignored files, the extended
-stdout summary, and `--no-ignore`. *Changeset: `minor`.*
+**Phase 1a — LSP diagnostics. — ✅ done, and free.** No new plumbing: the
+`with_lint` step already publishes `tooling::lint` findings, so the directive
+rules appear as `nessemble-lint` diagnostics with the rule id in `code` the
+moment they exist. The LSP now shows the rule's message instead of building its
+own.
 
-**Phase 3 — LSP surface.** Comment-context completion, directive hover, the
-`@fmt` → `@nessemble-format` quick fix (§8 tier 2), and the `documentation`
-semantic-token modifier on directive comments (§8 tier 3). *Changeset: `minor`.*
+**Phase 2 — coverage ignores. — ✅ done.** Core gained `CoverageIgnores`
+(per-file inclusive ranges; a single line is a one-line range, an unclosed region
+ends at `u32::MAX`), `build_report_with_ignores` (`build_report` kept as a shim),
+`FileCoverage::from_line_hits_with_ignores` for scripts, `ignored` /
+`ignored_files` counts through `Totals` and the JSON emitter, and
+`resolve_ignores` — the language-agnostic directive→range state machine, taking a
+`next_significant` closure so assembly and Rhai share one implementation. Two
+supporting `tooling` helpers landed with it: `significant_lines` and
+`scan_line_comment_directives` (the `//` variant, built on the same
+`parse_directive_tail` the `;` scanner uses, so both languages accept exactly one
+grammar). The CLI reads each source file the source map names, resolves its
+directives, and passes the result down; `--no-ignore` skips the whole step. A
+file left with no reportable lines is dropped (no `SF:` record) and counted.
+*Verified:* core tests (next-line skipping trivia, closed region inclusive,
+unclosed to EOF, unbalanced bounds inert, trailing-comment directive inert,
+per-file isolation, the ratio moving 1/2 → 1/1, a fully-ignored file dropped from
+LCOV, JSON counts, script rows, the `//` scanner) and CLI integration tests
+(next-line exclusion + `--no-ignore` restoring it, a whole file excluded through
+an `.include`, and the summary text).
 
-**Phase 4 — docs.** §9. *Changeset: `none`.*
+**Phase 3 — LSP surface. — ✅ done.** `complete` now takes the cursor position
+and, inside a comment, returns the directive completions instead of code (four
+entries: `@nessemble-format stride=`, both `@nessemble-coverage-ignore` bounds,
+and `@nessemble-coverage-ignore-next-line`), each with the documentation that
+also backs hover. Hover on a directive comment renders its syntax, its
+description, and a deprecation note where applicable. A `QUICKFIX` code action
+rewrites a deprecated token to its canonical spelling, using the byte range
+Phase 0 put on `Directive`. Highlighting shipped as planned via a **modifier**:
+the legend declares `DOCUMENTATION`, and a directive comment keeps token type
+`COMMENT` (wire id 5) with that bit set — malformed directives included, so a
+typo still reads as a directive. *Verified:* LSP tests for the directive
+diagnostic, comment-context completion (and that mnemonics still win outside a
+comment), hover (including the deprecated note and `None` for prose), the quick
+fix's exact edit range, the modifier on directive comments only, and that the
+type legend still has its seven entries.
 
-Phases 0–2 are the requested feature; 3 is the recommended editor polish; 4
-closes it out. Phase 1 could swap with Phase 2 if coverage is the more urgent
-half — they are independent after Phase 0.
+**Phase 4 — docs. — ✅ done.** `docs/src/usage.md` gained a **Comment
+directives** section (grammar, registry table, placement rules) with an
+*Excluding lines from coverage* subsection; the stride-hint section is re-spelled
+with the deprecation note and a `sed` migration; the `lint` section gained a rule
+table; the `coverage` section documents the directives, the summary line, and
+`--no-ignore`; the `.nessemblerc` `lint` reference shows the new rule ids.
+`docs/src/editor.md` covers the directive completions, hover, quick fix, and the
+`documentation` modifier.
+
+Phases 0–2 are the requested feature; 3 is the editor polish; 4 closes it out.
 
 ## 11. Testing strategy
 
@@ -559,9 +607,9 @@ half — they are independent after Phase 0.
 - **Formatter regression** *(done, Phase 0)* — every existing `@fmt` stride test
   keeps passing byte-for-byte, duplicated for `@nessemble-format`;
   `respectStrideHints: false` disables both.
-- **Lint** — one fixture per rule, plus a clean fixture with prose `@`-comments
+- **Lint** *(done, Phase 1)* — one fixture per rule, plus a clean fixture with prose `@`-comments
   proving no false positives; each rule `off`; per-glob override.
-- **Coverage** — fixtures for an ignored line, a closed region, an **unclosed**
+- **Coverage** *(done, Phase 2)* — fixtures for an ignored line, a closed region, an **unclosed**
   region running to EOF, a whole-file opt-out (`start` in the header),
   `end`-without-`start` and nested-`start` (inert, report unchanged), a stacked
   comment between `-next-line` and its target, a directive at end of file, a
@@ -570,13 +618,13 @@ half — they are independent after Phase 0.
   denominator (so the percentage moves the way §5.4 says), LCOV omits them, a
   fully-ignored file produces no `SF:` block, and JSON carries the `ignored` /
   `ignoredFiles` counts.
-- **LSP** — a malformed directive yields one `nessemble-lint` diagnostic;
+- **LSP** *(done, Phases 1a/3)* — a malformed directive yields one `nessemble-lint` diagnostic;
   completion inside a comment offers the directives and not mnemonics; hover on
   a directive returns its docs; the quick fix's edit produces
   `@nessemble-format`; a directive comment's semantic token keeps type `Comment`
   (wire id 5) and gains the `documentation` modifier bit, while an ordinary
   comment's modifier bitset stays `0`.
-- **Parity** — untouched. Nothing here changes assembled bytes; `xtask parity`
+- **Parity** *(held)* — untouched. Nothing here changes assembled bytes; `xtask parity`
   should stay 122/122 through every phase.
 
 ## 12. Risks & mitigations
@@ -636,6 +684,6 @@ Settled with the maintainer:
 
 ---
 
-*Nothing here is implemented. Phase 0 (the `tooling::directive` registry) lands
-first with a `minor` changeset for the new core API and the `@nessemble-format`
-spelling; later phases carry their own.*
+*Shipped. Phase 0 landed the registry with its own `minor` changeset; Phases 1–4
+landed together with a second `minor` changeset covering the lint rules, the
+coverage directives, and the editor surface.*

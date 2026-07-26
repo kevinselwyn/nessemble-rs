@@ -9,11 +9,20 @@
 //! FCEUX and Mesen flat-mask CDLs are supported (`--emulator`, default `fceux`);
 //! the two are the same size but bit-incompatible, so the emulator is explicit.
 //! `BizHawk`'s container format is a later phase.
+//!
+//! Source may exclude lines from the report with the
+//! `; @nessemble-coverage-ignore-next-line` and
+//! `; @nessemble-coverage-ignore start` / `end` comment directives (`//` in Rhai
+//! scripts); `--no-ignore` reports every line regardless.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
-use nessemble_core::coverage::{build_report, CdlSource, FlatMaskCdl};
+use nessemble_core::coverage::{
+    build_report_with_ignores, resolve_ignores, CdlSource, CoverageIgnores, FlatMaskCdl,
+};
+use nessemble_core::tooling;
 use nessemble_core::{assemble_file_with, AssembleError, Options};
 
 use crate::custom;
@@ -70,6 +79,10 @@ pub struct CoverageArgs {
     /// also report line coverage for the `-p` Rhai scripts
     #[arg(long)]
     scripts: bool,
+
+    /// report every line, ignoring `@nessemble-coverage-ignore…` directives
+    #[arg(long = "no-ignore")]
+    no_ignore: bool,
 }
 
 /// Run `coverage` with its parsed options, returning the process exit code.
@@ -143,19 +156,38 @@ pub fn run(args: &CoverageArgs) -> u8 {
         }
     };
 
-    let mut report = build_report(&source_map, cdl.as_ref());
+    // Collect the `@nessemble-coverage-ignore…` exclusions from every source
+    // file the assembly actually emitted from. Core does no file I/O, so the
+    // reading and scanning happen here.
+    let ignores = if args.no_ignore {
+        CoverageIgnores::default()
+    } else {
+        collect_ignores(&source_map)
+    };
 
-    // Fold in Rhai script coverage (each project script as its own file).
+    let mut report = build_report_with_ignores(&source_map, cdl.as_ref(), &ignores);
+
+    // Fold in Rhai script coverage (each project script as its own file). The
+    // same directives apply, written as `//` comments.
     #[cfg(feature = "coverage")]
     if let Some(cov) = &scripts_cov {
         let cov = cov.borrow();
         for (path, rows) in cov.files() {
-            report
-                .files
-                .push(nessemble_core::coverage::FileCoverage::from_line_hits(
-                    path.display().to_string(),
-                    rows,
-                ));
+            let display = path.display().to_string();
+            let mut script_ignores = CoverageIgnores::default();
+            if !args.no_ignore {
+                collect_script_ignores(path, &display, &mut script_ignores);
+            }
+            let file = nessemble_core::coverage::FileCoverage::from_line_hits_with_ignores(
+                display,
+                rows,
+                &script_ignores,
+            );
+            if file.lines.is_empty() && file.ignored > 0 {
+                report.ignored_files += 1;
+                continue;
+            }
+            report.files.push(file);
         }
     }
 
@@ -180,8 +212,105 @@ pub fn run(args: &CoverageArgs) -> u8 {
     } else {
         0.0
     };
-    println!("coverage: {}/{} lines ({pct:.1}%)", t.covered(), t.total());
+    let mut summary = format!("coverage: {}/{} lines ({pct:.1}%)", t.covered(), t.total());
+    // Exclusions are reported rather than silently vanishing, so an over-broad
+    // ignore region shows up as a jump in this number.
+    if t.ignored > 0 || t.ignored_files > 0 {
+        let mut parts = Vec::new();
+        if t.ignored > 0 {
+            parts.push(format!("{} line{}", t.ignored, plural(t.ignored)));
+        }
+        if t.ignored_files > 0 {
+            parts.push(format!(
+                "{} file{}",
+                t.ignored_files,
+                plural(t.ignored_files)
+            ));
+        }
+        let _ = write!(summary, " — {} ignored", parts.join(", "));
+    }
+    println!("{summary}");
     RETURN_OK
+}
+
+fn plural(n: u32) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// Read every source file the assembly emitted from and collect its
+/// `@nessemble-coverage-ignore…` exclusions.
+///
+/// Keys are the source map's canonical paths, so exclusion happens before the
+/// display-path rewrite. A file that cannot be re-read (deleted or renamed
+/// mid-run) contributes no exclusions and a warning — a coverage report is never
+/// blocked by a missing comment.
+fn collect_ignores(source_map: &nessemble_core::SourceMap) -> CoverageIgnores {
+    let mut ignores = CoverageIgnores::default();
+    let mut seen: Vec<&str> = Vec::new();
+    for span in &source_map.spans {
+        let path: &str = &span.file;
+        if seen.contains(&path) {
+            continue;
+        }
+        seen.push(path);
+        let Ok(text) = std::fs::read_to_string(path) else {
+            eprintln!("nessemble: could not re-read `{path}` for coverage directives; ignoring it");
+            continue;
+        };
+        let directives = tooling::scan_directives(&text);
+        if directives.is_empty() {
+            continue;
+        }
+        let significant = tooling::significant_lines(&text);
+        resolve_ignores(
+            path,
+            &directives,
+            &|line| next_significant(&significant, line),
+            &mut ignores,
+        );
+    }
+    ignores
+}
+
+/// Collect a Rhai script's exclusions. Scripts comment with `//`, and a
+/// significant line is any non-blank line that is not a `//` comment.
+#[cfg(feature = "coverage")]
+fn collect_script_ignores(path: &Path, key: &str, ignores: &mut CoverageIgnores) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let directives = tooling::scan_line_comment_directives(&text, "//");
+    if directives.is_empty() {
+        return;
+    }
+    let significant: Vec<bool> = text
+        .lines()
+        .map(|l| {
+            let t = l.trim_start();
+            !t.is_empty() && !t.starts_with("//")
+        })
+        .collect();
+    resolve_ignores(
+        key,
+        &directives,
+        &|line| next_significant(&significant, line),
+        ignores,
+    );
+}
+
+/// The first significant line strictly after 1-based `line`, given a
+/// significance flag per line (index `i` is line `i + 1`).
+fn next_significant(significant: &[bool], line: u32) -> Option<u32> {
+    significant
+        .iter()
+        .enumerate()
+        .skip(line as usize)
+        .find(|(_, &sig)| sig)
+        .map(|(idx, _)| (idx + 1) as u32)
 }
 
 /// Present a source-file path for the report: relative to `base` (the current

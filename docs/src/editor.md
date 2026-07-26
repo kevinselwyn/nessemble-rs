@@ -27,7 +27,10 @@ Once connected, the server provides:
   severity (Information/Hint) and tagged with the `nessemble-lint` source so they
   read as suggestions distinct from assembler errors. They honor the project's
   [`.nessemblerc` `lint`](usage.md#lint) config (rule severities, comment window,
-  ignored label names), and clear as soon as you document the flagged block.
+  ignored label names), and clear as soon as you document the flagged block. The
+  same pass flags a mistyped or misplaced
+  [comment directive](usage.md#comment-directives) — a directive that would
+  otherwise fail silently.
 - **Project-aware analysis** — when a workspace folder is open, a file that is
   `.include`d into a larger program is analyzed *in the context of that program*,
   so symbols defined in sibling or parent files are not reported as undefined.
@@ -35,7 +38,10 @@ Once connected, the server provides:
   configuration needed) and reflects unsaved edits across files.
 - **Completion** — instruction mnemonics, assembler directives, and the
   labels, constants, and macros defined in the current buffer. Typing `.`
-  triggers directive completion.
+  triggers directive completion. Inside a comment, the
+  [comment directives](usage.md#comment-directives) are offered instead of code —
+  including `@nessemble-coverage-ignore` pre-filled with `start` and with `end` —
+  each with its documentation.
 - **Formatting** — “format document” applies the opinionated house style
   (indentation, comma spacing, data-block consolidation, routine spacing) while
   preserving comments. It runs the **same engine** as the
@@ -44,13 +50,16 @@ Once connected, the server provides:
   changes the assembled ROM.
 - **Semantic highlighting** — tokens are classified (mnemonic, directive,
   number, string, comment, identifier, operator) for richer coloring than a
-  regex grammar can offer.
+  regex grammar can offer. A comment carrying a
+  [comment directive](usage.md#comment-directives) additionally gets the
+  `documentation` modifier, so themes can set it apart from prose.
 - **Outline & navigation** — a document outline of labels, constants, and
   macros; go-to-definition (cmd/ctrl-click) and find-all-references for symbols.
   With a workspace folder open, go-to-definition follows `.include`s across the
   project, so it reaches a symbol defined in a sibling or parent file.
 - **Hover** — opcode and addressing-mode details for an instruction, the
-  description of a directive, and the resolved value of a constant or label.
+  description of a directive or [comment directive](usage.md#comment-directives),
+  and the resolved value of a constant or label.
   A constant or label is also documented with the run of comment lines
   immediately preceding its definition, so an explanatory comment written above
   a symbol appears when you hover over any use of it.
@@ -59,7 +68,8 @@ Once connected, the server provides:
 - **Rename** — renaming a symbol updates its definition and every use across the
   open buffers.
 - **Code actions** — convert a numeric literal between hexadecimal, decimal, and
-  binary.
+  binary, and rename a deprecated comment directive (`@fmt`) to its canonical
+  spelling (`@nessemble-format`).
 - **Custom pseudo-instructions** — directives declared in a `--pseudo`-style
   mapping file in the workspace are recognized, so they aren't flagged as unknown,
   and cmd/ctrl-click on one opens the script that implements it.
