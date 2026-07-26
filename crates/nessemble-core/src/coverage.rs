@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use crate::tooling::{Directive, DirectiveArgs, DirectiveName, RegionBound};
 use crate::{SourceMap, SourceSpan};
 
 /// FCEUX PRG CDL flag bits (`xPdcAADC`), per `docs` / the FCEUX format spec.
@@ -266,6 +267,10 @@ pub struct FileCoverage {
     pub mixed: u32,
     /// Number of [`Unaccessed`](CdlClass::Unaccessed) lines.
     pub unaccessed: u32,
+    /// Number of emitting lines excluded by a coverage directive. These lines
+    /// are in **neither** the numerator nor the denominator — they are absent
+    /// from `lines` and from every class count.
+    pub ignored: u32,
 }
 
 impl FileCoverage {
@@ -280,6 +285,17 @@ impl FileCoverage {
         path: String,
         rows: impl IntoIterator<Item = (u32, bool)>,
     ) -> FileCoverage {
+        FileCoverage::from_line_hits_with_ignores(path, rows, &CoverageIgnores::default())
+    }
+
+    /// [`from_line_hits`](Self::from_line_hits), dropping any line excluded for
+    /// this file by `ignores` (counted in [`ignored`](Self::ignored) instead).
+    #[must_use]
+    pub fn from_line_hits_with_ignores(
+        path: String,
+        rows: impl IntoIterator<Item = (u32, bool)>,
+        ignores: &CoverageIgnores,
+    ) -> FileCoverage {
         let mut file = FileCoverage {
             path,
             lines: Vec::new(),
@@ -287,8 +303,13 @@ impl FileCoverage {
             data: 0,
             mixed: 0,
             unaccessed: 0,
+            ignored: 0,
         };
         for (line, executed) in rows {
+            if ignores.contains(&file.path, line) {
+                file.ignored += 1;
+                continue;
+            }
             let class = if executed {
                 file.code += 1;
                 CdlClass::Code
@@ -308,6 +329,100 @@ impl FileCoverage {
 pub struct CoverageReport {
     /// Per-file coverage, sorted by path.
     pub files: Vec<FileCoverage>,
+    /// Files dropped entirely because every emitting line in them was excluded
+    /// (an `@nessemble-coverage-ignore start` with no `end`, typically).
+    pub ignored_files: u32,
+}
+
+/// Source lines excluded from a coverage report by the
+/// `@nessemble-coverage-ignore…` comment directives.
+///
+/// Ranges are inclusive and keyed by the same file identity the [`SourceMap`]
+/// uses (canonical absolute paths), so exclusion happens before any display-path
+/// rewriting. A single ignored line is a one-line range and an unclosed region
+/// is a range ending at [`u32::MAX`], which is why the caller never has to know
+/// how long a file is.
+///
+/// Building this from source text lives in the caller: `nessemble-core` does no
+/// file I/O (the wasm build depends on that), so the CLI scans each file with
+/// `tooling::scan_directives` and fills this in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoverageIgnores {
+    ranges: BTreeMap<String, Vec<(u32, u32)>>,
+}
+
+impl CoverageIgnores {
+    /// Exclude a single 1-based line of `file`.
+    pub fn ignore_line(&mut self, file: &str, line: u32) {
+        self.ignore_range(file, line, line);
+    }
+
+    /// Exclude the inclusive line range `start..=end` of `file`. Pass
+    /// [`u32::MAX`] as `end` for a region that runs to the end of the file.
+    pub fn ignore_range(&mut self, file: &str, start: u32, end: u32) {
+        self.ranges
+            .entry(file.to_string())
+            .or_default()
+            .push((start, end));
+    }
+
+    /// Whether `line` of `file` is excluded.
+    #[must_use]
+    pub fn contains(&self, file: &str, line: u32) -> bool {
+        self.ranges
+            .get(file)
+            .is_some_and(|rs| rs.iter().any(|&(lo, hi)| line >= lo && line <= hi))
+    }
+
+    /// Whether nothing at all is excluded (the common case, and the fast path).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+}
+
+/// Turn one file's [`Directive`]s into exclusion ranges.
+///
+/// - `@nessemble-coverage-ignore-next-line` excludes the next **significant**
+///   line, per `next_significant` (so an explanatory comment may sit between the
+///   directive and its subject).
+/// - `@nessemble-coverage-ignore start` opens a region; the next `end` closes
+///   it. An unclosed region runs to end of file — the whole-file opt-out. A
+///   `start` inside an open region and an `end` with no open region are inert
+///   (the linter reports both).
+/// - A directive in a trailing comment is inert.
+///
+/// Language-agnostic: `directives` come from `tooling::scan_directives` for
+/// assembly or `tooling::scan_line_comment_directives` for scripts.
+pub fn resolve_ignores(
+    file: &str,
+    directives: &[Directive],
+    next_significant: &dyn Fn(u32) -> Option<u32>,
+    ignores: &mut CoverageIgnores,
+) {
+    let mut region_start: Option<u32> = None;
+    for d in directives.iter().filter(|d| d.own_line) {
+        match (d.name, &d.args) {
+            (DirectiveName::CoverageIgnoreNextLine, _) => {
+                if let Some(target) = next_significant(d.line) {
+                    ignores.ignore_line(file, target);
+                }
+            }
+            (DirectiveName::CoverageIgnore, DirectiveArgs::Region(RegionBound::Start)) => {
+                region_start.get_or_insert(d.line);
+            }
+            (DirectiveName::CoverageIgnore, DirectiveArgs::Region(RegionBound::End)) => {
+                if let Some(start) = region_start.take() {
+                    ignores.ignore_range(file, start, d.line);
+                }
+            }
+            _ => {}
+        }
+    }
+    // An unclosed region runs to the end of the file.
+    if let Some(start) = region_start {
+        ignores.ignore_range(file, start, u32::MAX);
+    }
 }
 
 /// Build a coverage report by classifying every PRG-emitting source line in
@@ -318,6 +433,24 @@ pub struct CoverageReport {
 /// omitted. Files are sorted by path and lines within a file by line number.
 #[must_use]
 pub fn build_report(source_map: &SourceMap, cdl: &dyn CdlSource) -> CoverageReport {
+    build_report_with_ignores(source_map, cdl, &CoverageIgnores::default())
+}
+
+/// [`build_report`], honoring the `@nessemble-coverage-ignore…` exclusions in
+/// `ignores`.
+///
+/// An excluded line is dropped from `lines` and from every class count — it is
+/// in neither the numerator nor the denominator — and tallied in
+/// [`FileCoverage::ignored`]. A file whose every emitting line is excluded is
+/// dropped from the report entirely (rather than reported as an empty 0/0 file)
+/// and counted in [`CoverageReport::ignored_files`], which is what makes an
+/// unclosed region at the top of a file read as "this file is not measured".
+#[must_use]
+pub fn build_report_with_ignores(
+    source_map: &SourceMap,
+    cdl: &dyn CdlSource,
+    ignores: &CoverageIgnores,
+) -> CoverageReport {
     let prg_len = cdl.prg_len();
 
     // file -> (line -> accumulated (code, data) flags)
@@ -336,32 +469,44 @@ pub fn build_report(source_map: &SourceMap, cdl: &dyn CdlSource) -> CoverageRepo
         entry.1 |= d;
     }
 
-    let files = acc
-        .into_iter()
-        .map(|(path, lines)| {
-            let mut file = FileCoverage {
-                path: path.to_string(),
-                lines: Vec::with_capacity(lines.len()),
-                code: 0,
-                data: 0,
-                mixed: 0,
-                unaccessed: 0,
-            };
-            for (line, (code, data)) in lines {
-                let class = CdlClass::from_flags(code, data);
-                match class {
-                    CdlClass::Code => file.code += 1,
-                    CdlClass::Data => file.data += 1,
-                    CdlClass::Mixed => file.mixed += 1,
-                    CdlClass::Unaccessed => file.unaccessed += 1,
-                }
-                file.lines.push(LineCoverage { line, class });
+    let mut files = Vec::with_capacity(acc.len());
+    let mut ignored_files = 0u32;
+    for (path, lines) in acc {
+        let mut file = FileCoverage {
+            path: path.to_string(),
+            lines: Vec::with_capacity(lines.len()),
+            code: 0,
+            data: 0,
+            mixed: 0,
+            unaccessed: 0,
+            ignored: 0,
+        };
+        for (line, (code, data)) in lines {
+            if ignores.contains(&file.path, line) {
+                file.ignored += 1;
+                continue;
             }
-            file
-        })
-        .collect();
+            let class = CdlClass::from_flags(code, data);
+            match class {
+                CdlClass::Code => file.code += 1,
+                CdlClass::Data => file.data += 1,
+                CdlClass::Mixed => file.mixed += 1,
+                CdlClass::Unaccessed => file.unaccessed += 1,
+            }
+            file.lines.push(LineCoverage { line, class });
+        }
+        // Nothing left to report: the file opted out entirely.
+        if file.lines.is_empty() && file.ignored > 0 {
+            ignored_files += 1;
+            continue;
+        }
+        files.push(file);
+    }
 
-    CoverageReport { files }
+    CoverageReport {
+        files,
+        ignored_files,
+    }
 }
 
 /// Aggregate line counts across every file in a [`CoverageReport`].
@@ -375,6 +520,13 @@ pub struct Totals {
     pub mixed: u32,
     /// Total [`Unaccessed`](CdlClass::Unaccessed) lines.
     pub unaccessed: u32,
+    /// Lines excluded by a coverage directive **in reported files** (not part of
+    /// [`covered`](Totals::covered) or [`total`](Totals::total)). Lines in a
+    /// fully-excluded file are not counted here — that file is counted once in
+    /// [`ignored_files`](Totals::ignored_files) instead.
+    pub ignored: u32,
+    /// Files dropped because every emitting line in them was excluded.
+    pub ignored_files: u32,
 }
 
 impl Totals {
@@ -401,7 +553,9 @@ impl CoverageReport {
             t.data += f.data;
             t.mixed += f.mixed;
             t.unaccessed += f.unaccessed;
+            t.ignored += f.ignored;
         }
+        t.ignored_files = self.ignored_files;
         t
     }
 
@@ -444,8 +598,8 @@ impl CoverageReport {
             );
             let _ = writeln!(
                 out,
-                "      \"code\": {}, \"data\": {}, \"mixed\": {}, \"unaccessed\": {},",
-                file.code, file.data, file.mixed, file.unaccessed
+                "      \"code\": {}, \"data\": {}, \"mixed\": {}, \"unaccessed\": {}, \"ignored\": {},",
+                file.code, file.data, file.mixed, file.unaccessed, file.ignored
             );
             out.push_str("      \"lines\": [");
             for (li, line) in file.lines.iter().enumerate() {
@@ -468,8 +622,8 @@ impl CoverageReport {
         let t = self.totals();
         let _ = writeln!(
             out,
-            ",\n  \"totals\": {{ \"code\": {}, \"data\": {}, \"mixed\": {}, \"unaccessed\": {}, \"covered\": {}, \"total\": {} }}\n}}",
-            t.code, t.data, t.mixed, t.unaccessed, t.covered(), t.total()
+            ",\n  \"totals\": {{ \"code\": {}, \"data\": {}, \"mixed\": {}, \"unaccessed\": {}, \"covered\": {}, \"total\": {}, \"ignored\": {}, \"ignoredFiles\": {} }}\n}}",
+            t.code, t.data, t.mixed, t.unaccessed, t.covered(), t.total(), t.ignored, t.ignored_files
         );
         out
     }
@@ -702,7 +856,9 @@ mod tests {
                 data: 0,
                 mixed: 0,
                 unaccessed: 0,
+                ignored: 0,
             }],
+            ignored_files: 0,
         };
         let v: serde_json::Value = serde_json::from_str(&report.to_json()).expect("valid JSON");
         assert_eq!(v["files"][0]["path"], r#"a"b\c.asm"#);
@@ -750,6 +906,7 @@ mod tests {
                     data: 1,
                     mixed: 0,
                     unaccessed: 3,
+                    ignored: 2,
                 },
                 FileCoverage {
                     path: "b".into(),
@@ -758,12 +915,190 @@ mod tests {
                     data: 0,
                     mixed: 1,
                     unaccessed: 0,
+                    ignored: 0,
                 },
             ],
+            ignored_files: 1,
         };
         let t = report.totals();
         assert_eq!((t.code, t.data, t.mixed, t.unaccessed), (3, 1, 1, 3));
         assert_eq!(t.covered(), 5);
         assert_eq!(t.total(), 8);
+        // Exclusions are tallied separately and never enter covered/total.
+        assert_eq!((t.ignored, t.ignored_files), (2, 1));
+    }
+
+    // ── Coverage ignore directives ──────────────────────────────────────────
+
+    /// Resolve `source`'s directives for `file`, using the assembler's notion of
+    /// a significant line.
+    fn ignores_for(file: &str, source: &str) -> CoverageIgnores {
+        let significant = crate::tooling::significant_lines(source);
+        let next = |line: u32| {
+            significant
+                .iter()
+                .enumerate()
+                .skip(line as usize)
+                .find(|(_, &s)| s)
+                .map(|(i, _)| (i + 1) as u32)
+        };
+        let mut ignores = CoverageIgnores::default();
+        resolve_ignores(
+            file,
+            &crate::tooling::scan_directives(source),
+            &next,
+            &mut ignores,
+        );
+        ignores
+    }
+
+    #[test]
+    fn next_line_directive_skips_blank_and_comment_lines() {
+        let src =
+            "; @nessemble-coverage-ignore-next-line\n; why it is dead\n\n    lda #$00\n    rts\n";
+        let ig = ignores_for("a.asm", src);
+        assert!(ig.contains("a.asm", 4));
+        assert!(!ig.contains("a.asm", 5));
+        // A directive at end of file has nothing to exclude.
+        assert!(
+            ignores_for("a.asm", "    rts\n; @nessemble-coverage-ignore-next-line\n").is_empty()
+        );
+    }
+
+    #[test]
+    fn a_closed_region_excludes_its_span_inclusive() {
+        let src = "    nop\n; @nessemble-coverage-ignore start\n    lda #$00\n    rts\n; @nessemble-coverage-ignore end\n    nop\n";
+        let ig = ignores_for("a.asm", src);
+        assert!(!ig.contains("a.asm", 1));
+        for line in 2..=5 {
+            assert!(ig.contains("a.asm", line), "line {line}");
+        }
+        assert!(!ig.contains("a.asm", 6));
+    }
+
+    #[test]
+    fn an_unclosed_region_runs_to_end_of_file() {
+        let ig = ignores_for("a.asm", "; @nessemble-coverage-ignore start\n    nop\n");
+        assert!(ig.contains("a.asm", 1));
+        assert!(ig.contains("a.asm", 9_999));
+        assert!(ig.contains("a.asm", u32::MAX));
+    }
+
+    #[test]
+    fn unbalanced_region_bounds_are_inert() {
+        // An `end` with no `start` excludes nothing…
+        assert!(ignores_for("a.asm", "; @nessemble-coverage-ignore end\n    nop\n").is_empty());
+        // …and a nested `start` does not restart the region: it stays open from
+        // the first one, so the first `end` closes the whole span.
+        let src = "; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore end\n    nop\n";
+        let ig = ignores_for("a.asm", src);
+        assert!(ig.contains("a.asm", 1) && ig.contains("a.asm", 5));
+        assert!(!ig.contains("a.asm", 6));
+    }
+
+    #[test]
+    fn a_trailing_comment_directive_excludes_nothing() {
+        let src = "    lda #$00 ; @nessemble-coverage-ignore-next-line\n    rts\n";
+        assert!(ignores_for("a.asm", src).is_empty());
+    }
+
+    #[test]
+    fn ignores_are_per_file() {
+        let ig = ignores_for("a.asm", "; @nessemble-coverage-ignore start\n    nop\n");
+        assert!(ig.contains("a.asm", 2));
+        assert!(!ig.contains("b.asm", 2), "an include must not inherit it");
+    }
+
+    #[test]
+    fn build_report_drops_ignored_lines_from_both_sides_of_the_ratio() {
+        // Two lines: one covered, one not. Ignoring the uncovered one must lift
+        // the ratio to 1/1, not 1/2 — it leaves the denominator too.
+        let map = SourceMap {
+            spans: vec![span("a.asm", 1, 0, 1), span("a.asm", 2, 1, 1)],
+        };
+        let cdl = FlatMaskCdl::fceux(vec![0x01, 0x00], 2).unwrap();
+
+        let plain = build_report(&map, &cdl);
+        assert_eq!((plain.totals().covered(), plain.totals().total()), (1, 2));
+
+        let mut ignores = CoverageIgnores::default();
+        ignores.ignore_line("a.asm", 2);
+        let report = build_report_with_ignores(&map, &cdl, &ignores);
+        let t = report.totals();
+        assert_eq!((t.covered(), t.total(), t.ignored), (1, 1, 1));
+        assert_eq!(report.files[0].lines.len(), 1);
+        assert_eq!(report.ignored_files, 0);
+    }
+
+    #[test]
+    fn a_fully_ignored_file_is_dropped_from_the_report() {
+        let map = SourceMap {
+            spans: vec![span("a.asm", 1, 0, 1), span("b.asm", 1, 1, 1)],
+        };
+        let cdl = FlatMaskCdl::fceux(vec![0x01, 0x01], 2).unwrap();
+        let mut ignores = CoverageIgnores::default();
+        ignores.ignore_range("b.asm", 1, u32::MAX);
+
+        let report = build_report_with_ignores(&map, &cdl, &ignores);
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].path, "a.asm");
+        assert_eq!(report.ignored_files, 1);
+        // No `SF:` block for a dropped file.
+        assert!(!report.to_lcov().contains("b.asm"));
+    }
+
+    #[test]
+    fn json_reports_the_ignored_counts() {
+        let map = SourceMap {
+            spans: vec![span("a.asm", 1, 0, 1), span("a.asm", 2, 1, 1)],
+        };
+        let cdl = FlatMaskCdl::fceux(vec![0x01, 0x00], 2).unwrap();
+        let mut ignores = CoverageIgnores::default();
+        ignores.ignore_line("a.asm", 2);
+        let report = build_report_with_ignores(&map, &cdl, &ignores);
+
+        let v: serde_json::Value = serde_json::from_str(&report.to_json()).expect("valid JSON");
+        assert_eq!(v["files"][0]["ignored"], 1);
+        assert_eq!(v["totals"]["ignored"], 1);
+        assert_eq!(v["totals"]["ignoredFiles"], 0);
+        assert_eq!(v["totals"]["total"], 1);
+    }
+
+    #[test]
+    fn script_line_hits_honor_ignores() {
+        let mut ignores = CoverageIgnores::default();
+        ignores.ignore_line("s.rhai", 4);
+        let f = FileCoverage::from_line_hits_with_ignores(
+            "s.rhai".to_string(),
+            [(2, true), (4, false), (6, true)],
+            &ignores,
+        );
+        assert_eq!((f.code, f.unaccessed, f.ignored), (2, 0, 1));
+        assert_eq!(f.lines.len(), 2);
+    }
+
+    #[test]
+    fn script_directives_use_line_comments() {
+        let src = "// @nessemble-coverage-ignore start\nlet x = 1;\n// @nessemble-coverage-ignore end\nlet y = 2;\n";
+        let directives = crate::tooling::scan_line_comment_directives(src, "//");
+        let significant: Vec<bool> = src
+            .lines()
+            .map(|l| {
+                let t = l.trim_start();
+                !t.is_empty() && !t.starts_with("//")
+            })
+            .collect();
+        let next = |line: u32| {
+            significant
+                .iter()
+                .enumerate()
+                .skip(line as usize)
+                .find(|(_, &s)| s)
+                .map(|(i, _)| (i + 1) as u32)
+        };
+        let mut ignores = CoverageIgnores::default();
+        resolve_ignores("s.rhai", &directives, &next, &mut ignores);
+        assert!(ignores.contains("s.rhai", 2));
+        assert!(!ignores.contains("s.rhai", 4));
     }
 }

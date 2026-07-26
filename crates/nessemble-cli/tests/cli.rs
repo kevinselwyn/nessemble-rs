@@ -119,6 +119,117 @@ fn coverage_subcommand_writes_lcov_from_a_cdl() {
 }
 
 #[test]
+fn coverage_ignore_directives_exclude_lines_and_no_ignore_restores_them() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covign-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let asm = dir.join("cov.asm");
+    let cdl = dir.join("cov.cdl");
+    let json = dir.join("out.json");
+    // LDA (line 3, covered) then an uncovered BRK (line 6) excluded by the
+    // directive on line 4 — with an explanatory comment in between.
+    std::fs::write(
+        &asm,
+        ".inesprg 1\n.ineschr 1\n    LDA #$01\n; @nessemble-coverage-ignore-next-line\n\
+         ; unreachable without the mapper IRQ\n    BRK\n",
+    )
+    .unwrap();
+    let mut bytes = vec![0u8; 16384 + 8192];
+    bytes[0] = 0x01;
+    bytes[1] = 0x01;
+    std::fs::write(&cdl, &bytes).unwrap();
+
+    let run = |extra: &[&str]| {
+        let mut argv = vec![
+            "coverage",
+            asm.to_str().unwrap(),
+            "--cdl",
+            cdl.to_str().unwrap(),
+            "--format",
+            "json",
+            "--out",
+            json.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(extra);
+        let out = bin().args(&argv).output().unwrap();
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    // The excluded line leaves both sides of the ratio: 1/1, not 1/2.
+    let stdout = run(&[]);
+    assert_eq!(stdout, "coverage: 1/1 lines (100.0%) — 1 line ignored\n");
+    let report = std::fs::read_to_string(&json).unwrap();
+    assert!(report.contains("\"ignored\": 1"), "{report}");
+    assert!(!report.contains("\"line\": 6"), "{report}");
+
+    // `--no-ignore` reports the unfiltered truth.
+    let stdout = run(&["--no-ignore"]);
+    assert_eq!(stdout, "coverage: 1/2 lines (50.0%)\n");
+    let report = std::fs::read_to_string(&json).unwrap();
+    assert!(report.contains("\"line\": 6"), "{report}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn coverage_ignore_region_can_exclude_a_whole_file() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covfile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let asm = dir.join("cov.asm");
+    let inc = dir.join("dead.asm");
+    let cdl = dir.join("cov.cdl");
+    let lcov = dir.join("out.lcov");
+    std::fs::write(
+        &asm,
+        ".inesprg 1\n.ineschr 1\n    LDA #$01\n    .include \"dead.asm\"\n",
+    )
+    .unwrap();
+    // An unclosed region at the top is the whole-file opt-out.
+    std::fs::write(
+        &inc,
+        "; @nessemble-coverage-ignore start\n    BRK\n    BRK\n",
+    )
+    .unwrap();
+    let mut bytes = vec![0u8; 16384 + 8192];
+    bytes[0] = 0x01;
+    bytes[1] = 0x01;
+    std::fs::write(&cdl, &bytes).unwrap();
+
+    let out = bin()
+        .args([
+            "coverage",
+            asm.to_str().unwrap(),
+            "--cdl",
+            cdl.to_str().unwrap(),
+            "--format",
+            "lcov",
+            "--out",
+            lcov.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "coverage: 1/1 lines (100.0%) — 1 file ignored\n"
+    );
+    // The excluded file gets no `SF:` block at all.
+    let report = std::fs::read_to_string(&lcov).unwrap();
+    assert!(!report.contains("dead.asm"), "{report}");
+    assert!(report.contains("cov.asm"), "{report}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn coverage_rejects_a_cdl_of_the_wrong_size() {
     let dir = std::env::temp_dir().join(format!("nessemble-covbad-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -721,10 +832,13 @@ fn lint_reports_grouped_warnings_and_exits_zero() {
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
-        text.contains("sound_engine  require-block-comment"),
+        text.contains("`sound_engine` has no nearby comment  require-block-comment"),
         "{text}"
     );
-    assert!(text.contains("note_table  require-block-comment"), "{text}");
+    assert!(
+        text.contains("`note_table` has no nearby comment  require-block-comment"),
+        "{text}"
+    );
     assert!(text.contains("2 problems (0 errors, 2 warnings)"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -766,7 +880,7 @@ fn lint_error_severity_fails_the_run() {
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
-        text.contains("error    widget  require-block-comment"),
+        text.contains("error    code block `widget` has no nearby comment  require-block-comment"),
         "{text}"
     );
     assert!(text.contains("(1 error, 0 warnings)"), "{text}");
@@ -788,7 +902,10 @@ fn lint_ignore_regex_exempts_matching_labels() {
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(!text.contains("loc_c000"), "ignored label leaked: {text}");
-    assert!(text.contains("real  require-block-comment"), "{text}");
+    assert!(
+        text.contains("`real` has no nearby comment  require-block-comment"),
+        "{text}"
+    );
     assert!(text.contains("(0 errors, 1 warning)"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -841,9 +958,72 @@ fn lint_walks_a_directory() {
         .unwrap();
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
-    assert!(text.contains("alpha  require-block-comment"), "{text}");
-    assert!(text.contains("beta  require-block-comment"), "{text}");
+    assert!(
+        text.contains("`alpha` has no nearby comment  require-block-comment"),
+        "{text}"
+    );
+    assert!(
+        text.contains("`beta` has no nearby comment  require-block-comment"),
+        "{text}"
+    );
     assert!(!text.contains("gamma"), "non-asm file linted: {text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_reports_comment_directive_problems() {
+    let dir = lint_dir("directives");
+    let file = dir.join("a.asm");
+    std::fs::write(
+        &file,
+        "; @nessemble-formt stride=2\n; @fmt stride=2\n.db $01, $02, $03, $04\n\
+         \n; @nessemble-coverage-ignore end\n    nop\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "warnings alone must not fail");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("unknown comment directive `@nessemble-formt`  unknown-comment-directive"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "`@fmt` is deprecated; use `@nessemble-format`  deprecated-comment-directive"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("no matching `start`  ineffective-comment-directive"),
+        "{text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_directive_rules_can_be_configured_off() {
+    let dir = lint_dir("directives-off");
+    std::fs::write(
+        dir.join(".nessemblerc"),
+        r#"{"lint":{"rules":{"deprecated-comment-directive":"off"}}}"#,
+    )
+    .unwrap();
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "; @fmt stride=2\n.db $01, $02\n").unwrap();
+
+    let out = bin()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("✓ No problems."), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

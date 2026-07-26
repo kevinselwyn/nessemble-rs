@@ -1235,6 +1235,15 @@ pub fn scan_directives(source: &str) -> Vec<Directive> {
 pub fn scan_directives_with_errors(source: &str) -> (Vec<Directive>, Vec<MalformedDirective>) {
     let lexemes = lex(source);
     let lines = split_lines(&lexemes);
+    scan_directive_lines(source, &lines)
+}
+
+/// [`scan_directives_with_errors`] over an already-split lexeme stream, so a
+/// caller that has one (the linter) does not lex twice.
+fn scan_directive_lines(
+    source: &str,
+    lines: &[Vec<Lexeme>],
+) -> (Vec<Directive>, Vec<MalformedDirective>) {
     let mut found = Vec::new();
     let mut malformed = Vec::new();
 
@@ -1280,6 +1289,55 @@ pub fn scan_directives_with_errors(source: &str) -> (Vec<Directive>, Vec<Malform
     (found, malformed)
 }
 
+/// Directive comments in a **line-comment language** whose comments open with
+/// `marker` (`//` for Rhai) instead of the assembler's `;`.
+///
+/// Only own-line comments are scanned — all the coverage directives need, and it
+/// keeps the scan free of that language's string and block-comment rules. Best
+/// effort by design: this is not a parser for the other language.
+#[must_use]
+pub fn scan_line_comment_directives(source: &str, marker: &str) -> Vec<Directive> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for (idx, raw) in source.split_inclusive('\n').enumerate() {
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some(after) = trimmed.strip_prefix(marker) {
+            if let Some((Parsed::Directive(name, deprecated, args), rel, len)) =
+                parse_directive_tail(marker.len(), after)
+            {
+                let start = offset + indent + rel;
+                out.push(Directive {
+                    name,
+                    args,
+                    line: (idx + 1) as u32,
+                    column: (indent + rel) as u32 + 1,
+                    start,
+                    end: start + len,
+                    deprecated,
+                    own_line: true,
+                });
+            }
+        }
+        offset += raw.len();
+    }
+    out
+}
+
+/// Which 1-based lines of `source` carry significant content — neither blank nor
+/// comment-only. Index `i` is line `i + 1`. This is the "next line" a directive
+/// targets: an explanatory comment between a directive and its subject is
+/// skipped rather than swallowing the directive.
+#[must_use]
+pub fn significant_lines(source: &str) -> Vec<bool> {
+    let lexemes = lex(source);
+    split_lines(&lexemes)
+        .iter()
+        .map(|l| !is_blank(l) && !is_comment_only(l))
+        .collect()
+}
+
 /// The outcome of reading one comment: a directive, or a namespaced token that
 /// isn't a usable one.
 enum Parsed {
@@ -1291,11 +1349,17 @@ enum Parsed {
 /// outcome plus the directive token's offset and length **within the comment**,
 /// or `None` when the comment is ordinary prose.
 fn parse_directive_comment(comment: &str) -> Option<(Parsed, usize, usize)> {
-    // Skip the leading `;` run (so `;;`-banner comments carry directives too)
-    // and any whitespace after it.
+    // Skip the leading `;` run (so `;;`-banner comments carry directives too).
     let after_semis = comment.trim_start_matches(';');
-    let body = after_semis.trim_start();
-    let offset = comment.len() - body.len();
+    parse_directive_tail(comment.len() - after_semis.len(), after_semis)
+}
+
+/// Read the text after a comment marker of `marker_len` bytes. Shared by the
+/// assembler's `;` comments and [`scan_line_comment_directives`], so both
+/// languages recognize exactly the same grammar.
+fn parse_directive_tail(marker_len: usize, after_marker: &str) -> Option<(Parsed, usize, usize)> {
+    let body = after_marker.trim_start();
+    let offset = marker_len + (after_marker.len() - body.len());
     if !body.starts_with('@') {
         return None;
     }
@@ -1368,17 +1432,32 @@ fn parse_strides(args: &str) -> Option<Vec<usize>> {
 pub enum RuleId {
     /// A block-opening label with no comment within the configured window.
     RequireBlockComment,
+    /// A `@nessemble-…` comment that names no known directive, or a known one
+    /// with bad arguments.
+    UnknownCommentDirective,
+    /// A directive spelled with a deprecated alias (`@fmt`).
+    DeprecatedCommentDirective,
+    /// A well-formed directive that cannot apply where it is written.
+    IneffectiveCommentDirective,
 }
 
 impl RuleId {
     /// Every rule, in a stable order (also the [`SeverityMap`] index order).
-    pub const ALL: [RuleId; 1] = [RuleId::RequireBlockComment];
+    pub const ALL: [RuleId; 4] = [
+        RuleId::RequireBlockComment,
+        RuleId::UnknownCommentDirective,
+        RuleId::DeprecatedCommentDirective,
+        RuleId::IneffectiveCommentDirective,
+    ];
 
     /// The stable kebab-case identifier used in `.nessemblerc` and in reports.
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
             RuleId::RequireBlockComment => "require-block-comment",
+            RuleId::UnknownCommentDirective => "unknown-comment-directive",
+            RuleId::DeprecatedCommentDirective => "deprecated-comment-directive",
+            RuleId::IneffectiveCommentDirective => "ineffective-comment-directive",
         }
     }
 
@@ -1392,7 +1471,15 @@ impl RuleId {
     fn index(self) -> usize {
         match self {
             RuleId::RequireBlockComment => 0,
+            RuleId::UnknownCommentDirective => 1,
+            RuleId::DeprecatedCommentDirective => 2,
+            RuleId::IneffectiveCommentDirective => 3,
         }
+    }
+
+    /// Whether this rule reads the directive scan rather than the lexeme lines.
+    fn is_directive_rule(self) -> bool {
+        !matches!(self, RuleId::RequireBlockComment)
     }
 }
 
@@ -1432,16 +1519,23 @@ impl SeverityMap {
     }
 }
 
-/// A single lint finding: which rule fired, where (1-based line/column), and the
-/// subject (the offending label name). Severity is deliberately absent — core
-/// emits raw findings tagged with their [`RuleId`], and the caller maps
-/// rule → severity for display, exit codes, and editor squiggles.
+/// A single lint finding: which rule fired, where (1-based line/column), the
+/// subject (the offending label name or directive token), and a human-readable
+/// message. Severity is deliberately absent — core emits raw findings tagged
+/// with their [`RuleId`], and the caller maps rule → severity for display, exit
+/// codes, and editor squiggles.
+///
+/// The message is built by the rule (which knows *why* it fired) rather than by
+/// each consumer, so the CLI report and the editor say the same thing. It
+/// backtick-quotes `subject`, which is how the language server narrows a
+/// diagnostic to the offending token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub rule: RuleId,
     pub line: u32,
     pub column: u32,
     pub subject: String,
+    pub message: String,
 }
 
 /// Configuration for [`lint`]. Plain data plus an `ignore` predicate: the regex
@@ -1457,12 +1551,36 @@ pub struct LintOptions<'a> {
     pub ignore: &'a dyn Fn(&str) -> bool,
 }
 
-/// A rule implementation: scan `lines` (with `source` for token text) and push
-/// any findings. Runs only when its severity is not [`RuleSeverity::Off`].
-type RuleFn = fn(&str, &[Vec<Lexeme>], &LintOptions, &mut Vec<Finding>);
+/// What every rule is handed: the source, its physical lines, and — for the
+/// directive rules — the one directive scan, shared so the rules that need it
+/// do not each re-scan the buffer.
+struct LintCtx<'a> {
+    source: &'a str,
+    lines: &'a [Vec<Lexeme>],
+    directives: &'a [Directive],
+    malformed: &'a [MalformedDirective],
+}
+
+/// A rule implementation: scan the context and push any findings. Runs only
+/// when its severity is not [`RuleSeverity::Off`].
+type RuleFn = fn(&LintCtx, &LintOptions, &mut Vec<Finding>);
 
 /// The rule registry. Adding a rule is one entry here plus its function.
-const RULES: &[(RuleId, RuleFn)] = &[(RuleId::RequireBlockComment, rule_require_block_comment)];
+const RULES: &[(RuleId, RuleFn)] = &[
+    (RuleId::RequireBlockComment, rule_require_block_comment),
+    (
+        RuleId::UnknownCommentDirective,
+        rule_unknown_comment_directive,
+    ),
+    (
+        RuleId::DeprecatedCommentDirective,
+        rule_deprecated_comment_directive,
+    ),
+    (
+        RuleId::IneffectiveCommentDirective,
+        rule_ineffective_comment_directive,
+    ),
+];
 
 /// Lint `source`, returning findings sorted by position. Every rule whose
 /// severity is not [`RuleSeverity::Off`] is run. This never mutates source.
@@ -1470,10 +1588,26 @@ const RULES: &[(RuleId, RuleFn)] = &[(RuleId::RequireBlockComment, rule_require_
 pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
     let lexemes = lex(source);
     let lines = split_lines(&lexemes);
+    // The directive scan is shared by three rules, and skipped entirely when all
+    // of them are off.
+    let scan_needed = RuleId::ALL
+        .into_iter()
+        .any(|r| r.is_directive_rule() && opts.severities.get(r) != RuleSeverity::Off);
+    let (directives, malformed) = if scan_needed {
+        scan_directive_lines(source, &lines)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let ctx = LintCtx {
+        source,
+        lines: &lines,
+        directives: &directives,
+        malformed: &malformed,
+    };
     let mut findings = Vec::new();
     for &(rule, run) in RULES {
         if opts.severities.get(rule) != RuleSeverity::Off {
-            run(source, &lines, opts, &mut findings);
+            run(&ctx, opts, &mut findings);
         }
     }
     findings.sort_by_key(|f| (f.line, f.column));
@@ -1483,23 +1617,18 @@ pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
 /// `require-block-comment`: warn on a block-opening label with no comment within
 /// `±window` lines. Internal branch-target labels (a label directly after code)
 /// and anonymous labels are never flagged; a name matching `ignore` is skipped.
-fn rule_require_block_comment(
-    source: &str,
-    lines: &[Vec<Lexeme>],
-    opts: &LintOptions,
-    out: &mut Vec<Finding>,
-) {
-    for (idx, line) in lines.iter().enumerate() {
-        let Some((name, column)) = block_label(source, line) else {
+fn rule_require_block_comment(ctx: &LintCtx, opts: &LintOptions, out: &mut Vec<Finding>) {
+    for (idx, line) in ctx.lines.iter().enumerate() {
+        let Some((name, column)) = block_label(ctx.source, line) else {
             continue;
         };
         if (opts.ignore)(name) {
             continue;
         }
-        if !is_block_entry(lines, idx) {
+        if !is_block_entry(ctx.lines, idx) {
             continue;
         }
-        if has_comment_within(lines, idx, opts.window) {
+        if has_comment_within(ctx.lines, idx, opts.window) {
             continue;
         }
         out.push(Finding {
@@ -1507,8 +1636,123 @@ fn rule_require_block_comment(
             line: (idx + 1) as u32,
             column,
             subject: name.to_string(),
+            message: format!("code block `{name}` has no nearby comment"),
         });
     }
+}
+
+/// `unknown-comment-directive`: a comment addressed to nessemble that names no
+/// known directive, or names one but gets its arguments wrong. Scoped to the
+/// `@nessemble-` namespace (plus the `@fmt` alias), so ordinary `@todo`-style
+/// prose is never flagged.
+fn rule_unknown_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &mut Vec<Finding>) {
+    for bad in ctx.malformed {
+        let token = &ctx.source[bad.start..bad.end];
+        let message = match bad.reason {
+            MalformedReason::UnknownName => {
+                format!("unknown comment directive `{token}`")
+            }
+            MalformedReason::BadArgs(name) => match name.arg_syntax() {
+                "" => format!("comment directive `{token}` takes no arguments"),
+                syntax => format!("comment directive `{token}` expects `{syntax}`"),
+            },
+        };
+        out.push(Finding {
+            rule: RuleId::UnknownCommentDirective,
+            line: bad.line,
+            column: bad.column,
+            subject: token.to_string(),
+            message,
+        });
+    }
+}
+
+/// `deprecated-comment-directive`: a directive written with a legacy alias
+/// (`@fmt`). The directive still works — this points at the canonical spelling.
+fn rule_deprecated_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &mut Vec<Finding>) {
+    for d in ctx.directives.iter().filter(|d| d.deprecated) {
+        let token = &ctx.source[d.start..d.end];
+        out.push(Finding {
+            rule: RuleId::DeprecatedCommentDirective,
+            line: d.line,
+            column: d.column,
+            subject: token.to_string(),
+            message: format!(
+                "comment directive `{token}` is deprecated; use `{}`",
+                d.name.canonical()
+            ),
+        });
+    }
+}
+
+/// `ineffective-comment-directive`: a well-formed directive that cannot apply
+/// where it is written — the quiet failure the namespace exists to surface.
+///
+/// An **unclosed** ignore region is deliberately not flagged: running to end of
+/// file is the documented way to exclude a whole file.
+fn rule_ineffective_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &mut Vec<Finding>) {
+    let mut region_open = false;
+    for d in ctx.directives {
+        let token = &ctx.source[d.start..d.end];
+        let reason = if d.own_line {
+            match (d.name, &d.args) {
+                (DirectiveName::CoverageIgnoreNextLine, _) => {
+                    significant_line_after(ctx.lines, d.line)
+                        .is_none()
+                        .then(|| "has no following line to ignore".to_string())
+                }
+                (DirectiveName::Format, _) => significant_line_after(ctx.lines, d.line)
+                    .filter(|&idx| is_data_line(ctx.source, &ctx.lines[idx]))
+                    .is_none()
+                    .then(|| "is not followed by a data line (`.db`, `.dw`, `.color`)".to_string()),
+                (DirectiveName::CoverageIgnore, DirectiveArgs::Region(bound)) => {
+                    let ineffective = match bound {
+                        RegionBound::Start => region_open
+                            .then(|| "is already inside an open ignore region".to_string()),
+                        RegionBound::End => {
+                            (!region_open).then(|| "has no matching `start`".to_string())
+                        }
+                    };
+                    region_open = *bound == RegionBound::Start;
+                    ineffective
+                }
+                _ => None,
+            }
+        } else {
+            Some("has no effect in a trailing comment (put it on its own line)".to_string())
+        };
+        if let Some(reason) = reason {
+            out.push(Finding {
+                rule: RuleId::IneffectiveCommentDirective,
+                line: d.line,
+                column: d.column,
+                subject: token.to_string(),
+                message: format!("comment directive `{token}` {reason}"),
+            });
+        }
+    }
+}
+
+/// The index of the first significant line after 1-based `line` — skipping
+/// blank and comment-only lines, so an explanatory comment may sit between a
+/// directive and its target.
+fn significant_line_after(lines: &[Vec<Lexeme>], line: u32) -> Option<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .skip(line as usize)
+        .find(|(_, l)| !is_blank(l) && !is_comment_only(l))
+        .map(|(idx, _)| idx)
+}
+
+/// Whether a line's first significant token is a data directive (`.db`, `.dw`,
+/// `.color`) — the thing a stride hint applies to.
+fn is_data_line(source: &str, line: &[Lexeme]) -> bool {
+    line.iter()
+        .find(|l| l.kind != LexKind::Whitespace)
+        .filter(|l| l.kind == LexKind::Directive)
+        .and_then(|l| text(source, l).strip_prefix('.'))
+        .is_some_and(is_data_directive)
 }
 
 /// If `line` is exactly a named label definition (`name:`), return the label
@@ -2619,5 +2863,159 @@ data:
             ignore: &no_ignore,
         };
         assert!(lint("\nmy_label:\n    nop\n", &opts).is_empty());
+    }
+
+    // ── Directive rules ─────────────────────────────────────────────────────
+
+    /// Lint with only the directive rules on, so block-comment findings do not
+    /// crowd the fixtures.
+    fn lint_directives(source: &str) -> Vec<Finding> {
+        let no_ignore = |_: &str| false;
+        let mut severities = SeverityMap::default();
+        severities.set(RuleId::RequireBlockComment, RuleSeverity::Off);
+        let opts = LintOptions {
+            severities,
+            window: 3,
+            ignore: &no_ignore,
+        };
+        lint(source, &opts)
+    }
+
+    #[test]
+    fn lint_flags_an_unknown_directive_name() {
+        let findings = lint_directives("; @nessemble-formt stride=2\n.db $01\n");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, RuleId::UnknownCommentDirective);
+        assert_eq!(findings[0].subject, "@nessemble-formt");
+        assert!(findings[0].message.contains("unknown comment directive"));
+    }
+
+    #[test]
+    fn lint_flags_bad_directive_arguments() {
+        let findings = lint_directives("; @nessemble-format stride=x\n.db $01\n");
+        assert_eq!(findings[0].rule, RuleId::UnknownCommentDirective);
+        assert!(findings[0].message.contains("stride=N[,N,...]"));
+
+        let findings = lint_directives("; @nessemble-coverage-ignore\n    nop\n");
+        assert!(findings[0].message.contains("start|end"));
+
+        let findings = lint_directives("; @nessemble-coverage-ignore-next-line now\n    nop\n");
+        assert!(findings[0].message.contains("takes no arguments"));
+    }
+
+    #[test]
+    fn lint_flags_the_deprecated_alias_but_not_the_canonical_name() {
+        let findings = lint_directives("; @fmt stride=2\n.db $01, $02\n");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, RuleId::DeprecatedCommentDirective);
+        assert!(findings[0].message.contains("@nessemble-format"));
+
+        assert!(lint_directives("; @nessemble-format stride=2\n.db $01, $02\n").is_empty());
+    }
+
+    #[test]
+    fn lint_flags_a_trailing_directive_as_ineffective() {
+        let findings = lint_directives("    nop ; @nessemble-coverage-ignore-next-line\n    nop\n");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
+        assert!(findings[0].message.contains("trailing comment"));
+    }
+
+    #[test]
+    fn lint_flags_a_next_line_directive_with_nothing_to_ignore() {
+        let findings = lint_directives("    nop\n; @nessemble-coverage-ignore-next-line\n");
+        assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
+        assert!(findings[0].message.contains("no following line"));
+        // A comment between the directive and its target is skipped, not fatal.
+        assert!(
+            lint_directives("; @nessemble-coverage-ignore-next-line\n; why\n    nop\n").is_empty()
+        );
+    }
+
+    #[test]
+    fn lint_flags_a_stride_hint_with_no_data_run() {
+        let findings = lint_directives("; @nessemble-format stride=2\n    nop\n");
+        assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
+        assert!(findings[0].message.contains("data line"));
+        // `.color` counts as data, as does a blank line before the run.
+        assert!(lint_directives("; @nessemble-format stride=2\n.color $0F\n").is_empty());
+        assert!(lint_directives("; @nessemble-format stride=2\n\n.db $01\n").is_empty());
+    }
+
+    #[test]
+    fn lint_flags_unbalanced_ignore_regions() {
+        let findings = lint_directives("; @nessemble-coverage-ignore end\n    nop\n");
+        assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
+        assert!(findings[0].message.contains("no matching `start`"));
+
+        let src = "; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore start\n    nop\n";
+        let findings = lint_directives(src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 3);
+        assert!(findings[0].message.contains("already inside"));
+    }
+
+    #[test]
+    fn lint_never_flags_an_unclosed_ignore_region() {
+        // Running to end of file is the documented whole-file opt-out.
+        assert!(
+            lint_directives("; @nessemble-coverage-ignore start\n    nop\n    nop\n").is_empty()
+        );
+        // …and a balanced pair is clean too.
+        assert!(lint_directives(
+            "; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore end\n"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn lint_leaves_ordinary_comments_alone() {
+        let src = "; @todo tidy this\n; @param x the value\nmy_label: ; documented\n    nop\n";
+        assert!(lint_directives(src).is_empty());
+    }
+
+    #[test]
+    fn lint_directive_rules_are_individually_off_able() {
+        let src = "; @fmt stride=2\n    nop\n; @nessemble-formt\n";
+        assert_eq!(lint_directives(src).len(), 3);
+        for rule in [
+            RuleId::UnknownCommentDirective,
+            RuleId::DeprecatedCommentDirective,
+            RuleId::IneffectiveCommentDirective,
+        ] {
+            let no_ignore = |_: &str| false;
+            let mut severities = SeverityMap::default();
+            severities.set(RuleId::RequireBlockComment, RuleSeverity::Off);
+            severities.set(rule, RuleSeverity::Off);
+            let opts = LintOptions {
+                severities,
+                window: 3,
+                ignore: &no_ignore,
+            };
+            let findings = lint(src, &opts);
+            assert!(
+                findings.iter().all(|f| f.rule != rule),
+                "{rule:?} still fired"
+            );
+            assert_eq!(findings.len(), 2, "{rule:?}");
+        }
+    }
+
+    #[test]
+    fn lint_findings_from_all_rules_come_back_in_source_order() {
+        let src = "; @nessemble-formt\n\nundocumented:\n    nop\n\n; @fmt stride=2\n.db $01\n";
+        let findings = lint_default(src, 1);
+        assert_eq!(
+            findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![1, 3, 6]
+        );
+    }
+
+    #[test]
+    fn lint_rule_ids_round_trip_and_index_uniquely() {
+        for (i, rule) in RuleId::ALL.into_iter().enumerate() {
+            assert_eq!(RuleId::from_id(rule.id()), Some(rule));
+            assert_eq!(rule.index(), i);
+        }
     }
 }

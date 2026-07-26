@@ -167,10 +167,7 @@ formatter, so editors and the CLI produce identical output.
 ### lint [&lt;opt&gt; ...] &lt;path&gt; ...
 
 Reports style problems in nessemble assembly. Where `format` is Prettier, `lint`
-is **ESLint**: it **only reports** and never rewrites source. Its one rule,
-`require-block-comment`, flags a **block-opening label that has no comment
-nearby** — a named label whose preceding non-comment line is blank or the top of
-the file (internal branch targets and anonymous labels are never flagged).
+is **ESLint**: it **only reports** and never rewrites source.
 
 ```text
 nessemble lint path/to/file.asm       # report problems for one file
@@ -179,13 +176,22 @@ nessemble lint path/to/dir            # walk a tree and report problems
 
 ```text
 src/prg/07.asm
-     42:1   warning  sound_engine  require-block-comment
-    103:1   warning  note_table    require-block-comment
+     42:1   warning  code block `sound_engine` has no nearby comment  require-block-comment
+    103:1   warning  unknown comment directive `@nessemble-formt`  unknown-comment-directive
 
 ✖ 2 problems (0 errors, 2 warnings)
 ```
 
-- Each finding prints as `LINE:COL  severity  label  rule-id`, grouped by file,
+The rules:
+
+| Rule | Flags |
+| --- | --- |
+| `require-block-comment` | A **block-opening label with no comment nearby** — a named label whose preceding non-comment line is blank or the top of the file. Internal branch targets and anonymous labels are never flagged. |
+| `unknown-comment-directive` | A [comment directive](#comment-directives) naming no known directive (`@nessemble-formt`), or a known one with wrong arguments (`@nessemble-format stride=x`). |
+| `deprecated-comment-directive` | A directive written with a deprecated alias — today, `@fmt` for `@nessemble-format`. |
+| `ineffective-comment-directive` | A well-formed directive that cannot apply where it is written: in a trailing comment, a `-next-line` with no following line, a stride hint with no data run after it, or an unbalanced ignore-region bound. (An unclosed region is *not* flagged — that is the documented whole-file opt-out.) |
+
+- Each finding prints as `LINE:COL  severity  message  rule-id`, grouped by file,
   with a problem-count footer; a clean run prints `✓ No problems.`
 - **Exit code:** any `error`-severity finding fails the run (exit non-zero);
   `warn` findings do not, unless `--max-warnings <n>` is exceeded. This is the CI
@@ -198,7 +204,8 @@ src/prg/07.asm
 
 Rules, their severities, the comment window, and the label-name ignore list are
 configured under the [`lint`](#lint) key of `.nessemblerc`. The editor
-[Language Server](editor.md) surfaces the same findings inline as you type.
+[Language Server](editor.md) surfaces the same findings inline as you type,
+including a quick fix for the deprecated directive spelling.
 
 ### coverage &lt;infile.asm&gt; --cdl &lt;file.cdl&gt; ...
 
@@ -233,11 +240,94 @@ section is classified; lines that emit only CHR data are omitted.
   project script appears as its own file (each line executed or not); bundled
   `~/.nessemble` scripts are excluded. Available when the binary is built with
   the `coverage` feature (on by default).
+- `--no-ignore` — report every line, disabling the
+  [`@nessemble-coverage-ignore…` directives](#excluding-lines-from-coverage).
+
+Source can exclude lines it does not want measured with the
+[coverage ignore directives](#excluding-lines-from-coverage); excluded lines
+leave both the numerator and the denominator, and the run reports how many were
+dropped:
+
+```text
+coverage: 812/900 lines (90.2%) — 14 lines, 1 file ignored
+```
 
 The CDL must be the same size as this ROM's PRG+CHR (it carries no ROM identity
 of its own); a size mismatch is a hard error. Equal sizes still do not guarantee
 the CDL came from this exact build, so capture it from the ROM this source
 assembles to.
+
+## Comment directives
+
+Some nessemble tools take instructions from the source itself, written as
+**comment directives**: a comment whose first token names the tool and what to
+do.
+
+```text
+; @nessemble-<name> [args]   [; trailing prose]
+```
+
+| Directive | Applies to | Tool |
+| --- | --- | --- |
+| `@nessemble-format stride=N[,N,...]` | the data run that follows | [`format`](#format-opt--path-) |
+| `@nessemble-coverage-ignore-next-line` | the next significant line | [`coverage`](#coverage-infileasm---cdl-filecdl-) |
+| `@nessemble-coverage-ignore start` \| `end` | every line between the two | [`coverage`](#coverage-infileasm---cdl-filecdl-) |
+| `@fmt stride=N[,N,...]` | *deprecated alias of `@nessemble-format`* | [`format`](#format-opt--path-) |
+
+The rules are the same for every directive:
+
+- It must be **on its own line** — a directive in a trailing comment
+  (`LDA #$00 ; @nessemble-…`) does nothing, and is reported.
+- The `@…` token must come first in the comment, after the `;` (or `;;`, `;;;`)
+  and any spaces. A directive mentioned mid-sentence is prose.
+- Names are **exact and lower-case**; anything after the arguments and a second
+  `;` is free-text prose.
+- An unrecognized `@nessemble-…` name, or a known one with wrong arguments, is
+  **reported by [`lint`](#lint-opt--path-) and in the editor** rather than
+  silently ignored — that is what the namespace buys you. Ordinary `@`-comments
+  (`; @todo`, `; @param`) are never touched.
+
+### Excluding lines from coverage
+
+Two directives keep lines out of a [`coverage`](#coverage-infileasm---cdl-filecdl-)
+report. Excluded lines leave **both** sides of the ratio — they are not counted
+as covered, and not counted at all — so the percentage reflects only the lines
+you meant to measure.
+
+`@nessemble-coverage-ignore-next-line` excludes the next **significant** line;
+blank and comment lines in between are skipped, so an explanation can follow the
+directive:
+
+```asm
+; @nessemble-coverage-ignore-next-line
+; only reachable from a mapper IRQ we can't trigger in CI
+    JMP nmi_stub
+```
+
+`@nessemble-coverage-ignore start` … `end` excludes a whole region:
+
+```asm
+; @nessemble-coverage-ignore start
+mapper3_init:
+    LDA #$00
+    STA mapper_reg
+; @nessemble-coverage-ignore end
+```
+
+- **An unclosed region runs to the end of the file** — put a lone
+  `; @nessemble-coverage-ignore start` in the header to opt a whole file out. A
+  file with nothing left to report is dropped from the report entirely (no
+  `SF:` record) and counted as an ignored file.
+- Regions are **per file**: one does not extend into an `.include`d file, and
+  each included file carries its own directives.
+- Regions do not nest. A `start` inside an open region, or an `end` with no
+  `start`, does nothing and is reported by `lint`.
+- Rhai scripts (under `--scripts`) honor both directives, written as `//`
+  comments.
+- `nessemble coverage --no-ignore` reports every line regardless — useful in CI,
+  or to see what the directives are hiding. The stdout summary always names how
+  much was excluded, and the JSON report carries `ignored` / `ignoredFiles`
+  counts.
 
 ## .nessemblerc
 
@@ -288,14 +378,24 @@ about them.
 
 ### Stride hints
 
-To override `dataPerLine` for one data block, place a `; @fmt stride=N` comment
+To override `dataPerLine` for one data block, place a
+`; @nessemble-format stride=N` [comment directive](#comment-directives)
 immediately before it. Multiple strides cycle in order and the last one repeats:
 
 ```asm
-; @fmt stride=2
+; @nessemble-format stride=2
     .db $01, $02
     .db $03, $04
 ```
+
+> **Deprecated spelling.** The original `; @fmt stride=N` still works and always
+> will — it is an alias, not a removal. It is reported by the
+> [`deprecated-comment-directive`](#lint) rule, and the editor offers a one-click
+> rename. To migrate a tree in bulk:
+>
+> ```sh
+> grep -rl '@fmt' --include='*.asm' . | xargs sed -i 's/@fmt/@nessemble-format/g'
+> ```
 
 ### Continuation alignment
 
@@ -347,7 +447,7 @@ paths from directory walks. It is discovered the same way as `.nessemblerc`.
 ### lint
 
 The [`lint`](#lint-opt--path-) subcommand is configured under a `lint` key in the
-same `.nessemblerc`. With no config the linter is on with its defaults (the one
+same `.nessemblerc`. With no config the linter is on with its defaults (every
 rule at `"warn"`, a comment window of `3`, and no ignores), so `nessemble lint`
 is useful out of the box.
 
@@ -355,7 +455,9 @@ is useful out of the box.
 {
   "lint": {
     "rules": {
-      "require-block-comment": ["warn", { "window": 3 }]
+      "require-block-comment": ["warn", { "window": 3 }],
+      "unknown-comment-directive": "error",
+      "deprecated-comment-directive": "off"
     },
     "ignore": ["^loc_[0-9A-Fa-f]", "^data_[0-9A-Fa-f]"]
   }
@@ -374,12 +476,15 @@ is exceeded. In the editor, findings appear at a gentle severity (Information fo
 assembler's own errors and warnings.
 
 **Rule options.** `require-block-comment` takes a `window` (default `3`): a block
-label is clean if any line within `±window` lines carries a comment.
+label is clean if any line within `±window` lines carries a comment. The
+directive rules take no options.
 
 **Ignore patterns.** List the name shapes that should never be flagged — most
 often machine-generated disassembly labels (`loc_8000:`, `data_c123:`). No
 patterns ship by default, so a fresh project flags every undocumented block until
-you opt specific shapes out.
+you opt specific shapes out. (Ignore patterns match label *names*, so they do not
+affect the [comment-directive](#comment-directives) rules; silence those with a
+severity of `"off"`.)
 
 Per-glob [`overrides`](#overrides) may carry a `lint` block too, so a data-heavy
 directory can loosen or disable a rule for its files:

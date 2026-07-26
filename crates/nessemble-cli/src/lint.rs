@@ -136,12 +136,14 @@ fn report(jobs: &[Job], opts: &LintArgs) -> u8 {
         }
         println!("\n{}", file.display());
         for (f, severity) in rows {
+            // ESLint's row shape: position, severity, what is wrong, rule id.
+            // The message names the subject, so it is not printed twice.
             println!(
                 "  {:>5}:{:<3} {:<7}  {}  {}",
                 f.line,
                 f.column,
                 severity,
-                f.subject,
+                f.message,
                 f.rule.id()
             );
         }
