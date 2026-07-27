@@ -21,6 +21,10 @@ pub mod tooling;
 pub use assemble::{CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
 pub use preprocess::FileOverlay;
 
+/// The NES palette mapping `.color` performs, re-exported so tooling (the
+/// language server's `.color` hover) previews exactly what the assembler emits.
+pub use nessemble_media::{match_nes_color, NES_PALETTE};
+
 /// Options controlling an assembly run.
 #[derive(Debug, Clone)]
 pub struct Options {

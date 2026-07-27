@@ -22,7 +22,9 @@
 //!   `textDocument/hover` (opcode/addressing details, directive descriptions,
 //!   symbol values, plus the doc comment from the run of line comments directly
 //!   above a symbol's definition), all driven by the lossless tooling lexer over
-//!   the buffer.
+//!   the buffer. Hovering `.color` additionally previews the NES palette entries
+//!   its arguments map to — the whole list on the directive, one color on a
+//!   single argument.
 //! - **Workspace-aware diagnostics** (Phase 7): when a workspace folder is open,
 //!   a file is analyzed in the context of the `.include` project it belongs to,
 //!   so cross-file symbols aren't flagged as undefined.
@@ -61,8 +63,8 @@ use lsp_types::{
 
 use nessemble_core::tooling::{self, LexKind, RuleSeverity};
 use nessemble_core::{
-    diagnose_project_with, diagnose_source_with, lenient_custom_resolver, parse_pseudo_mapping,
-    Diag, ListSymbol, Options, ProjectDiagnostics,
+    diagnose_project_with, diagnose_source_with, lenient_custom_resolver, match_nes_color,
+    parse_pseudo_mapping, Diag, ListSymbol, Options, ProjectDiagnostics, NES_PALETTE,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
@@ -542,6 +544,11 @@ impl Server {
     /// or the resolved value for a defined symbol.
     fn hover(&self, uri: &Url, pos: Position) -> Option<Hover> {
         let doc = self.documents.get(uri)?;
+        // `.color` previews the palette it maps to, on the directive and on each
+        // of its arguments, ahead of the generic directive/symbol hovers.
+        if let Some(hover) = color_hover(&doc.text, pos, &doc.symbols) {
+            return Some(hover);
+        }
         let token = token_at(&doc.text, pos)?;
         let markdown = match token.kind {
             LexKind::Directive => directive_hover(token.text)?,
@@ -1173,6 +1180,7 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
 /// A significant lexeme paired with its source [`Range`] (line + UTF-16
 /// columns). Whitespace and newlines are consumed for positioning but not
 /// emitted, so consecutive entries are the meaningful tokens in source order.
+#[derive(Clone, Copy)]
 struct Located<'a> {
     kind: LexKind,
     text: &'a str,
@@ -1422,6 +1430,444 @@ fn format_hex(value: i64) -> String {
     } else {
         format!("${value:X}")
     }
+}
+
+// ---- `.color` palette preview ---------------------------------------------
+
+/// The pseudo-instruction whose arguments hover previews as palette entries.
+const COLOR_DIRECTIVE: &str = ".color";
+
+/// The pitch of one swatch square in the hover image, in pixels. The square
+/// itself is inset by a pixel on each side, which both draws its border and
+/// separates it from its neighbor.
+const SWATCH: u32 = 18;
+
+/// One argument of a `.color` argument list.
+struct ColorArg {
+    /// The argument as written, with whitespace squeezed out.
+    text: String,
+    range: Range,
+    /// What the argument evaluates to, or `None` when this buffer can't resolve
+    /// it (an undefined symbol, an expression form the scan doesn't cover).
+    value: Option<i64>,
+}
+
+/// A `.color` pseudo-instruction: the directive token and the arguments
+/// following it.
+struct ColorCall {
+    directive: Range,
+    args: Vec<ColorArg>,
+}
+
+/// Hover for `.color`, previewing the NES palette entries its arguments are
+/// mapped to: the whole list when the cursor is on the directive, and the one
+/// color when it is on a single argument.
+///
+/// `None` when `pos` is on neither, or on an argument whose value this buffer
+/// can't resolve — the caller then falls back to the ordinary hover, so an
+/// unresolved symbol still reports itself.
+fn color_hover(text: &str, pos: Position, symbols: &[ListSymbol]) -> Option<Hover> {
+    let call = color_calls(text, symbols).into_iter().find(|c| {
+        range_contains(c.directive, pos) || c.args.iter().any(|a| range_contains(a.range, pos))
+    })?;
+    let (value, range) = if range_contains(call.directive, pos) {
+        (color_list_markdown(&call.args)?, call.directive)
+    } else {
+        let (i, arg) = call
+            .args
+            .iter()
+            .enumerate()
+            .find(|(_, a)| range_contains(a.range, pos))?;
+        (color_arg_markdown(arg, i, call.args.len())?, arg.range)
+    };
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: Some(range),
+    })
+}
+
+/// Every `.color` pseudo-instruction in `text`, with its arguments split out and
+/// evaluated against `symbols`. The spelling is matched exactly, as the
+/// assembler matches directive names — `.COLOR` assembles to nothing to preview.
+fn color_calls(text: &str, symbols: &[ListSymbol]) -> Vec<ColorCall> {
+    let tokens = located_lexemes(text);
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.kind == LexKind::Directive && t.text == COLOR_DIRECTIVE)
+        .map(|(i, t)| ColorCall {
+            directive: t.range,
+            args: color_args(&tokens[i + 1..], t.range.end.line, symbols),
+        })
+        .collect()
+}
+
+/// Split the tokens following a `.color` into its comma-separated arguments and
+/// evaluate each.
+///
+/// The list runs to the end of `line` and continues onto the following line
+/// after a trailing comma — the rule the parser's `parse_expr_list` follows.
+/// Comments are trivia, and a comma nested in parentheses doesn't separate
+/// arguments.
+fn color_args(tokens: &[Located<'_>], line: u32, symbols: &[ListSymbol]) -> Vec<ColorArg> {
+    let mut groups: Vec<Vec<Located<'_>>> = Vec::new();
+    let mut current: Vec<Located<'_>> = Vec::new();
+    let mut line = line;
+    let mut depth = 0u32;
+    let mut after_comma = false;
+
+    for token in tokens {
+        if token.kind == LexKind::Comment {
+            continue;
+        }
+        if token.range.start.line != line {
+            if !after_comma {
+                break; // the statement ended with the line
+            }
+            line = token.range.start.line;
+        }
+        after_comma = false;
+        match (token.kind, token.text) {
+            (LexKind::Punct, "(") => depth += 1,
+            (LexKind::Punct, ")") => depth = depth.saturating_sub(1),
+            (LexKind::Punct, ",") if depth == 0 => {
+                groups.push(std::mem::take(&mut current));
+                after_comma = true;
+                continue;
+            }
+            _ => {}
+        }
+        current.push(*token);
+    }
+    groups.push(current);
+
+    groups
+        .into_iter()
+        .filter(|g| !g.is_empty())
+        .map(|g| ColorArg {
+            text: g.iter().map(|t| t.text).collect(),
+            range: Range::new(g[0].range.start, g[g.len() - 1].range.end),
+            value: eval_argument(&g, symbols),
+        })
+        .collect()
+}
+
+/// Evaluate one `.color` argument, mirroring the assembler's expression
+/// semantics: numeric and character literals, symbol references, `HIGH()`,
+/// `LOW()`, `BANK()`, parentheses, and binary operators at a single precedence
+/// level, right-associative.
+///
+/// `None` when the expression names something the buffer can't resolve, or uses
+/// a form outside that grammar (an anonymous `:+` label, a macro argument) —
+/// there is then no color to show rather than a wrong one.
+fn eval_argument(tokens: &[Located<'_>], symbols: &[ListSymbol]) -> Option<i64> {
+    let mut rest = tokens;
+    let value = eval_expr(&mut rest, symbols)?;
+    rest.is_empty().then_some(value)
+}
+
+fn eval_expr(tokens: &mut &[Located<'_>], symbols: &[ListSymbol]) -> Option<i64> {
+    let left = eval_primary(tokens, symbols)?;
+    let Some((op, width)) = binary_op(tokens) else {
+        return Some(left);
+    };
+    *tokens = &tokens[width..];
+    let right = eval_expr(tokens, symbols)?;
+    Some(apply_op(left, op, right))
+}
+
+fn eval_primary(tokens: &mut &[Located<'_>], symbols: &[ListSymbol]) -> Option<i64> {
+    let (token, rest) = tokens.split_first()?;
+    *tokens = rest;
+    match token.kind {
+        LexKind::Number => parse_number(token.text),
+        // `'x'` is the character's byte value, as the assembler's lexer reads it.
+        LexKind::Char => token.text.as_bytes().get(1).map(|b| i64::from(*b)),
+        LexKind::Ident => eval_ident(token.text, tokens, symbols),
+        LexKind::Punct if token.text == "(" => {
+            let inner = eval_expr(tokens, symbols)?;
+            eat_punct(tokens, ")").then_some(inner)
+        }
+        _ => None,
+    }
+}
+
+/// An identifier in an expression: one of the three built-in calls (spelled
+/// upper-case, as the assembler's lexer recognizes them), or a symbol reference
+/// resolved against the buffer's symbols.
+fn eval_ident(name: &str, tokens: &mut &[Located<'_>], symbols: &[ListSymbol]) -> Option<i64> {
+    let symbol = |n: &str| symbols.iter().find(|s| s.name == n);
+    if !matches!(name, "HIGH" | "LOW" | "BANK") {
+        return symbol(name).map(|s| s.value);
+    }
+    if !eat_punct(tokens, "(") {
+        return None;
+    }
+    if name == "BANK" {
+        // `BANK()` takes a symbol name, not an expression.
+        let (token, rest) = tokens.split_first()?;
+        *tokens = rest;
+        let bank = symbol(token.text).map(|s| s.bank as i64)?;
+        return eat_punct(tokens, ")").then_some(bank);
+    }
+    let inner = eval_expr(tokens, symbols)?;
+    let value = if name == "HIGH" {
+        (inner >> 8) & 0xFF
+    } else {
+        inner & 0xFF
+    };
+    eat_punct(tokens, ")").then_some(value)
+}
+
+/// Consume a leading punctuation token spelled `text`, reporting whether it was
+/// there.
+fn eat_punct(tokens: &mut &[Located<'_>], text: &str) -> bool {
+    match tokens.split_first() {
+        Some((token, rest)) if token.kind == LexKind::Punct && token.text == text => {
+            *tokens = rest;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A binary operator of the expression grammar.
+#[derive(Clone, Copy)]
+enum Op {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+/// The binary operator at the head of `tokens`, and how many tokens it spans.
+/// The lossless lexer emits punctuation one character at a time, so a
+/// two-character operator is a pair of *adjacent* tokens — `< <` with a space
+/// between is not a shift.
+fn binary_op(tokens: &[Located<'_>]) -> Option<(Op, usize)> {
+    let first = tokens.first().filter(|t| t.kind == LexKind::Punct)?;
+    let second = tokens
+        .get(1)
+        .filter(|t| t.kind == LexKind::Punct && t.range.start == first.range.end);
+    if let Some(second) = second {
+        let pair = match (first.text, second.text) {
+            ("*", "*") => Some(Op::Pow),
+            (">", ">") => Some(Op::Shr),
+            ("<", "<") => Some(Op::Shl),
+            ("=", "=") => Some(Op::Eq),
+            ("!", "=") => Some(Op::Ne),
+            ("<", "=") => Some(Op::Le),
+            (">", "=") => Some(Op::Ge),
+            _ => None,
+        };
+        if let Some(op) = pair {
+            return Some((op, 2));
+        }
+    }
+    let single = match first.text {
+        "+" => Op::Add,
+        "-" => Op::Sub,
+        "*" => Op::Mul,
+        "/" => Op::Div,
+        "&" => Op::And,
+        "|" => Op::Or,
+        "^" => Op::Xor,
+        "%" => Op::Mod,
+        "<" => Op::Lt,
+        ">" => Op::Gt,
+        _ => return None,
+    };
+    Some((single, 1))
+}
+
+/// Apply a binary operator, matching the assembler's evaluator — including its
+/// division and modulo by zero yielding `0`, and its shift counts masking to 63.
+/// Arithmetic wraps rather than overflowing: an editor's hover must not be able
+/// to panic the server, whatever a buffer mid-edit contains.
+fn apply_op(a: i64, op: Op, b: i64) -> i64 {
+    match op {
+        Op::Add => a.wrapping_add(b),
+        Op::Sub => a.wrapping_sub(b),
+        Op::Mul => a.wrapping_mul(b),
+        Op::Div => {
+            if b == 0 {
+                0
+            } else {
+                a.wrapping_div(b)
+            }
+        }
+        Op::Pow => (a as f64).powf(b as f64) as i64,
+        Op::And => a & b,
+        Op::Or => a | b,
+        Op::Xor => a ^ b,
+        Op::Shr => a >> (b & 63),
+        Op::Shl => a << (b & 63),
+        Op::Mod => {
+            if b == 0 {
+                0
+            } else {
+                a.wrapping_rem(b)
+            }
+        }
+        Op::Eq => i64::from(a == b),
+        Op::Ne => i64::from(a != b),
+        Op::Lt => i64::from(a < b),
+        Op::Gt => i64::from(a > b),
+        Op::Le => i64::from(a <= b),
+        Op::Ge => i64::from(a >= b),
+    }
+}
+
+/// The NES palette entry a `.color` argument maps to: the index byte the
+/// assembler emits, and the RGB the PPU shows for it. Shares the assembler's own
+/// matcher, so the preview can't drift from the emitted ROM.
+fn nes_entry(value: i64) -> (u8, u32) {
+    let rgb = (value & 0xFF_FFFF) as u32;
+    let index = match_nes_color(
+        ((rgb >> 16) & 0xFF) as u8,
+        ((rgb >> 8) & 0xFF) as u8,
+        (rgb & 0xFF) as u8,
+    );
+    (index, NES_PALETTE[index as usize])
+}
+
+/// Hover markdown for a whole `.color` argument list: the row of NES colors the
+/// arguments map to, then a table detailing each. `None` for a `.color` with no
+/// arguments, which has nothing to preview.
+fn color_list_markdown(args: &[ColorArg]) -> Option<String> {
+    use std::fmt::Write as _;
+
+    if args.is_empty() {
+        return None;
+    }
+    let swatches: Vec<Option<u32>> = args
+        .iter()
+        .map(|a| a.value.map(|v| nes_entry(v).1))
+        .collect();
+    let plural = if args.len() == 1 { "color" } else { "colors" };
+
+    let mut md = format!(
+        "**{COLOR_DIRECTIVE}** — {} {plural} mapped to the NES palette\n\n",
+        args.len()
+    );
+    md.push_str(&swatch_image(&swatches, "NES colors"));
+    md.push_str("\n\n| argument | RGB | index | NES color |\n| --- | --- | --- | --- |\n");
+    for arg in args {
+        // Writing to a String is infallible.
+        let _ = match arg.value.map(|v| (v, nes_entry(v))) {
+            Some((value, (index, rgb))) => writeln!(
+                md,
+                "| `{}` | `#{:06X}` | `${index:02X}` | `#{rgb:06X}` |",
+                arg.text,
+                value & 0xFF_FFFF,
+            ),
+            // An argument nothing in the buffer defines: shown, but unresolved.
+            None => writeln!(md, "| `{}` | ? | ? | ? |", arg.text),
+        };
+    }
+    Some(md)
+}
+
+/// Hover markdown for a single `.color` argument: just the one NES color it maps
+/// to. `None` when the argument's value is unresolved.
+fn color_arg_markdown(arg: &ColorArg, index: usize, total: usize) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let value = arg.value?;
+    let (palette, rgb) = nes_entry(value);
+    let mut md = format!(
+        "**{COLOR_DIRECTIVE}** — argument {} of {total}\n\n",
+        index + 1
+    );
+    md.push_str(&swatch_image(&[Some(rgb)], &format!("#{rgb:06X}")));
+    // Writing to a String is infallible.
+    let _ = write!(
+        md,
+        "\n\n`{}` (`#{:06X}`) → NES color `${palette:02X}` (`#{rgb:06X}`)",
+        arg.text,
+        value & 0xFF_FFFF,
+    );
+    Some(md)
+}
+
+/// A markdown image of `colors` as a row of swatches, drawn as an inline SVG
+/// data URI: a graphical client shows the colors themselves, and a terminal
+/// client falls back to the alt text — which is why every color hover also
+/// spells its values out in text.
+fn swatch_image(colors: &[Option<u32>], alt: &str) -> String {
+    use std::fmt::Write as _;
+
+    let width = SWATCH * colors.len() as u32;
+    let mut svg =
+        format!("<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{SWATCH}'>");
+    for (i, color) in colors.iter().enumerate() {
+        let x = SWATCH * i as u32 + 1;
+        let side = SWATCH - 2;
+        // An unresolved argument keeps its slot as an empty outline, so the row
+        // still lines up with the table under it.
+        let fill = color.map_or_else(|| "none".to_string(), |rgb| format!("#{rgb:06X}"));
+        let _ = write!(
+            svg,
+            "<rect x='{x}' y='1' width='{side}' height='{side}' \
+             fill='{fill}' stroke='#808080' stroke-width='1'/>"
+        );
+    }
+    svg.push_str("</svg>");
+    format!(
+        "![{alt}](data:image/svg+xml;base64,{})",
+        base64(svg.as_bytes())
+    )
+}
+
+/// Standard base64 (RFC 4648) of `data`, for the swatch data URI. Spelled out
+/// here rather than taken as a dependency: it is the server's only use for one.
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let bytes = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let group = (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
+        for i in 0..4 {
+            // A short final chunk is padded: one byte encodes two digits, two
+            // bytes encode three.
+            if i <= chunk.len() {
+                let digit = (group >> (18 - 6 * i)) & 0x3F;
+                out.push(ALPHABET[digit as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Whether `pos` falls within `range`, inclusive of both ends so a cursor at a
+/// boundary still resolves (the rule [`token_at`] uses). Unlike a token, a
+/// `.color` argument list can span lines, so this compares whole positions.
+fn range_contains(range: Range, pos: Position) -> bool {
+    (range.start.line, range.start.character) <= (pos.line, pos.character)
+        && (pos.line, pos.character) <= (range.end.line, range.end.character)
 }
 
 /// A block-directive folding tag: a macro body or a conditional block.
@@ -1744,31 +2190,43 @@ enum Base {
 /// The base a numeric literal is written in, or `None` for octal (which isn't
 /// one of the offered targets, so all three conversions are shown).
 fn base_of(text: &str) -> Option<Base> {
-    if text.starts_with('$') {
-        Some(Base::Hex)
-    } else if text.starts_with('%') {
-        Some(Base::Bin)
-    } else if text.len() > 1 && text.starts_with('0') {
-        None // octal
-    } else {
-        Some(Base::Dec)
+    match text.as_bytes().last() {
+        _ if text.starts_with('$') => Some(Base::Hex),
+        _ if text.starts_with('%') => Some(Base::Bin),
+        // The suffixed spellings (`1Ah`, `1011b`, `17o`, `42d`).
+        Some(b'h') => Some(Base::Hex),
+        Some(b'b') => Some(Base::Bin),
+        Some(b'd') => Some(Base::Dec),
+        Some(b'o') => None,                                   // octal
+        _ if text.len() > 1 && text.starts_with('0') => None, // octal
+        _ => Some(Base::Dec),
     }
 }
 
-/// Parse a nessemble numeric literal (`$hex`, `%bin`, `0octal`, or decimal).
+/// Parse a nessemble numeric literal into its value: the prefixed spellings
+/// (`$hex`, `%bin`, `0octal`, decimal) and the suffixed ones (`1Ah`, `1011b`,
+/// `17o`, `42d`) the assembler's lexer also accepts.
 fn parse_number(text: &str) -> Option<i64> {
     if let Some(hex) = text.strip_prefix('$') {
-        i64::from_str_radix(hex, 16).ok()
-    } else if let Some(bin) = text.strip_prefix('%') {
-        i64::from_str_radix(bin, 2).ok()
-    } else if text.len() > 1
-        && text.starts_with('0')
-        && text.bytes().all(|b| (b'0'..=b'7').contains(&b))
-    {
-        i64::from_str_radix(text, 8).ok()
-    } else {
-        text.parse::<i64>().ok()
+        return i64::from_str_radix(hex, 16).ok();
     }
+    if let Some(bin) = text.strip_prefix('%') {
+        return i64::from_str_radix(bin, 2).ok();
+    }
+    // A suffix only makes a literal when every digit before it fits the radix;
+    // otherwise the text falls through (`bad` is not binary `b`).
+    for (suffix, radix) in [(b'h', 16), (b'b', 2), (b'o', 8), (b'd', 10)] {
+        if let Some(digits) = text
+            .strip_suffix(suffix as char)
+            .filter(|d| !d.is_empty() && d.bytes().all(|b| (b as char).is_digit(radix)))
+        {
+            return i64::from_str_radix(digits, radix).ok();
+        }
+    }
+    if text.len() > 1 && text.starts_with('0') && text.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+        return i64::from_str_radix(text, 8).ok();
+    }
+    text.parse::<i64>().ok()
 }
 
 /// Completion items for every documented instruction mnemonic (lower-cased to
@@ -2473,6 +2931,187 @@ mod tests {
         open(&mut server, "file:///hw.asm", "  lda #$00\n");
         let uri = Url::parse("file:///hw.asm").unwrap();
         assert!(server.hover(&uri, Position::new(5, 0)).is_none());
+    }
+
+    // ---- `.color` palette preview -----------------------------------------
+
+    /// The markdown of the hover at `pos` in a freshly opened `text`.
+    fn hover_markdown(uri: &str, text: &str, pos: Position) -> Option<String> {
+        let mut server = Server::default();
+        open(&mut server, uri, text);
+        let hover = server.hover(&Url::parse(uri).unwrap(), pos)?;
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        Some(md.value)
+    }
+
+    #[test]
+    fn hover_on_color_previews_every_argument() {
+        // Hovering the directive lists the whole argument run: each argument's
+        // source RGB, the palette index the assembler emits, and the color the
+        // PPU shows for it — plus one image of the run as those colors.
+        let md = hover_markdown(
+            "file:///col.asm",
+            "  .color $FF0000, $00FF00, $0000FF\n",
+            Position::new(0, 4),
+        )
+        .expect("hover on .color");
+        assert!(md.starts_with("**.color** — 3 colors"), "{md}");
+        assert!(
+            md.contains("![NES colors](data:image/svg+xml;base64,"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| `$FF0000` | `#FF0000` | `$16` | `#F83800` |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| `$00FF00` | `#00FF00` | `$19` | `#00B800` |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| `$0000FF` | `#0000FF` | `$01` | `#0000FC` |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn hover_on_one_color_argument_shows_just_that_color() {
+        // The cursor is inside the second argument, so only its color is shown.
+        let md = hover_markdown(
+            "file:///col1.asm",
+            "  .color $FF0000, $00FF00\n",
+            Position::new(0, 20),
+        )
+        .expect("hover on an argument");
+        assert!(md.starts_with("**.color** — argument 2 of 2"), "{md}");
+        assert!(md.contains("![#00B800](data:image/svg+xml;base64,"), "{md}");
+        assert!(
+            md.contains("`$00FF00` (`#00FF00`) → NES color `$19` (`#00B800`)"),
+            "{md}"
+        );
+        // The whole-list table belongs to the directive hover, not this one.
+        assert!(!md.contains("| argument |"), "{md}");
+    }
+
+    #[test]
+    fn color_hover_resolves_expressions_and_symbols() {
+        // An argument is an expression, not just a literal: constants defined in
+        // the buffer resolve, and arithmetic is evaluated as the assembler does.
+        let text = "RED = $FF0000\nSHIFT = 8\n  \
+                    .color RED, $00FF00 >> SHIFT, $FFFFFF & $00FF00, LOW($1234FF)\n";
+        let md =
+            hover_markdown("file:///cole.asm", text, Position::new(2, 4)).expect("hover on .color");
+        assert!(
+            md.contains("| `RED` | `#FF0000` | `$16` | `#F83800` |"),
+            "{md}"
+        );
+        // $00FF00 >> 8 == $FF, a blue so dark it matches palette entry $01.
+        assert!(md.contains("| `$00FF00>>SHIFT` | `#0000FF` |"), "{md}");
+        assert!(
+            md.contains("| `$FFFFFF&$00FF00` | `#00FF00` | `$19` |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| `LOW($1234FF)` | `#0000FF` | `$01` |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn color_hover_follows_a_trailing_comma_onto_the_next_line() {
+        // A trailing comma continues the argument list, exactly as the parser
+        // reads it, so the run's later colors are previewed too.
+        let text = "  .color $FF0000,\n          $00FF00\n";
+        let md =
+            hover_markdown("file:///colc.asm", text, Position::new(0, 4)).expect("hover on .color");
+        assert!(md.starts_with("**.color** — 2 colors"), "{md}");
+        // …and hovering the continued argument previews that one color.
+        let md = hover_markdown("file:///colc2.asm", text, Position::new(1, 12))
+            .expect("hover on the continued argument");
+        assert!(md.starts_with("**.color** — argument 2 of 2"), "{md}");
+    }
+
+    #[test]
+    fn color_hover_ignores_what_follows_the_statement() {
+        // Without a trailing comma the list ends with the line, and a trailing
+        // comment is not an argument.
+        let text = "  .color $FF0000 ; red\n  .db $01, $02\n";
+        let md =
+            hover_markdown("file:///cold.asm", text, Position::new(0, 4)).expect("hover on .color");
+        assert!(md.starts_with("**.color** — 1 color"), "{md}");
+    }
+
+    #[test]
+    fn color_hover_falls_back_when_an_argument_is_unresolved() {
+        // An undefined symbol has no color to show, so the ordinary hover runs:
+        // the list marks the argument unresolved, and the argument itself gets
+        // whatever the generic hover can say about it (here, nothing).
+        let text = "  .color $FF0000, NOPE\n";
+        let md =
+            hover_markdown("file:///colu.asm", text, Position::new(0, 4)).expect("hover on .color");
+        assert!(md.contains("| `NOPE` | ? | ? | ? |"), "{md}");
+        assert!(hover_markdown("file:///colu2.asm", text, Position::new(0, 19)).is_none());
+    }
+
+    #[test]
+    fn color_hover_matches_the_assembled_bytes() {
+        // The preview must never disagree with the ROM: the indices in the
+        // hover table are the bytes `.color` actually emits.
+        let source = "  .color $FF0000, $00FF00, $123456, $FFFFFF\n";
+        let rom = nessemble_core::assemble(source, &Options::default())
+            .expect("assembles")
+            .rom;
+        let md = hover_markdown("file:///colb.asm", source, Position::new(0, 4))
+            .expect("hover on .color");
+        for byte in rom {
+            assert!(
+                md.contains(&format!("| `${byte:02X}` | ")),
+                "${byte:02X} in {md}"
+            );
+        }
+    }
+
+    #[test]
+    fn color_hover_is_only_for_color() {
+        // Another data directive keeps its ordinary description hover.
+        let md = hover_markdown("file:///colo.asm", "  .db $FF0000\n", Position::new(0, 4))
+            .expect("hover on .db");
+        assert!(md.starts_with("**.db** (directive)"), "{md}");
+        // A bare `.color` has nothing to preview, so it falls back too.
+        let md = hover_markdown("file:///colo2.asm", "  .color\n", Position::new(0, 4))
+            .expect("hover on a bare .color");
+        assert!(md.starts_with("**.color** (directive)"), "{md}");
+    }
+
+    #[test]
+    fn swatch_images_are_valid_base64() {
+        // The encoder is hand-rolled, so pin it to the RFC 4648 test vectors,
+        // padding included.
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn numeric_literals_parse_in_every_spelling() {
+        // Both the prefixed and the suffixed spellings the assembler accepts.
+        assert_eq!(parse_number("$1A"), Some(26));
+        assert_eq!(parse_number("%1011"), Some(11));
+        assert_eq!(parse_number("017"), Some(15));
+        assert_eq!(parse_number("42"), Some(42));
+        assert_eq!(parse_number("1Ah"), Some(26));
+        assert_eq!(parse_number("1011b"), Some(11));
+        assert_eq!(parse_number("17o"), Some(15));
+        assert_eq!(parse_number("42d"), Some(42));
+        // A word that merely ends in a radix letter is not a literal.
+        assert_eq!(parse_number("bad"), None);
+        assert_eq!(parse_number("h"), None);
     }
 
     /// Closing a document removes it from the store and clears its diagnostics.
