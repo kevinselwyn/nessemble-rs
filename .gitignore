@@ -12,3 +12,7 @@
 /website/static/nessemble/
 
 # mdBook installed for verification (kept out of the repo)
+
+# VS Code extension: npm install output and the packaged extension
+/editors/vscode/node_modules/
+*.vsix

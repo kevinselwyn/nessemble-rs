@@ -211,6 +211,12 @@ fn overall_bump(pending: &[Pending]) -> Option<Bump> {
     pending.iter().filter_map(|p| p.bump).max()
 }
 
+/// The workspace version as a plain `major.minor.patch` string, for tasks
+/// outside the changeset flow that need to stamp it onto an artifact.
+pub fn workspace_version_string() -> Result<String, String> {
+    workspace_version().map(|v| v.to_string())
+}
+
 fn workspace_version() -> Result<Semver, String> {
     let path = repo_root().join("Cargo.toml");
     let text =

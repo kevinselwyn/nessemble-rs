@@ -30,6 +30,26 @@ jobs:
         # enforced separately (the `changeset` job, PRs only).
         run: cargo run -p xtask -- changeset check
 
+  # ---------------------------------------------------------- VS Code extension
+  #
+  # Package the editor extension (`editors/vscode`) on every PR, so a broken
+  # manifest, a stale lockfile, or a `vsce` rejection surfaces here rather than
+  # in the release pipeline that has to ship the .vsix.
+  vscode:
+    name: vsix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Package extension
+        run: cargo run -p xtask -- vsix
+
   # ------------------------------------------------------------- Changeset gate
   #
   # Every PR that changes shipped behavior must add a changeset under

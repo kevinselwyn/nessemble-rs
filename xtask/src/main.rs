@@ -2,11 +2,12 @@
 //!
 //! Commands:
 //!   wasm                    Build the WebAssembly assembler bundle (wasm-bindgen).
+//!   vsix                    Package the VS Code extension (editors/vscode) as a .vsix.
 //!   dist                    Build the GitHub Pages site (website + mdBook docs + llms.txt).
 //!   changeset <sub>         Changeset-driven release versioning (add/check/status/version).
 //!   help                    Show this help.
 //!
-//! It shells out to `cargo`, `wasm-bindgen`, and `mdbook`; its only crate
+//! It shells out to `cargo`, `wasm-bindgen`, `mdbook`, and `npm`/`npx`; its only crate
 //! dependency is `nessemble-core`, whose lexer/classifier the `dist` command
 //! uses to syntax-highlight the docs' static ` ```nessemble ` code blocks
 //! (the same tokenizer the editor and language server use).
@@ -31,6 +32,7 @@ fn main() -> std::process::ExitCode {
 
     let result = match cmd {
         "wasm" => wasm(),
+        "vsix" => vsix(),
         "dist" => dist(),
         "changeset" => changeset::run(rest),
         "help" | "-h" | "--help" => {
@@ -56,6 +58,7 @@ fn print_help() {
          \x20 cargo run -p xtask -- <command>\n\n\
          COMMANDS:\n\
          \x20 wasm                    Build the WebAssembly assembler bundle (needs the wasm32 target + wasm-bindgen)\n\
+         \x20 vsix                    Package the VS Code extension as nessemble_<version>.vsix (needs npm + npx)\n\
          \x20 dist                    Build the GitHub Pages site (website + mdBook docs + llms.txt)\n\
          \x20 changeset <sub>         Changeset-driven release versioning: add | check | status | version\n\
          \x20 help                    Show this help"
@@ -107,6 +110,99 @@ fn wasm() -> Result<(), String> {
 
     println!("Built wasm bundle at {}", out_dir.display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// vsix — package the VS Code extension
+// ---------------------------------------------------------------------------
+
+/// The version placeholder committed in the extension's `package.json` (and its
+/// lockfile). The real version is stamped in at package time from the workspace,
+/// so the extension always ships at the release version and the repo keeps its
+/// no-hand-edited-version-string rule (see `RELEASING.md`).
+const VSIX_VERSION_PLACEHOLDER: &str = "\"version\": \"0.0.0-dev\"";
+
+/// `@vscode/vsce` is pinned so packaging is reproducible run to run.
+const VSCE_VERSION: &str = "3.9.2";
+
+/// Package `editors/vscode/` into `nessemble_<version>.vsix` at the repo root.
+///
+/// The extension is a thin LSP client — no compile step, just `npm ci` for
+/// `vscode-languageclient` and `vsce package`. It is built from a staged copy
+/// under `target/vsix-build/` (the same trick `dist` uses for the book) so
+/// stamping the workspace version in never touches the committed sources.
+///
+/// Requires `npm` and `npx` on `PATH`; `vsce` itself is fetched by `npx`.
+fn vsix() -> Result<(), String> {
+    let root = repo_root();
+    let version = changeset::workspace_version_string()?;
+
+    let build = root.join("target/vsix-build");
+    let _ = std::fs::remove_dir_all(&build);
+    // `node_modules` is a build product of the staged copy, never an input.
+    copy_dir_excluding(&root.join("editors/vscode"), &build, &["node_modules"])?;
+
+    let lock = build.join("package-lock.json");
+    let locked = lock.is_file();
+    stamp_version(&build.join("package.json"), &version)?;
+    if locked {
+        // `npm ci` refuses a lockfile whose root version disagrees with the
+        // manifest, so stamp both.
+        stamp_version(&lock, &version)?;
+    }
+
+    // `npm ci` from the committed lockfile keeps the dependency set — which is
+    // shipped inside the .vsix — identical to what was reviewed.
+    run_tool(
+        "npm",
+        &[
+            if locked { "ci" } else { "install" },
+            "--no-audit",
+            "--no-fund",
+        ],
+        Some(&build),
+    )?;
+
+    let out = root.join(format!("nessemble_{version}.vsix"));
+    run_tool(
+        "npx",
+        &[
+            "--yes",
+            &format!("@vscode/vsce@{VSCE_VERSION}"),
+            "package",
+            "--out",
+            &out.to_string_lossy(),
+        ],
+        Some(&build),
+    )?;
+
+    println!("Built VS Code extension at {}", out.display());
+    Ok(())
+}
+
+/// Replace the version placeholder in a staged npm manifest with `version`.
+fn stamp_version(path: &Path, version: &str) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let stamped = stamp_version_text(&text, version).ok_or_else(|| {
+        format!(
+            "{}: no `{VSIX_VERSION_PLACEHOLDER}` to stamp",
+            path.display()
+        )
+    })?;
+    std::fs::write(path, stamped).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Rewrite every occurrence of the version placeholder in `text` to `version`,
+/// or `None` if the placeholder isn't there (the manifest drifted).
+fn stamp_version_text(text: &str, version: &str) -> Option<String> {
+    if !text.contains(VSIX_VERSION_PLACEHOLDER) {
+        return None;
+    }
+    Some(text.replace(
+        VSIX_VERSION_PLACEHOLDER,
+        &format!("\"version\": \"{version}\""),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -689,13 +785,22 @@ fn stage_web_assets(dest: &Path) -> Result<(), String> {
 
 /// Recursively copy `from` into `to` (creating `to`).
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    copy_dir_excluding(from, to, &[])
+}
+
+/// [`copy_dir`], skipping any entry whose file name is in `exclude`.
+fn copy_dir_excluding(from: &Path, to: &Path, exclude: &[&str]) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
     for entry in std::fs::read_dir(from).map_err(|e| format!("read {}: {e}", from.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        if exclude.iter().any(|e| name == std::ffi::OsStr::new(e)) {
+            continue;
+        }
         let src = entry.path();
-        let dst = to.join(entry.file_name());
+        let dst = to.join(name);
         if src.is_dir() {
-            copy_dir(&src, &dst)?;
+            copy_dir_excluding(&src, &dst, exclude)?;
         } else {
             std::fs::copy(&src, &dst).map_err(|e| format!("copy {}: {e}", src.display()))?;
         }
@@ -762,6 +867,22 @@ mod tests {
         );
         // The introduction is the docs root.
         assert_eq!(md_to_url("index.md"), DOCS_BASE_URL);
+    }
+
+    #[test]
+    fn stamp_version_text_replaces_every_placeholder() {
+        // A lockfile carries the root version twice (top level + `packages[""]`).
+        let lock = "{\n  \"version\": \"0.0.0-dev\",\n  \"packages\": {\n    \"\": {\n      \"version\": \"0.0.0-dev\"\n    }\n  }\n}\n";
+        let out = stamp_version_text(lock, "2.18.1").expect("placeholder present");
+        assert!(!out.contains("0.0.0-dev"));
+        assert_eq!(out.matches("\"version\": \"2.18.1\"").count(), 2);
+    }
+
+    #[test]
+    fn stamp_version_text_reports_a_missing_placeholder() {
+        // A manifest whose version was hand-edited must fail loudly rather than
+        // package the wrong version.
+        assert!(stamp_version_text("{\n  \"version\": \"1.2.3\"\n}\n", "2.18.1").is_none());
     }
 
     #[test]

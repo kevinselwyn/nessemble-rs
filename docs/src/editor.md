@@ -117,83 +117,73 @@ language-servers = ["nessemble"]
 
 ### VS Code / Cursor
 
-Cursor is a VS Code fork and uses the same extension model. There is no
-published Marketplace extension yet, but Cursor can't spawn a stdio language
-server on its own — it needs a small client extension. A minimal one is a few
-files; you can develop it locally and run it from Cursor without publishing.
+VS Code can't spawn a stdio language server on its own — it needs a client
+extension. `nessemble` ships one, built and attached to every release as
+`nessemble_<v>.vsix`. (Cursor is a VS Code fork and uses the same extension
+model, so the same `.vsix` installs there.)
+
+The extension is a thin client: it registers a `nessemble` language for `.asm`
+and `.s` files and runs `nessemble lsp`. Every feature listed above comes from
+the server, so the editor can't drift from the assembler or the CLI. It carries
+no copy of `nessemble` — one universal `.vsix` serves every platform, and the
+executable it drives is the one you installed.
 
 1. Make sure `nessemble` is on your `PATH` (`nessemble --version` should print
-   `2.5.0` or newer).
+   `2.5.0` or newer). If it lives somewhere off `PATH`, point the
+   [`nessemble.serverPath`](#extension-settings) setting at it.
 
-2. Create a folder, e.g. `nessemble-vscode/`, with these two files:
+2. Download `nessemble_<v>.vsix` from the
+   [releases page](https://github.com/kevinselwyn/nessemble-rs/releases).
 
-   `package.json`:
+3. Install it — either from the Extensions view's *Install from VSIX…* command
+   (the `…` menu in its title bar), or from a terminal:
 
-   ```json
-   {
-     "name": "nessemble",
-     "publisher": "local",
-     "displayName": "nessemble",
-     "version": "0.0.1",
-     "engines": { "vscode": "^1.75.0" },
-     "categories": ["Programming Languages"],
-     "activationEvents": ["onLanguage:nessemble"],
-     "main": "./extension.js",
-     "contributes": {
-       "languages": [
-         {
-           "id": "nessemble",
-           "aliases": ["nessemble", "NES assembly"],
-           "extensions": [".asm", ".s"]
-         }
-       ]
-     },
-     "dependencies": { "vscode-languageclient": "^9.0.0" }
-   }
+   ```text
+   code --install-extension nessemble_<v>.vsix
    ```
 
-   `extension.js`:
+   In Cursor, the command is `cursor --install-extension`.
 
-   ```js
-   const { LanguageClient } = require("vscode-languageclient/node");
+4. Open a `.asm` file. Diagnostics, lint hints, completion, hover, formatting,
+   semantic highlighting, outline, go-to-definition, and rename all work
+   immediately; the server starts on the first `nessemble` file you open.
 
-   let client;
+If the executable can't be found, the extension says so and offers to open the
+installation docs or the setting — it does not fail silently.
 
-   function activate() {
-     const serverOptions = {
-       command: "nessemble",
-       args: ["lsp"],
-     };
-     const clientOptions = {
-       documentSelector: [{ scheme: "file", language: "nessemble" }],
-     };
-     client = new LanguageClient(
-       "nessemble",
-       "nessemble",
-       serverOptions,
-       clientOptions
-     );
-     client.start();
-   }
+#### Extension settings
 
-   function deactivate() {
-     return client ? client.stop() : undefined;
-   }
+| Setting | Default | What it does |
+|---|---|---|
+| `nessemble.serverPath` | `nessemble` | Path to the `nessemble` executable. Looked up on `PATH` when left as the bare name. |
+| `nessemble.serverArgs` | `["lsp"]` | Arguments used to start the server. |
+| `nessemble.trace.server` | `off` | Log LSP traffic to the *nessemble* output channel (`messages` or `verbose`). Useful when reporting a bug. |
 
-   module.exports = { activate, deactivate };
-   ```
+Changing the path or arguments restarts the server in place — no window reload.
 
-3. From that folder, run `npm install` to fetch `vscode-languageclient`.
+#### Coloring
 
-4. Open the folder in Cursor and press <kbd>F5</kbd> ("Run Extension") to launch
-   an Extension Development Host with the extension loaded. Open a `.asm` file
-   in that window — diagnostics, completion, hover, formatting, outline, and
-   go-to-definition should all work.
+The extension deliberately ships **no TextMate grammar**. Coloring comes from
+the server's semantic tokens, produced by the assembler's own lexer, so it can
+never disagree with how a file actually assembles — the same reasoning that
+governs the [in-browser assembler](https://kevinselwyn.github.io/nessemble-rs/)
+and the code blocks in these docs. One consequence: a `.asm` file is uncolored
+for the moment before the server connects, and stays uncolored if `nessemble`
+isn't installed.
 
-   To install it permanently instead of running the dev host, package it with
-   [`vsce`](https://github.com/microsoft/vscode-vsce) (`vsce package`) and
-   install the resulting `.vsix` via the Extensions view's *Install from
-   VSIX…* command.
+#### Building the extension from source
+
+The extension lives in [`editors/vscode/`](https://github.com/kevinselwyn/nessemble-rs/tree/main/editors/vscode).
+With `npm` on your `PATH`:
+
+```text
+cargo run -p xtask -- vsix
+```
+
+That packages `nessemble_<workspace version>.vsix` in the repository root —
+the exact artifact the release pipeline publishes. To iterate on the extension
+instead, open `editors/vscode/` in VS Code, run `npm install`, and press
+<kbd>F5</kbd> to launch an Extension Development Host with it loaded.
 
 #### Format on save
 
@@ -205,19 +195,17 @@ can have VS Code / Cursor reformat on every save. Add this to your `settings.jso
 {
   "[nessemble]": {
     "editor.formatOnSave": true,
-    "editor.defaultFormatter": "local.nessemble"
+    "editor.defaultFormatter": "kevinselwyn.nessemble"
   }
 }
 ```
 
-- The `[nessemble]` scope targets the language id the extension registers (the
-  `contributes.languages[].id` above). If you instead associated `.asm` with VS
-  Code's built-in `asm` language, use `"[asm]"`.
+- The `[nessemble]` scope targets the language id the extension registers. If you
+  instead associated `.asm` with VS Code's built-in `asm` language, use `"[asm]"`.
 - `editor.formatOnSave` performs the on-save formatting.
 - `editor.defaultFormatter` names the provider to use — the extension identifier,
-  `<publisher>.<name>`, which is `local.nessemble` for the `package.json` above.
-  Setting it avoids the "multiple/unknown formatter" prompt; without a `publisher`
-  field there is no stable id to point at.
+  `<publisher>.<name>`. Setting it avoids the "multiple formatters" prompt when
+  another extension also claims `.asm` files.
 
 Because the server shares its engine with the CLI, saving a file produces exactly
 the same result as running `nessemble format --write` on it.

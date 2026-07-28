@@ -24,14 +24,15 @@ custom pseudo-instructions written in [Rhai](https://rhai.rs).
   host for user-defined directives.
 - **Editor support** — a built-in [Language Server](docs/src/editor.md)
   (`nessemble lsp`) speaking LSP over stdio, for VS Code, Neovim, Helix, Emacs,
-  and other LSP-capable editors.
+  and other LSP-capable editors, plus a [VS Code extension](editors/vscode/)
+  shipped as a `.vsix` with every release.
 - **Runs in the browser** — a WebAssembly build assembles entirely client-side,
   powering the framework-free `<nessemble-assembler>` web component on the
   [project site](https://kevinselwyn.github.io/nessemble-rs/).
 - **Internationalization** — messages via [Project Fluent](https://projectfluent.org).
-- **Release packaging** — `.deb`, `.msi`, and `.pkg` artifacts for all supported
-  platforms, plus a marketing site, the mdBook manual, and the in-browser
-  assembler deployed to GitHub Pages.
+- **Release packaging** — `.deb`, `.msi`, `.pkg`, and `.vsix` artifacts for all
+  supported platforms, plus a marketing site, the mdBook manual, and the
+  in-browser assembler deployed to GitHub Pages.
 
 ## Installation
 
@@ -88,8 +89,11 @@ or embed the framework-free `<nessemble-assembler>` web component (see
 ### Editor support
 
 Run `nessemble lsp` to start the built-in Language Server (LSP over stdio) for
-diagnostics in any LSP-capable editor. See
-[`docs/src/editor.md`](docs/src/editor.md).
+diagnostics in any LSP-capable editor. For VS Code and Cursor, install
+`nessemble_<v>.vsix` from the [releases page][releases] — a thin client for that
+same server. See [`docs/src/editor.md`](docs/src/editor.md).
+
+[releases]: https://github.com/kevinselwyn/nessemble-rs/releases
 
 ## Workspace layout
 
@@ -105,7 +109,8 @@ crates/
   nessemble-cli/     # the `nessemble` binary
 web/                 # <nessemble-assembler> web component (wraps the wasm build)
 website/             # marketing site (deployed with the manual to GitHub Pages)
-xtask/               # developer tasks (wasm build, `dist` site build, release changesets)
+editors/vscode/      # VS Code extension — LSP client, packaged as the release .vsix
+xtask/               # developer tasks (wasm build, `dist` site build, `vsix` packaging, release changesets)
 tests/corpus/        # assemble fixtures (.asm + golden .rom)
 ```
 
@@ -118,6 +123,14 @@ cargo build              # build all crates
 cargo test               # run unit tests
 cargo fmt --all --check  # formatting
 cargo clippy --all-targets --all-features
+```
+
+To package the VS Code extension (`editors/vscode/`) into
+`nessemble_<version>.vsix` — the same artifact the release pipeline publishes —
+you also need `npm`:
+
+```bash
+cargo run -p xtask -- vsix
 ```
 
 ## Corpus tests

@@ -9,3 +9,4 @@ site/
 crates/nessemble-wasm/pkg/
 docs/src/nessemble/
 website/static/nessemble/
+editors/vscode/node_modules/

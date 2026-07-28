@@ -62,6 +62,12 @@ its GitHub Release, and uploads the assets:
 | Windows 32-bit | `nessemble_<v>_win32.exe`, `…_win32.msi`      | `cargo-wix` |
 | Windows 64-bit | `nessemble_<v>_win64.exe`, `…_win64.msi`      | `cargo-wix` |
 | WebAssembly    | `nessemble_<v>_wasm.tar.gz`                    | `xtask wasm`|
+| VS Code        | `nessemble_<v>.vsix`                          | `xtask vsix`|
+
+The `.vsix` (the editor extension in `editors/vscode/`) is packaged from a
+staged copy with the workspace version stamped into its manifest, so it needs no
+hand-edited version string either. CI packages it on every PR, so a break shows
+up before release day.
 
 Ordinary pushes to `main` never re-release: between releases the workspace
 version stays at the last released version, whose tag already exists, so the
