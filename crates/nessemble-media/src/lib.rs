@@ -11,7 +11,7 @@ mod png;
 mod rle;
 mod wav;
 
-pub use color::{match_nes_color, two_bit_color};
+pub use color::{match_nes_color, two_bit_color, NES_PALETTE};
 pub use png::{decode_png, decode_png_rgba, png_to_palette, png_to_tiles, Png, PngError, PngRgba};
 pub use rle::rle_encode;
 pub use wav::{wav_to_dpcm, WavError};

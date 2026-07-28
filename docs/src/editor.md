@@ -63,6 +63,14 @@ Once connected, the server provides:
   A constant or label is also documented with the run of comment lines
   immediately preceding its definition, so an explanatory comment written above
   a symbol appears when you hover over any use of it.
+  Hovering [`.color`](syntax.md#color) previews the palette it produces: the
+  whole argument list is shown as the row of NES colors it maps to, with each
+  argument's RGB, the palette index the assembler emits for it, and the color
+  the PPU actually shows; hovering a single argument previews just that one
+  color. Arguments are expressions, so constants and arithmetic are resolved
+  first, and an argument the buffer can't resolve is listed as unresolved rather
+  than guessed at. The swatches are drawn as an image, which graphical editors
+  render inline; a terminal editor shows the same values as text.
 - **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)
   blocks, and runs of consecutive comments, can be collapsed.
 - **Rename** — renaming a symbol updates its definition and every use across the

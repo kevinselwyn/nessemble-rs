@@ -4,8 +4,9 @@
 /// The four 1-bit-per-sample grayscale levels used by `.incpng`.
 const COLORS_2BIT: [i32; 4] = [0x00, 0x55, 0xAA, 0xFF];
 
-/// The 64-entry NES palette (RGB), used by `.incpal`.
-const COLORS_FULL: [u32; 64] = [
+/// The 64-entry NES palette (RGB), used by `.incpal` and `.color`. Index `i` is
+/// the color the PPU shows for palette byte `i`.
+pub const NES_PALETTE: [u32; 64] = [
     0x7C7C7C, 0x0000FC, 0x0000BC, 0x4428BC, 0x940084, 0xA80020, 0xA81000, 0x881400, 0x503000,
     0x007800, 0x006800, 0x005800, 0x004058, 0x000000, 0x000000, 0x000000, 0xBCBCBC, 0x0078F8,
     0x0058F8, 0x6844FC, 0xD800CC, 0xE40058, 0xF83800, 0xE45C10, 0xAC7C00, 0x00B800, 0x00A800,
@@ -39,7 +40,7 @@ pub fn two_bit_color(r: u8, g: u8, b: u8) -> u8 {
 pub fn match_nes_color(r: u8, g: u8, b: u8) -> u8 {
     let mut diff: i32 = 0xFFFFFF;
     let mut color: usize = 0;
-    for (i, rgb) in COLORS_FULL.iter().enumerate() {
+    for (i, rgb) in NES_PALETTE.iter().enumerate() {
         let r2 = ((rgb >> 16) & 0xFF) as i32;
         let g2 = ((rgb >> 8) & 0xFF) as i32;
         let b2 = (rgb & 0xFF) as i32;

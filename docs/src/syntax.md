@@ -491,6 +491,10 @@ Output:
 Read more about the NES color palette
 [here](https://en.wikipedia.org/wiki/List_of_video_game_console_palettes#NES).
 
+In an editor connected to the [language server](editor.md), hovering `.color`
+previews the palette entries the whole argument list maps to, and hovering a
+single argument previews just that color.
+
 Try it:
 
 <nessemble-assembler>
