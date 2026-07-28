@@ -171,7 +171,7 @@ fn custom(ints, texts) {
 ### Decoding PNGs
 
 `decode_png(blob)` decodes PNG bytes (typically from `open_file(...).read_blob()`)
-into a map of the image's dimensions and its pixels:
+into an **image**:
 
 ```rust,ignore
 let img = decode_png(open_file("sprite.png", "r").read_blob());
@@ -184,19 +184,26 @@ to `decode_png(read_blob(path))`:
 let img = decode_png_file("sprite.png");
 ```
 
-The returned map has:
+An image exposes:
 
-- `width` — the image width in pixels (integer).
-- `height` — the image height in pixels (integer).
-- `pixels` — a flat array of `width * height * 4` integers, four per pixel in
+- `img.width` — the image width in pixels (integer).
+- `img.height` — the image height in pixels (integer).
+- `img.pixels` — a flat array of `width * height * 4` integers, four per pixel in
   **`R, G, B, A`** order, row-major. Pixel `(x, y)` starts at index
   `(y * width + x) * 4`.
 
 `decode_png` (and `decode_png_file`) throws if the blob is not a valid PNG.
 
+An image is a **handle**: assigning it, or passing it to a function, shares the
+decoded pixels rather than copying them, so image work can be factored into
+helper functions freely. `img.pixels`, by contrast, builds a fresh array of every
+channel each time you ask for it — on a full-resolution image that is tens of
+millions of values, so prefer the accessors below, which read the decoded pixels
+directly.
+
 #### Pixel accessors
 
-Rather than compute `(y * width + x) * 4` offsets by hand, the image map exposes
+Rather than compute `(y * width + x) * 4` offsets by hand, an image exposes
 accessor methods:
 
 - `img.r(x, y)` — the **red** channel of pixel `(x, y)`. The images these scripts
@@ -214,6 +221,54 @@ fn custom(ints, texts) {
     decode_png_file(texts[0]).tile(0, 0, 8, 8)   // top-left 8x8 tile's shades
 }
 ```
+
+#### Cell matching
+
+Converting a picture into tile indices means asking, over and over, *which cell
+of this sheet does this cell of my image draw?* Three methods answer that
+natively, against a **bank** image gridded into `w`×`h` cells left to right, top
+to bottom (`floor(width / w)` by `floor(height / h)` of them — a ragged right or
+bottom edge is not a cell, exactly as `img.tile` grids an image):
+
+- `bank.find_cell(src, col, row, w, h)` — the index of the bank cell that draws
+  the same thing as the `w`×`h` cell at grid position `(col, row)` of `src`, or
+  `-1` if none does. When several bank cells are identical, the **lowest** index
+  wins.
+- `bank.cell_equals(index, src, col, row, w, h)` — whether bank cell `index`
+  draws that same cell. An `index` outside the bank is simply `false`; use this
+  to validate an index you already have without re-scanning.
+- `bank.nearest_cell(src, col, row, w, h)` — the closest bank cell by summed
+  per-pixel shade difference, for a cell with no exact match. Ties go to the
+  lowest index, and it always returns an index.
+
+All three compare **NES shade indices** — each pixel's red channel put through
+the same snapping [`nes_shade`](#palette-quantization) uses — and ignore green,
+blue and alpha. So `bank.find_cell(src, col, row, w, h)` agrees exactly with
+scanning the bank for `nes_shade(bank.tile(…)) == nes_shade(src.tile(…))`, and
+pixels differing only below the snapping thresholds (say, in the low nibble of a
+byte, where a script can stash its own per-cell data) compare equal.
+
+A `.tilemap "map.png", "tiles.png"` directive emitting one index per 8×8 cell,
+falling back to the closest tile when a cell isn't in the sheet:
+
+```rust,ignore
+fn custom(ints, texts) {
+    let map = decode_png_file(texts[0]);
+    let tiles = decode_png_file(texts[1]);
+    let out = [];
+    for row in 0..(map.height / 8) {
+        for col in 0..(map.width / 8) {
+            let i = tiles.find_cell(map, col, row, 8, 8);
+            if i < 0 { i = tiles.nearest_cell(map, col, row, 8, 8); }
+            out.push(i);
+        }
+    }
+    out
+}
+```
+
+A cell position outside `src`, a zero or negative cell size, or a bank too small
+to hold one whole cell throws an error naming the call.
 
 ### Palette quantization
 

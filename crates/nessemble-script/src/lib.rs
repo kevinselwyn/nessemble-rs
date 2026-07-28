@@ -26,8 +26,14 @@
 //!
 //! - `read_blob(path)` / `decode_png_file(path)` — read (and decode) a file in
 //!   one call, resolving relative paths like `open_file` (feature `fs`).
-//! - `decode_png(blob)` → `#{ width, height, pixels }` and pixel accessors over
-//!   that map: `img.r(x, y)`, `img.pixel(x, y)`, `img.tile(col, row, tw, th)`.
+//! - `decode_png(blob)` → an opaque image handle with `img.width`, `img.height`,
+//!   `img.pixels` and the accessors `img.r(x, y)`, `img.pixel(x, y)`,
+//!   `img.tile(col, row, tw, th)`. Copying the handle (passing it to a function,
+//!   assigning it) is a refcount bump, not a copy of the pixels.
+//! - Cell matching against a sheet of equally-sized cells:
+//!   `bank.find_cell(src, col, row, w, h)`,
+//!   `bank.cell_equals(index, src, col, row, w, h)` and
+//!   `bank.nearest_cell(src, col, row, w, h)`, all comparing NES shade indices.
 //! - `quantize(value, thresholds)` (also over an array of values) and
 //!   `nes_shade(value)` (the NES 4-shade case; also over an array) to snap a
 //!   grayscale value to a palette index.
@@ -40,10 +46,11 @@
 use std::path::Path;
 #[cfg(feature = "fs")]
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[cfg(any(feature = "fs", feature = "rand"))]
 use rhai::packages::Package;
-use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
+use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult};
 #[cfg(feature = "fs")]
 use rhai_fs::FilesystemPackage;
 #[cfg(feature = "rand")]
@@ -133,7 +140,7 @@ fn engine(base_dir: &Path) -> Engine {
         // (`decode_png(read_blob(path))`).
         engine.register_fn("decode_png_file", {
             let base = base.clone();
-            move |p: &str| -> Result<Map, Box<EvalAltResult>> {
+            move |p: &str| -> Result<Image, Box<EvalAltResult>> {
                 let full = resolve(&base, p);
                 let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("decode_png_file: cannot read {}: {e}", full.display()).into()
@@ -153,11 +160,20 @@ fn engine(base_dir: &Path) -> Engine {
     #[cfg(feature = "rand")]
     RandomPackage::new().register_into_engine(&mut engine);
 
-    // PNG decoding for scripts: `decode_png(blob)` → a map of width/height and
-    // interleaved RGBA pixels (typically fed an `open_file(...).read_blob()`).
+    // PNG decoding for scripts: `decode_png(blob)` → an opaque image handle
+    // (typically fed an `open_file(...).read_blob()`).
+    engine.register_type_with_name::<Image>("image");
     engine.register_fn("decode_png", decode_png);
 
-    // Pixel/tile accessors over a `decode_png` map, so scripts don't recompute
+    // Dimensions, and the whole pixel plane on demand. `pixels` is built only
+    // when a script asks for it — materialising `width * height * 4` Rhai values
+    // costs seconds and hundreds of megabytes on a full-resolution image, and
+    // the accessors below cover every use of it.
+    engine.register_get("width", img_width);
+    engine.register_get("height", img_height);
+    engine.register_get("pixels", img_pixels);
+
+    // Pixel/tile accessors over an image, so scripts don't recompute
     // `(y * width + x) * 4` offsets by hand:
     //   `img.r(x, y)`            → the pixel's red channel (grayscale value)
     //   `img.pixel(x, y)`        → `[r, g, b, a]`
@@ -165,6 +181,15 @@ fn engine(base_dir: &Path) -> Engine {
     engine.register_fn("r", img_channel_r);
     engine.register_fn("pixel", img_pixel);
     engine.register_fn("tile", img_tile);
+
+    // Cell matching: locate a `w`×`h` cell of one image among the cells of a
+    // bank image (a CHR sheet, tile sheet, …), comparing NES shade indices.
+    //   `bank.find_cell(src, col, row, w, h)`         → index, or -1
+    //   `bank.cell_equals(i, src, col, row, w, h)`    → does cell `i` match?
+    //   `bank.nearest_cell(src, col, row, w, h)`      → closest index (never -1)
+    engine.register_fn("find_cell", img_find_cell);
+    engine.register_fn("cell_equals", img_cell_equals);
+    engine.register_fn("nearest_cell", img_nearest_cell);
 
     // Palette quantization. `quantize(value, thresholds)` counts how many
     // ascending `thresholds` `value` reaches (also accepts an array of values);
@@ -189,94 +214,119 @@ fn resolve(base: &Path, p: &str) -> PathBuf {
     }
 }
 
+/// A decoded image, as scripts see it.
+///
+/// The pixels live behind an [`Arc`], so cloning an `Image` — which Rhai does
+/// for *every* function argument that is not the method receiver — is a refcount
+/// bump rather than a copy of the whole image. Handing an image to a helper
+/// function is therefore free, and scripts can factor image work out of
+/// `custom()` without falling off a performance cliff.
+#[derive(Clone)]
+struct Image(Arc<ImageData>);
+
+/// The pixel planes behind an [`Image`].
+struct ImageData {
+    width: usize,
+    height: usize,
+    /// `width * height * 4` bytes in row-major `R, G, B, A` order.
+    rgba: Vec<u8>,
+    /// `width * height` NES shade indices (0–3): each pixel's red channel put
+    /// through the same snapping `nes_shade` uses. Precomputed so cell matching
+    /// compares whole rows as byte slices.
+    shades: Vec<u8>,
+}
+
+impl ImageData {
+    /// Byte offset of pixel `(x, y)` in [`Self::rgba`].
+    fn offset(&self, x: usize, y: usize) -> usize {
+        (y * self.width + x) * 4
+    }
+
+    /// The shades of the pixel row `[x0, x0 + w)` at `y`.
+    fn shade_row(&self, x0: usize, y: usize, w: usize) -> &[u8] {
+        let start = y * self.width + x0;
+        &self.shades[start..start + w]
+    }
+}
+
 /// `decode_png(blob)` — decode PNG bytes (e.g. from `open_file(path).read_blob()`)
-/// into `#{ width: int, height: int, pixels: [r, g, b, a, …] }`, where `pixels`
-/// holds `width * height * 4` integers in row-major RGBA order. Throws if the
-/// blob is not a valid PNG.
+/// into an image handle exposing `width`, `height`, `pixels` and the pixel
+/// accessors. Throws if the blob is not a valid PNG.
 // Rhai's `register_fn` takes the argument by value (or `&mut`); owned lets it be
 // called uniformly on variables, temporaries, and constants.
 #[allow(clippy::needless_pass_by_value)]
-fn decode_png(blob: Blob) -> Result<Map, Box<EvalAltResult>> {
+fn decode_png(blob: Blob) -> Result<Image, Box<EvalAltResult>> {
     let img = nessemble_media::decode_png_rgba(&blob)
         .map_err(|_| -> Box<EvalAltResult> { "decode_png: input is not a valid PNG".into() })?;
-    let pixels: Array = img
+    let shades = img
+        .rgba
+        .iter()
+        .step_by(4)
+        .map(|&r| nes_shade_of(i64::from(r)) as u8)
+        .collect();
+    Ok(Image(Arc::new(ImageData {
+        width: img.width as usize,
+        height: img.height as usize,
+        rgba: img.rgba,
+        shades,
+    })))
+}
+
+/// `img.width` — the image width in pixels.
+fn img_width(img: &mut Image) -> i64 {
+    img.0.width as i64
+}
+
+/// `img.height` — the image height in pixels.
+fn img_height(img: &mut Image) -> i64 {
+    img.0.height as i64
+}
+
+/// `img.pixels` — every channel as a flat, row-major `[r, g, b, a, …]` array of
+/// `width * height * 4` integers.
+///
+/// Built on demand: for a full-resolution image this is tens of millions of Rhai
+/// values, so decoding must not pay for it up front. Prefer `img.pixel(x, y)` /
+/// `img.tile(…)`, which read straight from the decoded bytes.
+fn img_pixels(img: &mut Image) -> Array {
+    img.0
         .rgba
         .iter()
         .map(|&b| Dynamic::from(i64::from(b)))
-        .collect();
-    let mut map = Map::new();
-    map.insert("width".into(), Dynamic::from(i64::from(img.width)));
-    map.insert("height".into(), Dynamic::from(i64::from(img.height)));
-    map.insert("pixels".into(), Dynamic::from(pixels));
-    Ok(map)
+        .collect()
 }
 
-/// Read the `width`/`height` integer fields of a `decode_png`-style map.
-fn img_dims(img: &Map) -> Result<(i64, i64), Box<EvalAltResult>> {
-    let field = |k: &str| -> Result<i64, Box<EvalAltResult>> {
-        img.get(k)
-            .and_then(|d| d.as_int().ok())
-            .ok_or_else(|| -> Box<EvalAltResult> {
-                format!("image map is missing integer field `{k}`").into()
-            })
-    };
-    Ok((field("width")?, field("height")?))
-}
-
-/// Borrow a map's `pixels` array (without cloning it) and run `f` over it. The
-/// closure form lets callers hold the read-lock guard without naming its type.
-fn with_pixels<T>(
-    img: &Map,
-    f: impl FnOnce(&Array) -> Result<T, Box<EvalAltResult>>,
-) -> Result<T, Box<EvalAltResult>> {
-    let pixels = img
-        .get("pixels")
-        .and_then(rhai::Dynamic::read_lock::<Array>)
-        .ok_or_else(|| -> Box<EvalAltResult> {
-            "image map is missing an array `pixels` field".into()
-        })?;
-    f(&pixels)
-}
-
-/// Read one RGBA byte from a pixel array, mapping a short array to a clear error.
-fn pixel_byte(pixels: &Array, idx: usize) -> Result<i64, Box<EvalAltResult>> {
-    pixels
-        .get(idx)
-        .and_then(|d| d.as_int().ok())
-        .ok_or_else(|| -> Box<EvalAltResult> { "image `pixels` array is truncated".into() })
+/// Check that pixel `(x, y)` is inside `img`, naming `call` in the error.
+fn pixel_in_bounds(call: &str, img: &ImageData, x: i64, y: i64) -> Result<(), Box<EvalAltResult>> {
+    let (w, h) = (img.width as i64, img.height as i64);
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return Err(format!("{call}: pixel ({x}, {y}) is out of bounds for {w}x{h} image").into());
+    }
+    Ok(())
 }
 
 /// `img.r(x, y)` — the red channel of pixel `(x, y)`. Images used by these
 /// scripts are grayscale (R == G == B), so this is the shade value.
-fn img_channel_r(img: &mut Map, x: i64, y: i64) -> Result<i64, Box<EvalAltResult>> {
-    let (w, h) = img_dims(img)?;
-    if x < 0 || y < 0 || x >= w || y >= h {
-        return Err(format!("pixel ({x}, {y}) is out of bounds for {w}x{h} image").into());
-    }
-    with_pixels(img, |pixels| pixel_byte(pixels, ((y * w + x) * 4) as usize))
+fn img_channel_r(img: &mut Image, x: i64, y: i64) -> Result<i64, Box<EvalAltResult>> {
+    pixel_in_bounds("r", &img.0, x, y)?;
+    Ok(i64::from(img.0.rgba[img.0.offset(x as usize, y as usize)]))
 }
 
 /// `img.pixel(x, y)` — the pixel as a `[r, g, b, a]` array.
-fn img_pixel(img: &mut Map, x: i64, y: i64) -> Result<Array, Box<EvalAltResult>> {
-    let (w, h) = img_dims(img)?;
-    if x < 0 || y < 0 || x >= w || y >= h {
-        return Err(format!("pixel ({x}, {y}) is out of bounds for {w}x{h} image").into());
-    }
-    let base = ((y * w + x) * 4) as usize;
-    with_pixels(img, |pixels| {
-        let mut out = Array::with_capacity(4);
-        for k in 0..4 {
-            out.push(Dynamic::from(pixel_byte(pixels, base + k)?));
-        }
-        Ok(out)
-    })
+fn img_pixel(img: &mut Image, x: i64, y: i64) -> Result<Array, Box<EvalAltResult>> {
+    pixel_in_bounds("pixel", &img.0, x, y)?;
+    let base = img.0.offset(x as usize, y as usize);
+    Ok(img.0.rgba[base..base + 4]
+        .iter()
+        .map(|&b| Dynamic::from(i64::from(b)))
+        .collect())
 }
 
 /// `img.tile(col, row, tw, th)` — the `tw`×`th` block at tile coordinate
 /// `(col, row)` as a flat, row-major array of red-channel (shade) values. Pairs
 /// with `nes_shade`/`quantize` to turn a block into palette indices in one line.
 fn img_tile(
-    img: &mut Map,
+    img: &mut Image,
     col: i64,
     row: i64,
     tw: i64,
@@ -285,24 +335,197 @@ fn img_tile(
     if tw <= 0 || th <= 0 {
         return Err(format!("tile size must be positive, got {tw}x{th}").into());
     }
-    let (w, h) = img_dims(img)?;
-    let (x0, y0) = (col * tw, row * th);
-    if col < 0 || row < 0 || x0 + tw > w || y0 + th > h {
+    let (w, h) = (img.0.width as i64, img.0.height as i64);
+    let (x0, y0) = (col.saturating_mul(tw), row.saturating_mul(th));
+    if col < 0 || row < 0 || x0.saturating_add(tw) > w || y0.saturating_add(th) > h {
         return Err(format!(
             "tile ({col}, {row}) of size {tw}x{th} is out of bounds for {w}x{h} image"
         )
         .into());
     }
-    with_pixels(img, |pixels| {
-        let mut out = Array::with_capacity((tw * th) as usize);
-        for py in 0..th {
-            for px in 0..tw {
-                let idx = (((y0 + py) * w + (x0 + px)) * 4) as usize;
-                out.push(Dynamic::from(pixel_byte(pixels, idx)?));
+    let (x0, y0) = (x0 as usize, y0 as usize);
+    let mut out = Array::with_capacity((tw * th) as usize);
+    for py in 0..th as usize {
+        for px in 0..tw as usize {
+            out.push(Dynamic::from(i64::from(
+                img.0.rgba[img.0.offset(x0 + px, y0 + py)],
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// Validate a cell size, naming `call` in the error.
+fn cell_size(call: &str, w: i64, h: i64) -> Result<(usize, usize), Box<EvalAltResult>> {
+    if w <= 0 || h <= 0 {
+        return Err(format!("{call}: cell size must be positive, got {w}x{h}").into());
+    }
+    Ok((w as usize, h as usize))
+}
+
+/// Top-left pixel of the `w`×`h` cell at grid position `(col, row)` of `src`,
+/// erroring (rather than panicking) if that cell falls outside the image.
+fn cell_origin(
+    call: &str,
+    src: &ImageData,
+    col: i64,
+    row: i64,
+    w: usize,
+    h: usize,
+) -> Result<(usize, usize), Box<EvalAltResult>> {
+    let (iw, ih) = (src.width as i64, src.height as i64);
+    let (x0, y0) = (col.saturating_mul(w as i64), row.saturating_mul(h as i64));
+    if col < 0 || row < 0 || x0.saturating_add(w as i64) > iw || y0.saturating_add(h as i64) > ih {
+        return Err(format!(
+            "{call}: cell ({col}, {row}) of size {w}x{h} is out of bounds for {iw}x{ih} image"
+        )
+        .into());
+    }
+    Ok((x0 as usize, y0 as usize))
+}
+
+/// How the bank image is gridded into `w`×`h` cells: `(columns, rows)`, using
+/// `floor(width / w)` by `floor(height / h)` — the same gridding `tile()` uses,
+/// so a bank whose dimensions are not whole multiples simply has the ragged
+/// right/bottom edge left out. Errors if no whole cell fits.
+fn bank_grid(
+    call: &str,
+    bank: &ImageData,
+    w: usize,
+    h: usize,
+) -> Result<(usize, usize), Box<EvalAltResult>> {
+    let (cols, rows) = (bank.width / w, bank.height / h);
+    if cols == 0 || rows == 0 {
+        return Err(format!(
+            "{call}: {}x{} bank image has no whole {w}x{h} cells",
+            bank.width, bank.height
+        )
+        .into());
+    }
+    Ok((cols, rows))
+}
+
+/// Top-left pixel of cell `index` of a bank gridded into `cols` columns.
+fn bank_cell_origin(index: usize, cols: usize, w: usize, h: usize) -> (usize, usize) {
+    ((index % cols) * w, (index / cols) * h)
+}
+
+/// Do the two `w`×`h` cells draw the same thing? Compares NES shade indices, so
+/// pixels that differ only below the snapping threshold — e.g. data stashed in
+/// the low nibble of a byte — compare equal.
+fn cells_equal(
+    bank: &ImageData,
+    (bx, by): (usize, usize),
+    src: &ImageData,
+    (sx, sy): (usize, usize),
+    w: usize,
+    h: usize,
+) -> bool {
+    (0..h).all(|dy| bank.shade_row(bx, by + dy, w) == src.shade_row(sx, sy + dy, w))
+}
+
+/// Summed absolute per-pixel shade difference between two `w`×`h` cells.
+fn cells_distance(
+    bank: &ImageData,
+    (bx, by): (usize, usize),
+    src: &ImageData,
+    (sx, sy): (usize, usize),
+    w: usize,
+    h: usize,
+) -> u64 {
+    (0..h)
+        .map(|dy| {
+            let (b, s) = (
+                bank.shade_row(bx, by + dy, w),
+                src.shade_row(sx, sy + dy, w),
+            );
+            b.iter()
+                .zip(s)
+                .map(|(&a, &c)| u64::from(a.abs_diff(c)))
+                .sum::<u64>()
+        })
+        .sum()
+}
+
+/// `bank.find_cell(src, col, row, w, h)` — index of the `w`×`h` cell at grid
+/// position `(col, row)` of `src` among `bank`'s `w`×`h` cells, scanning left to
+/// right then top to bottom. The **lowest** matching index wins when several
+/// bank cells draw the same thing; `-1` when none match exactly.
+// `src` is a cheap `Arc` clone, and taking it by value lets Rhai pass variables,
+// temporaries, and constants alike.
+#[allow(clippy::needless_pass_by_value)]
+fn img_find_cell(
+    bank: &mut Image,
+    src: Image,
+    col: i64,
+    row: i64,
+    w: i64,
+    h: i64,
+) -> Result<i64, Box<EvalAltResult>> {
+    let (w, h) = cell_size("find_cell", w, h)?;
+    let origin = cell_origin("find_cell", &src.0, col, row, w, h)?;
+    let (cols, rows) = bank_grid("find_cell", &bank.0, w, h)?;
+    for index in 0..cols * rows {
+        let at = bank_cell_origin(index, cols, w, h);
+        if cells_equal(&bank.0, at, &src.0, origin, w, h) {
+            return Ok(index as i64);
+        }
+    }
+    Ok(-1)
+}
+
+/// `bank.cell_equals(index, src, col, row, w, h)` — does cell `index` of `bank`
+/// draw the same thing as the cell at `(col, row)` of `src`? Cheap validation of
+/// an index a caller already has (e.g. one stored alongside the image). An
+/// `index` outside the bank is simply `false`.
+#[allow(clippy::needless_pass_by_value)]
+fn img_cell_equals(
+    bank: &mut Image,
+    index: i64,
+    src: Image,
+    col: i64,
+    row: i64,
+    w: i64,
+    h: i64,
+) -> Result<bool, Box<EvalAltResult>> {
+    let (w, h) = cell_size("cell_equals", w, h)?;
+    let origin = cell_origin("cell_equals", &src.0, col, row, w, h)?;
+    let (cols, rows) = bank_grid("cell_equals", &bank.0, w, h)?;
+    if index < 0 || index >= (cols * rows) as i64 {
+        return Ok(false);
+    }
+    let at = bank_cell_origin(index as usize, cols, w, h);
+    Ok(cells_equal(&bank.0, at, &src.0, origin, w, h))
+}
+
+/// `bank.nearest_cell(src, col, row, w, h)` — index of the bank cell closest to
+/// the cell at `(col, row)` of `src` by summed per-pixel shade distance, the
+/// fallback for a cell with no exact match. Ties go to the lowest index, and a
+/// bank with at least one whole cell always yields an index (never `-1`).
+#[allow(clippy::needless_pass_by_value)]
+fn img_nearest_cell(
+    bank: &mut Image,
+    src: Image,
+    col: i64,
+    row: i64,
+    w: i64,
+    h: i64,
+) -> Result<i64, Box<EvalAltResult>> {
+    let (w, h) = cell_size("nearest_cell", w, h)?;
+    let origin = cell_origin("nearest_cell", &src.0, col, row, w, h)?;
+    let (cols, rows) = bank_grid("nearest_cell", &bank.0, w, h)?;
+    let (mut best, mut best_distance) = (0, u64::MAX);
+    for index in 0..cols * rows {
+        let at = bank_cell_origin(index, cols, w, h);
+        let distance = cells_distance(&bank.0, at, &src.0, origin, w, h);
+        if distance < best_distance {
+            (best, best_distance) = (index, distance);
+            if distance == 0 {
+                break;
             }
         }
-        Ok(out)
-    })
+    }
+    Ok(best as i64)
 }
 
 /// Count how many ascending `thresholds` `value` reaches — the palette index for
@@ -614,6 +837,229 @@ mod tests {
         let src = r#"fn custom(ints, texts) { [decode_png_file("g.png").r(5, 0)] }"#;
         let err = run(src, &[], &[], &dir.0).unwrap_err();
         assert!(err.contains("out of bounds"), "unexpected error: {err}");
+    }
+
+    /// PNG bytes for a grayscale image from row-major shade bytes (`R == G == B`,
+    /// opaque) — the shape of image these scripts actually work with.
+    fn gray_png(width: u32, height: u32, values: &[u8]) -> Vec<u8> {
+        let rgba: Vec<u8> = values.iter().flat_map(|&v| [v, v, v, 255]).collect();
+        png_bytes(width, height, &rgba)
+    }
+
+    /// A 4×4 bank of four 2×2 cells, and a 4×4 source whose cells match cell 0
+    /// (twice over, since cell 2 repeats it), cell 1, cell 3, and nothing.
+    fn cell_fixture(tag: &str) -> TempDir {
+        let dir = TempDir::new(tag);
+        #[rustfmt::skip]
+        let bank = [
+            0, 0,   255, 255,
+            0, 0,   255, 255,
+            0, 0,     0, 255,
+            0, 0,   255,   0,
+        ];
+        // The source repeats the bank's cells with data stashed in the low
+        // nibble of each byte — it snaps away, so the cells still compare equal.
+        #[rustfmt::skip]
+        let src = [
+            0x0F, 0x0F,   0xF0, 0xFF,
+            0x0F, 0x0F,   0xFF, 0xF0,
+               0,  255,     85,   85,
+             255,    0,     85,   85,
+        ];
+        std::fs::write(dir.0.join("bank.png"), gray_png(4, 4, &bank)).unwrap();
+        std::fs::write(dir.0.join("src.png"), gray_png(4, 4, &src)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn find_cell_matches_the_hand_rolled_rhai_scan() {
+        // `bank.find_cell(src, …)` must agree with the loop scripts write today:
+        // compare `nes_shade(bank.tile(…))` to `nes_shade(src.tile(…))` over
+        // every bank cell and take the first hit.
+        let dir = cell_fixture("find-cell");
+        let src = r#"
+            fn custom(ints, texts) {
+                let bank = decode_png_file("bank.png");
+                let src = decode_png_file("src.png");
+                let cols = bank.width / 2;
+                let out = [];
+                for row in 0..2 {
+                    for col in 0..2 {
+                        let needle = nes_shade(src.tile(col, row, 2, 2));
+                        let want = -1;
+                        for i in 0..(cols * (bank.height / 2)) {
+                            if want == -1 &&
+                               nes_shade(bank.tile(i % cols, i / cols, 2, 2)) == needle {
+                                want = i;
+                            }
+                        }
+                        // +1 so the -1 'no match' case survives the byte encoding.
+                        out.push(bank.find_cell(src, col, row, 2, 2) + 1);
+                        out.push(want + 1);
+                    }
+                }
+                out
+            }
+        "#;
+        let out = run(src, &[], &[], &dir.0).unwrap();
+        // Cell (0,0) matches bank cells 0 and 2 — the lowest index wins; (1,0)
+        // matches cell 1; (0,1) matches cell 3; (1,1) matches nothing (-1 → 0).
+        assert_eq!(out, vec![1, 1, 2, 2, 4, 4, 0, 0]);
+    }
+
+    #[test]
+    fn cell_equals_accepts_exactly_the_matching_indices() {
+        // True for every bank cell that draws the source cell (including the
+        // duplicate `find_cell` passes over), false elsewhere and out of range.
+        let dir = cell_fixture("cell-equals");
+        let src = r#"
+            fn custom(ints, texts) {
+                let bank = decode_png_file("bank.png");
+                let src = decode_png_file("src.png");
+                let out = [];
+                for i in [0, 1, 2, 3, 4, -1] {
+                    out.push(if bank.cell_equals(i, src, 0, 0, 2, 2) { 1 } else { 0 });
+                }
+                out
+            }
+        "#;
+        // Cells 0 and 2 are the all-dark cell; 4 and -1 are outside the bank.
+        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![1, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn nearest_cell_falls_back_to_the_closest_shade_distance() {
+        let dir = cell_fixture("nearest-cell");
+        let src = r#"
+            fn custom(ints, texts) {
+                let bank = decode_png_file("bank.png");
+                let src = decode_png_file("src.png");
+                [
+                    bank.nearest_cell(src, 1, 1, 2, 2),  // no exact match
+                    bank.nearest_cell(src, 1, 0, 2, 2),  // exact match wins
+                ]
+            }
+        "#;
+        // The unmatched cell is mid-gray (shade 1): distance 4 to the all-dark
+        // cells 0/2, 6 to cell 3, 8 to the all-light cell 1 — so cell 0.
+        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn cell_matching_grids_the_bank_like_tile_does() {
+        // A bank that is not a whole multiple of the cell size uses
+        // floor(width/w) x floor(height/h) cells; the ragged edge is not a cell.
+        let dir = TempDir::new("ragged-bank");
+        #[rustfmt::skip]
+        let bank = [
+            0, 0,   255, 255,   255,
+            0, 0,   255, 255,   255,
+            9, 9,     9,   9,     9,
+        ];
+        std::fs::write(dir.0.join("bank.png"), gray_png(5, 3, &bank)).unwrap();
+        std::fs::write(dir.0.join("src.png"), gray_png(2, 2, &[255; 4])).unwrap();
+        let src = r#"
+            fn custom(ints, texts) {
+                let bank = decode_png_file("bank.png");
+                let src = decode_png_file("src.png");
+                [
+                    bank.find_cell(src, 0, 0, 2, 2) + 1,
+                    if bank.cell_equals(2, src, 0, 0, 2, 2) { 1 } else { 0 },
+                ]
+            }
+        "#;
+        // Two whole cells (the third column and third row are partial): the
+        // light cell is index 1, and index 2 is out of range.
+        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![2, 0]);
+    }
+
+    #[test]
+    fn cell_matching_reports_bad_arguments_by_call_name() {
+        let dir = cell_fixture("cell-errors");
+        let cases = [
+            (
+                "bank.find_cell(src, 9, 0, 2, 2)",
+                "find_cell",
+                "out of bounds",
+            ),
+            (
+                "bank.find_cell(src, 0, 0, 0, 2)",
+                "find_cell",
+                "must be positive",
+            ),
+            (
+                "bank.nearest_cell(src, 0, 0, 8, 8)",
+                "nearest_cell",
+                "out of bounds",
+            ),
+            (
+                "bank.cell_equals(0, src, -1, 0, 2, 2)",
+                "cell_equals",
+                "out of bounds",
+            ),
+        ];
+        for (call, name, wanted) in cases {
+            let script = format!(
+                r#"fn custom(ints, texts) {{
+                    let bank = decode_png_file("bank.png");
+                    let src = decode_png_file("src.png");
+                    [{call}]
+                }}"#
+            );
+            let err = run(&script, &[], &[], &dir.0).unwrap_err();
+            assert!(err.contains(name), "{call}: error did not name it: {err}");
+            assert!(err.contains(wanted), "{call}: unexpected error: {err}");
+        }
+
+        // A bank too small to hold one cell is an error, not a silent -1.
+        std::fs::write(dir.0.join("tiny.png"), gray_png(1, 1, &[0])).unwrap();
+        let script = r#"
+            fn custom(ints, texts) {
+                [decode_png_file("tiny.png")
+                    .find_cell(decode_png_file("src.png"), 0, 0, 2, 2)]
+            }
+        "#;
+        let err = run(script, &[], &[], &dir.0).unwrap_err();
+        assert!(
+            err.contains("find_cell") && err.contains("no whole 2x2 cells"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn passing_an_image_to_a_function_does_not_copy_it() {
+        // An image is a handle, so handing it to a helper is a refcount bump.
+        // Back when it was a map of every pixel, each call cloned the whole
+        // pixel array and a loop like this took minutes; the bound here is
+        // deliberately loose — it is a cliff detector, not a benchmark.
+        let dir = TempDir::new("img-handle");
+        let side = 512;
+        let values: Vec<u8> = (0..side * side).map(|i| (i % 256) as u8).collect();
+        std::fs::write(
+            dir.0.join("big.png"),
+            gray_png(side as u32, side as u32, &values),
+        )
+        .unwrap();
+        let src = r#"
+            fn probe(img, x) { img.pixel(x, 0)[0] }
+            fn custom(ints, texts) {
+                let img = decode_png_file("big.png");
+                let sum = 0;
+                for x in 0..20000 {
+                    sum += probe(img, x % 512);
+                }
+                [sum % 256]
+            }
+        "#;
+        let started = std::time::Instant::now();
+        let out = run(src, &[], &[], &dir.0).unwrap();
+        let elapsed = started.elapsed();
+        let expected: i64 = (0..20000).map(|x: i64| (x % 512) % 256).sum();
+        assert_eq!(out, vec![(expected % 256) as u8]);
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "20k image reads through a helper took {elapsed:?} — images are being copied"
+        );
     }
 
     #[test]
