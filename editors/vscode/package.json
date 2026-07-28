@@ -1,0 +1,88 @@
+{
+  "name": "nessemble",
+  "displayName": "nessemble",
+  "description": "NES 6502 assembly support for VS Code, powered by the nessemble language server.",
+  "publisher": "kevinselwyn",
+  "version": "0.0.0-dev",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kevinselwyn/nessemble-rs.git",
+    "directory": "editors/vscode"
+  },
+  "homepage": "https://kevinselwyn.github.io/nessemble-rs/docs/editor/",
+  "bugs": {
+    "url": "https://github.com/kevinselwyn/nessemble-rs/issues"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "nes",
+    "6502",
+    "assembly",
+    "assembler",
+    "nessemble"
+  ],
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:nessemble"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "nessemble",
+        "aliases": [
+          "nessemble",
+          "NES assembly"
+        ],
+        "extensions": [
+          ".asm",
+          ".s"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "nessemble",
+      "properties": {
+        "nessemble.serverPath": {
+          "type": "string",
+          "default": "nessemble",
+          "markdownDescription": "Path to the `nessemble` executable that provides the language server. Left as `nessemble`, it is looked up on your `PATH`.",
+          "scope": "machine-overridable"
+        },
+        "nessemble.serverArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "lsp"
+          ],
+          "markdownDescription": "Arguments passed to `#nessemble.serverPath#` to start the language server.",
+          "scope": "machine-overridable"
+        },
+        "nessemble.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Log the traffic between VS Code and the nessemble language server to the output channel.",
+          "scope": "window"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

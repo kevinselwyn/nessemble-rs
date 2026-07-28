@@ -8,6 +8,16 @@
 | Windows 32-bit | `nessemble_*_win32.exe`, `…_win32.msi`     |
 | Windows 64-bit | `nessemble_*_win64.exe`, `…_win64.msi`     |
 | WebAssembly    | `nessemble_*_wasm.tar.gz` (in-browser assembler) |
+| VS Code        | `nessemble_*.vsix` (editor extension)      |
+
+#### VS Code / Cursor extension
+
+`nessemble_*.vsix` is a language-server client — install `nessemble` itself
+first, then:
+
+```sh
+code --install-extension nessemble_*.vsix
+```
 
 #### macOS: "Apple could not verify…" on the `.pkg`
 

@@ -19,6 +19,8 @@ name: Publish
 #   Windows 32-bit nessemble_<v>_win32.exe  nessemble_<v>_win32.msi
 #   Windows 64-bit nessemble_<v>_win64.exe  nessemble_<v>_win64.msi
 #   WebAssembly    nessemble_<v>_wasm.tar.gz  (the in-browser assembler bundle)
+#   VS Code        nessemble_<v>.vsix  (the editor extension: an LSP client for
+#                  `nessemble lsp`; needs `nessemble` on the user's PATH)
 #   Container      ghcr.io/<owner>/<repo>:<v> and :latest  (static musl binary
 #                  on `scratch`; not a release asset — pushed straight to GHCR
 #                  so other projects can `COPY --from` the binary. See Dockerfile.)
@@ -222,6 +224,31 @@ jobs:
           name: wasm
           path: "*.tar.gz"
 
+  # ------------------------------------------------------------ VS Code .vsix
+  #
+  # The editor extension (`editors/vscode`): a thin language-server client that
+  # registers the `nessemble` language and spawns `nessemble lsp`. It carries no
+  # binary — it expects `nessemble` on the user's PATH — so one universal .vsix
+  # covers every platform and the job needs no Rust build. `xtask vsix` stamps
+  # the workspace version into the extension manifest before packaging, so the
+  # extension version always matches the release.
+  vscode:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Package extension
+        run: cargo run -p xtask -- vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode
+          path: "*.vsix"
+
   # ------------------------------------------------------------- Container image
   #
   # A binary-only image (fully-static musl `nessemble` on `scratch`, see
@@ -288,7 +315,7 @@ jobs:
   # distinct identity, so its release publishes normally and Pages deploys the
   # docs for the new version. See ref/repo/release-app-setup.md.
   release:
-    needs: [version, linux, windows, macos, wasm]
+    needs: [version, linux, windows, macos, wasm, vscode]
     if: needs.version.outputs.exists == 'false'
     runs-on: ubuntu-latest
     permissions:
@@ -352,3 +379,4 @@ jobs:
             artifacts/**/*.msi
             artifacts/**/*.pkg
             artifacts/**/*.tar.gz
+            artifacts/**/*.vsix

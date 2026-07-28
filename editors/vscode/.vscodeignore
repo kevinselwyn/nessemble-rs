@@ -1,0 +1,10 @@
+# Everything the packaged extension does not need at runtime. `vsce` already
+# prunes devDependencies; this trims the rest so the .vsix stays small.
+.vscode/**
+.gitignore
+node_modules/.bin/**
+node_modules/**/*.map
+node_modules/**/{test,tests,example,examples,docs}/**
+node_modules/**/{.github,.editorconfig,.eslintrc*,.npmignore,tsconfig*.json}
+**/*.tsbuildinfo
+package-lock.json

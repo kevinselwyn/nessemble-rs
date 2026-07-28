@@ -49,6 +49,25 @@ Release artifacts are produced by the CI release workflow
 - **`.pkg`** (macOS) via `pkgbuild`.
 - **`.tar.gz`** (macOS) — the raw binary, as a signing-free alternative to the
   unsigned `.pkg` (which Gatekeeper blocks after download).
+- **`.vsix`** (VS Code) — the editor extension in `editors/vscode/`, packaged
+  with [`vsce`](https://github.com/microsoft/vscode-vsce).
+
+### The VS Code extension
+
+```text
+cargo run -p xtask -- vsix
+```
+
+Needs `npm` and `npx` on `PATH`; nothing else — the extension is plain
+JavaScript with no compile step. The task builds from a staged copy under
+`target/vsix-build/`, stamping the workspace version into the extension
+manifest on the way (`editors/vscode/package.json` holds a `0.0.0-dev`
+placeholder, so the shipped extension version always tracks the release and no
+version string is hand-edited). The result is `nessemble_<version>.vsix` in the
+repository root.
+
+CI packages the extension on every pull request, so a broken manifest or a
+stale `package-lock.json` fails there rather than during a release.
 
 ## Scripting
 

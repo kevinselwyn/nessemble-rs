@@ -14,8 +14,32 @@ Release artifacts are provided for all five supported platforms:
 | Windows 32-bit | `nessemble_<v>_win32.exe`, `…_win32.msi`        |
 | Windows 64-bit | `nessemble_<v>_win64.exe`, `…_win64.msi`        |
 
+Two more artifacts accompany every release:
+
+- `nessemble_<v>.vsix` — the [VS Code extension](#vs-code-extension).
+- `nessemble_<v>_wasm.tar.gz` — the in-browser assembler bundle (the
+  WebAssembly build plus the `<nessemble-assembler>` web component).
+
 A `linux/amd64` [container image](#container-image) is also published to GHCR for
 CI pipelines and coding agents that only need the executable.
+
+## VS Code extension
+
+`nessemble_<v>.vsix` is the VS Code (and Cursor) extension: a client for the
+assembler's built-in [language server](editor.md), giving you diagnostics, lint
+hints, completion, hover, formatting, semantic highlighting, and
+go-to-definition on `.asm`/`.s` files.
+
+It contains no copy of the assembler, so **install `nessemble` itself first** —
+the extension runs the `nessemble` on your `PATH`. One universal `.vsix` works
+on every platform:
+
+```sh
+code --install-extension nessemble_<v>.vsix
+```
+
+Or use the Extensions view's *Install from VSIX…* command. See
+[Editor support](editor.md#vs-code--cursor) for settings and format-on-save.
 
 ## macOS: "Apple could not verify…"
 
