@@ -98,6 +98,10 @@ loop:
     BRK
 </nessemble-assembler>
 
+A label that names a subroutine can carry its calling convention — the registers
+it takes, returns, and destroys — in comments the tooling reads. See
+[Documenting routines](usage.md#documenting-routines).
+
 ### Temporary
 
 Temporary/un-named labels may also be declared by placing only a colon.

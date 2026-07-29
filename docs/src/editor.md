@@ -28,9 +28,11 @@ Once connected, the server provides:
   read as suggestions distinct from assembler errors. They honor the project's
   [`.nessemblerc` `lint`](usage.md#lint) config (rule severities, comment window,
   ignored label names), and clear as soon as you document the flagged block. The
-  same pass flags a mistyped or misplaced
-  [comment directive](usage.md#comment-directives) — a directive that would
-  otherwise fail silently.
+  same pass checks [routine signatures](usage.md#documenting-routines) against
+  the code — a routine that writes a register its `@nessemble-clobbers` omits is
+  reported where the comment and the code disagree — and flags a mistyped or
+  misplaced [comment directive](usage.md#comment-directives) — a directive that
+  would otherwise fail silently.
 - **Project-aware analysis** — when a workspace folder is open, a file that is
   `.include`d into a larger program is analyzed *in the context of that program*,
   so symbols defined in sibling or parent files are not reported as undefined.
@@ -41,7 +43,9 @@ Once connected, the server provides:
   triggers directive completion. Inside a comment, the
   [comment directives](usage.md#comment-directives) are offered instead of code —
   including `@nessemble-coverage-ignore` pre-filled with `start` and with `end` —
-  each with its documentation.
+  each with its documentation. A comment directly above an undocumented label
+  also offers a **routine signature block**, which scaffolds
+  `@nessemble-param` / `-returns` / `-clobbers` in one insertion.
 - **Formatting** — “format document” applies the opinionated house style
   (indentation, comma spacing, data-block consolidation, routine spacing) while
   preserving comments. It runs the **same engine** as the
@@ -54,7 +58,8 @@ Once connected, the server provides:
   [comment directive](usage.md#comment-directives) additionally gets the
   `documentation` modifier, so themes can set it apart from prose.
 - **Outline & navigation** — a document outline of labels, constants, and
-  macros; go-to-definition (cmd/ctrl-click) and find-all-references for symbols.
+  macros, with a documented routine's clobber list shown in its detail, so a
+  file's register discipline reads at a glance; go-to-definition (cmd/ctrl-click) and find-all-references for symbols.
   With a workspace folder open, go-to-definition follows `.include`s across the
   project, so it reaches a symbol defined in a sibling or parent file.
 - **Hover** — opcode and addressing-mode details for an instruction, the
@@ -63,6 +68,11 @@ Once connected, the server provides:
   A constant or label is also documented with the run of comment lines
   immediately preceding its definition, so an explanatory comment written above
   a symbol appears when you hover over any use of it.
+  A routine carrying [signature annotations](usage.md#documenting-routines)
+  additionally shows its calling convention as a table — what it takes, what it
+  returns, and what it clobbers — at **every** use, including the operand of a
+  `JSR`, and including calls into another open file. That is the whole point:
+  "does this call eat my `Y`?" is answered without leaving the call site.
   Hovering [`.color`](syntax.md#color) previews the palette it produces: the
   whole argument list is shown as the row of NES colors it maps to, with each
   argument's RGB, the palette index the assembler emits for it, and the color
@@ -76,8 +86,15 @@ Once connected, the server provides:
 - **Rename** — renaming a symbol updates its definition and every use across the
   open buffers.
 - **Code actions** — convert a numeric literal between hexadecimal, decimal, and
-  binary, and rename a deprecated comment directive (`@fmt`) to its canonical
-  spelling (`@nessemble-format`).
+  binary, rename a deprecated comment directive (`@fmt`) to its canonical
+  spelling (`@nessemble-format`), scaffold a signature block over an
+  undocumented routine, and — when the linter catches a routine writing a
+  register its `@nessemble-clobbers` omits — add that register to the list,
+  keeping the list in canonical order and any trailing prose intact.
+- **Inlay hints** — a `JSR` whose target declares a clobber list shows that list
+  at the end of the call line (`JSR draw_sprite  ‹A, X, Y›`), so the cost of a
+  call is visible without hovering. Editors toggle inlay hints on and off with
+  their own setting.
 - **Custom pseudo-instructions** — directives declared in a `--pseudo`-style
   mapping file in the workspace are recognized, so they aren't flagged as unknown,
   and cmd/ctrl-click on one opens the script that implements it.

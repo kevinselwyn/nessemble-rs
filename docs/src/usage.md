@@ -190,6 +190,10 @@ The rules:
 | `unknown-comment-directive` | A [comment directive](#comment-directives) naming no known directive (`@nessemble-formt`), or a known one with wrong arguments (`@nessemble-format stride=x`). |
 | `deprecated-comment-directive` | A directive written with a deprecated alias — today, `@fmt` for `@nessemble-format`. |
 | `ineffective-comment-directive` | A well-formed directive that cannot apply where it is written: in a trailing comment, a `-next-line` with no following line, a stride hint with no data run after it, or an unbalanced ignore-region bound. (An unclosed region is *not* flagged — that is the documented whole-file opt-out.) |
+| `invalid-routine-signature` | A [routine annotation](#documenting-routines) that binds to no label (code intervenes, or the file ends), or names the same slot twice. |
+| `undeclared-clobber` | A routine that **writes a register its `@nessemble-clobbers` omits** — the annotation and the code disagree. Only routines that declared a clobber list are checked. |
+| `overdeclared-clobber` | A routine that declares a clobber its body cannot produce. Fires only when the body holds no unknowns (no macro invocation, unannotated call, indirect jump, or data run). |
+| `require-routine-doc` | A called routine with no annotations at all. **Off by default** — switch it on per project once you are using the convention. |
 
 - Each finding prints as `LINE:COL  severity  message  rule-id`, grouped by file,
   with a problem-count footer; a clean run prints `✓ No problems.`
@@ -202,10 +206,12 @@ The rules:
 - `--config <file>` uses `<file>` as the [`.nessemblerc`](#nessemblerc);
   `--no-config` ignores any `.nessemblerc` and uses built-in defaults.
 
-Rules, their severities, the comment window, and the label-name ignore list are
-configured under the [`lint`](#lint) key of `.nessemblerc`. The editor
+Every rule defaults to `warn` except `require-routine-doc`, which defaults to
+`off`. Rules, their severities, the comment window, and the label-name ignore
+list are configured under the [`lint`](#lint) key of `.nessemblerc`. The editor
 [Language Server](editor.md) surfaces the same findings inline as you type,
-including a quick fix for the deprecated directive spelling.
+including quick fixes for the deprecated directive spelling and for a register
+missing from a clobber list.
 
 ### coverage &lt;infile.asm&gt; --cdl &lt;file.cdl&gt; ...
 
@@ -272,9 +278,15 @@ do.
 | `@nessemble-format stride=N[,N,...]` | the next data run (skipping blank, comment, and label lines) | [`format`](#format-opt--path-) |
 | `@nessemble-coverage-ignore-next-line` | the next significant line | [`coverage`](#coverage-infileasm---cdl-filecdl-) |
 | `@nessemble-coverage-ignore start` \| `end` | every line between the two | [`coverage`](#coverage-infileasm---cdl-filecdl-) |
+| `@nessemble-param <slot> [description]` | the routine below — a register it reads | [`lint`](#lint-opt--path-), [editor](editor.md) |
+| `@nessemble-returns <slot> [description]` | the routine below — a slot it defines | [`lint`](#lint-opt--path-), [editor](editor.md) |
+| `@nessemble-clobbers <slot>[, ...]` \| `none` | the routine below — what it destroys | [`lint`](#lint-opt--path-), [editor](editor.md) |
 | `@fmt stride=N[,N,...]` | *deprecated alias of `@nessemble-format`* | [`format`](#format-opt--path-) |
 
 The rules are the same for every directive:
+
+The routine annotations are described in [Documenting
+routines](#documenting-routines); the rules below apply to every directive.
 
 - It must be **on its own line** — a directive in a trailing comment
   (`LDA #$00 ; @nessemble-…`) does nothing, and is reported.
@@ -332,6 +344,85 @@ mapper3_init:
   or to see what the directives are hiding. The stdout summary always names how
   much was excluded, and the JSON report carries `ignored` / `ignoredFiles`
   counts.
+
+### Documenting routines
+
+The 6502 has no calling convention: every routine invents its own, and the only
+record of it is usually a comment, if that. Three directives write that
+convention down where the tools can read it — which registers a routine takes,
+what it hands back, and what it destroys:
+
+```asm
+; Draw one metasprite from `metasprite_table` into the OAM shadow buffer.
+;
+; @nessemble-param   A  metasprite index into `metasprite_table`
+; @nessemble-param   X  screen x, in pixels
+; @nessemble-param   Y  screen y, in pixels
+; @nessemble-returns C  set when the sprite was clipped off-screen
+; @nessemble-clobbers A, X, Y, [oam_cursor]
+draw_metasprite:
+    ...
+    RTS
+```
+
+Hovering **any** use of `draw_metasprite` — including the operand of a `JSR`,
+in this file or another open one — shows that table, so "does this call eat my
+`Y`?" is answered without leaving the call site.
+
+**Slots.** A slot is a place a value lives across a call. The vocabulary is
+closed, so a typo is reported rather than silently accepted:
+
+| Slot | Meaning |
+| --- | --- |
+| `A`, `X`, `Y` | the registers |
+| `S` | the stack pointer |
+| `P` | the whole status register |
+| `C`, `Z`, `N`, `V`, `D`, `I` | one flag — `@nessemble-returns C` is how a 6502 routine returns a boolean |
+| `[symbol]` | a named memory location, e.g. `[oam_cursor]` |
+| `$NN`, `$NNNN`, `$NN-$NN` | an address or inclusive range, e.g. `$10-$1F` |
+| `none` | *(clobbers only)* preserves everything |
+
+Slot names are case-insensitive (`a` and `A` both work) and always render
+upper-case. Memory needs its brackets or its `$`: that is what lets
+`@nessemble-clobbers AX` be reported as a bad slot instead of quietly becoming a
+symbol named `AX`.
+
+**What the tags mean.**
+
+- `@nessemble-param` and `@nessemble-returns` take **one slot each**, followed by
+  a free-text description (a `;` in it is part of the description). Repeat the
+  tag for each slot.
+- `@nessemble-clobbers` takes a **list**, and means *anything not listed is
+  preserved*. A returned slot is clobbered by definition and need not be
+  repeated.
+- `@nessemble-clobbers none` claims the routine preserves everything. That is
+  different from writing no `@nessemble-clobbers` at all, which claims nothing.
+- Annotations bind to the **first label below them**; blank lines and prose
+  comments in between are skipped, so a summary can sit above the tags. A line
+  of code in between binds them to nothing, and is reported.
+
+**The declaration is checked.** `nessemble lint` compares each declared clobber
+list against what the routine actually writes:
+
+```text
+src/prg/sprite.asm
+     42:1   warning  routine `draw_metasprite` writes Y but does not declare it clobbered  undeclared-clobber
+```
+
+- Only `A`, `X`, `Y`, and `S` are verified. Flags are documentation — nearly
+  every instruction disturbs `N`/`Z`, so checking them would flag everything.
+  Memory slots are documentation too.
+- Only routines that **declared** a clobber list are checked, so a project adopts
+  this one routine at a time.
+- A routine's body runs from its label to the next block-opening label. A call to
+  another **annotated** routine contributes that routine's declared clobbers; a
+  call to an unannotated one, a macro invocation, an indirect jump, or a data run
+  inside the body makes the body "not fully understood", which silences
+  `overdeclared-clobber` but never `undeclared-clobber`.
+- A routine that falls through into the next one is under-reported rather than
+  over-reported: the analysis prefers a missed warning to a wrong one.
+- The stack pointer counts as clobbered only for `TXS`. Pushes and pulls move
+  `S`, but routines balance them.
 
 ## .nessemblerc
 
@@ -470,8 +561,8 @@ paths from directory walks. It is discovered the same way as `.nessemblerc`.
 
 The [`lint`](#lint-opt--path-) subcommand is configured under a `lint` key in the
 same `.nessemblerc`. With no config the linter is on with its defaults (every
-rule at `"warn"`, a comment window of `3`, and no ignores), so `nessemble lint`
-is useful out of the box.
+rule at `"warn"` except `require-routine-doc`, which is `"off"`; a comment window
+of `3`; and no ignores), so `nessemble lint` is useful out of the box.
 
 ```json
 {
@@ -479,7 +570,8 @@ is useful out of the box.
     "rules": {
       "require-block-comment": ["warn", { "window": 3 }],
       "unknown-comment-directive": "error",
-      "deprecated-comment-directive": "off"
+      "deprecated-comment-directive": "off",
+      "require-routine-doc": "warn"
     },
     "ignore": ["^loc_[0-9A-Fa-f]", "^data_[0-9A-Fa-f]"]
   }
@@ -499,14 +591,15 @@ assembler's own errors and warnings.
 
 **Rule options.** `require-block-comment` takes a `window` (default `3`): a block
 label is clean if any line within `±window` lines carries a comment. The
-directive rules take no options.
+directive and routine-signature rules take no options.
 
 **Ignore patterns.** List the name shapes that should never be flagged — most
 often machine-generated disassembly labels (`loc_8000:`, `data_c123:`). No
 patterns ship by default, so a fresh project flags every undocumented block until
 you opt specific shapes out. (Ignore patterns match label *names*, so they do not
 affect the [comment-directive](#comment-directives) rules; silence those with a
-severity of `"off"`.)
+severity of `"off"`. They *do* apply to the routine rules, which are keyed by the
+routine's label name.)
 
 Per-glob [`overrides`](#overrides) may carry a `lint` block too, so a data-heavy
 directory can loosen or disable a rule for its files:
