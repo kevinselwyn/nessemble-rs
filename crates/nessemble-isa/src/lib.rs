@@ -121,6 +121,66 @@ pub const META_BOUNDARY: u8 = 0x01;
 /// Instruction is an undocumented ("illegal") opcode.
 pub const META_UNDOCUMENTED: u8 = 0x02;
 
+/// A set of 6502 registers, as a bitmask over `A`, `X`, `Y`, and `S`.
+///
+/// Flags are deliberately absent: nearly every instruction disturbs `N`/`Z`, so
+/// a routine that does not declare them is not lying in any way a caller can act
+/// on. See `plans/010-routine-signatures.md` §8.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegSet(u8);
+
+/// The accumulator bit of a [`RegSet`].
+pub const REG_A: u8 = 1 << 0;
+/// The `X` bit of a [`RegSet`].
+pub const REG_X: u8 = 1 << 1;
+/// The `Y` bit of a [`RegSet`].
+pub const REG_Y: u8 = 1 << 2;
+/// The stack-pointer bit of a [`RegSet`].
+pub const REG_S: u8 = 1 << 3;
+
+impl RegSet {
+    /// The empty set.
+    pub const EMPTY: RegSet = RegSet(0);
+    /// Just the accumulator.
+    pub const A: RegSet = RegSet(REG_A);
+    /// Just `X`.
+    pub const X: RegSet = RegSet(REG_X);
+    /// Just `Y`.
+    pub const Y: RegSet = RegSet(REG_Y);
+    /// Just the stack pointer.
+    pub const S: RegSet = RegSet(REG_S);
+
+    /// Build a set from its raw bits (`REG_*`). Used by the generated table.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> RegSet {
+        RegSet(bits)
+    }
+
+    /// The raw bits.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether every register in `other` is in this set.
+    #[must_use]
+    pub const fn contains(self, other: RegSet) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The union of two sets.
+    #[must_use]
+    pub const fn union(self, other: RegSet) -> RegSet {
+        RegSet(self.0 | other.0)
+    }
+}
+
 /// A single 6502 opcode definition.
 #[derive(Debug, Clone, Copy)]
 pub struct Opcode {
@@ -136,6 +196,16 @@ pub struct Opcode {
     pub timing: u8,
     /// Metadata bitmask (see `META_*`).
     pub meta: u8,
+    /// Registers this instruction writes, including those its addressing mode
+    /// implies. Empty when [`effects_known`](Opcode::effects_known) is false.
+    pub writes: RegSet,
+    /// Registers this instruction reads, including those its addressing mode
+    /// implies.
+    pub reads: RegSet,
+    /// Whether the register effects are recorded for this opcode. False for the
+    /// undocumented opcodes, whose effects the verifier treats as unknown rather
+    /// than guessing.
+    pub effects_known: bool,
 }
 
 impl Opcode {
@@ -218,6 +288,93 @@ mod tests {
         assert_eq!(nop.mnemonic, "NOP");
         assert_eq!(nop.mode, AddressingMode::Implied);
         assert!(!nop.is_undocumented());
+    }
+
+    #[test]
+    fn every_documented_opcode_has_recorded_effects() {
+        // The completeness gate: `effects.csv` cannot go stale behind
+        // `opcodes.csv` without this failing.
+        for op in OPCODES.iter().filter(|o| !o.is_undocumented()) {
+            assert!(
+                op.effects_known,
+                "{} ({:?}, {:#04x}) has no entry in effects.csv",
+                op.mnemonic, op.mode, op.opcode
+            );
+        }
+    }
+
+    #[test]
+    fn illegal_mnemonics_have_unknown_effects() {
+        // Effects are keyed by mnemonic, so the undocumented encodings of a
+        // documented instruction (the illegal `NOP`s, `SBC` $EB) correctly
+        // inherit its effects. The genuinely illegal mnemonics have none, and an
+        // opcode with unknown effects never invents a write.
+        for op in &OPCODES {
+            assert!(
+                op.effects_known || op.writes.is_empty(),
+                "{} has unknown effects but claims a write",
+                op.mnemonic
+            );
+        }
+        for mnemonic in ["SLO", "LAX", "KIL", "DCP", "ARR", "XAA"] {
+            let op = OPCODES
+                .iter()
+                .find(|o| o.mnemonic == mnemonic)
+                .unwrap_or_else(|| panic!("{mnemonic} is in the table"));
+            assert!(!op.effects_known, "{mnemonic} claims known effects");
+        }
+    }
+
+    #[test]
+    fn effects_follow_the_addressing_mode() {
+        // The distinction that makes this table per-opcode rather than per
+        // mnemonic: accumulator mode writes A, absolute mode does not.
+        let asl_a = find("ASL", AddressingMode::Accumulator).expect("ASL A exists");
+        assert!(asl_a.writes.contains(RegSet::A));
+        assert!(asl_a.reads.contains(RegSet::A));
+        let asl_abs = find("ASL", AddressingMode::Absolute).expect("ASL abs exists");
+        assert!(asl_abs.writes.is_empty());
+
+        // Indexed modes read their index register; non-indexed ones do not.
+        let lda_zpx = find("LDA", AddressingMode::ZeroPageX).expect("LDA zp,X exists");
+        assert!(lda_zpx.reads.contains(RegSet::X));
+        assert!(lda_zpx.writes.contains(RegSet::A));
+        let lda_zp = find("LDA", AddressingMode::ZeroPage).expect("LDA zp exists");
+        assert!(!lda_zp.reads.contains(RegSet::X));
+
+        let lda_absy = find("LDA", AddressingMode::AbsoluteY).expect("LDA abs,Y exists");
+        assert!(lda_absy.reads.contains(RegSet::Y));
+
+        // A store writes no register, but still reads the one it stores.
+        let sta_abs = find("STA", AddressingMode::Absolute).expect("STA abs exists");
+        assert!(sta_abs.writes.is_empty());
+        assert!(sta_abs.reads.contains(RegSet::A));
+    }
+
+    #[test]
+    fn only_txs_writes_the_stack_pointer() {
+        // The documented approximation: pushes and pulls move S, but routines
+        // balance them, so counting those as writes would flag every routine
+        // that touches the stack.
+        for op in OPCODES.iter().filter(|o| o.effects_known) {
+            assert_eq!(
+                op.writes.contains(RegSet::S),
+                op.mnemonic == "TXS",
+                "{} disagrees about writing S",
+                op.mnemonic
+            );
+        }
+    }
+
+    #[test]
+    fn reg_set_is_a_set() {
+        let ax = RegSet::A.union(RegSet::X);
+        assert!(ax.contains(RegSet::A));
+        assert!(ax.contains(RegSet::X));
+        assert!(!ax.contains(RegSet::Y));
+        assert!(ax.contains(ax));
+        assert!(RegSet::EMPTY.is_empty());
+        assert!(!ax.is_empty());
     }
 
     #[test]

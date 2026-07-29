@@ -8,7 +8,10 @@
 //! the parity lexer, which stays byte-for-byte untouched.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::LazyLock;
+
+use nessemble_isa::RegSet;
 
 /// The kind of a lexeme. Every byte of the input belongs to exactly one lexeme,
 /// so the stream is gap-free and reversible.
@@ -1159,6 +1162,12 @@ pub enum DirectiveName {
     CoverageIgnore,
     /// `@nessemble-coverage-ignore-next-line` — a one-line coverage exclusion.
     CoverageIgnoreNextLine,
+    /// `@nessemble-param` — a routine input slot (see [`Signature`]).
+    Param,
+    /// `@nessemble-returns` — a routine output slot.
+    Returns,
+    /// `@nessemble-clobbers` — the slots a routine destroys.
+    Clobbers,
 }
 
 /// The directive registry: token → name, plus whether the token is a deprecated
@@ -1179,6 +1188,9 @@ const DIRECTIVES: &[(&str, DirectiveName, bool)] = &[
         DirectiveName::CoverageIgnoreNextLine,
         false,
     ),
+    ("@nessemble-param", DirectiveName::Param, false),
+    ("@nessemble-returns", DirectiveName::Returns, false),
+    ("@nessemble-clobbers", DirectiveName::Clobbers, false),
     // Deprecated alias, honored indefinitely: `@fmt` is a shipped, documented
     // spelling, and dropping it would silently re-flow every project that uses
     // it. Reported by the linter, never by the formatter.
@@ -1191,10 +1203,13 @@ const DIRECTIVE_NAMESPACE: &str = "@nessemble-";
 
 impl DirectiveName {
     /// Every directive name, in registry order.
-    pub const ALL: [DirectiveName; 3] = [
+    pub const ALL: [DirectiveName; 6] = [
         DirectiveName::Format,
         DirectiveName::CoverageIgnore,
         DirectiveName::CoverageIgnoreNextLine,
+        DirectiveName::Param,
+        DirectiveName::Returns,
+        DirectiveName::Clobbers,
     ];
 
     /// The canonical (non-deprecated) spelling, including the `@`.
@@ -1204,6 +1219,9 @@ impl DirectiveName {
             DirectiveName::Format => "@nessemble-format",
             DirectiveName::CoverageIgnore => "@nessemble-coverage-ignore",
             DirectiveName::CoverageIgnoreNextLine => "@nessemble-coverage-ignore-next-line",
+            DirectiveName::Param => "@nessemble-param",
+            DirectiveName::Returns => "@nessemble-returns",
+            DirectiveName::Clobbers => "@nessemble-clobbers",
         }
     }
 
@@ -1215,7 +1233,19 @@ impl DirectiveName {
             DirectiveName::Format => "stride=N[,N,...]",
             DirectiveName::CoverageIgnore => "start|end",
             DirectiveName::CoverageIgnoreNextLine => "",
+            DirectiveName::Param | DirectiveName::Returns => "<slot> [description]",
+            DirectiveName::Clobbers => "<slot>[, <slot>...] | none",
         }
+    }
+
+    /// Whether this directive is one of the routine-signature annotations, whose
+    /// arguments are [`Slot`]s and whose consumer is [`resolve_signatures`].
+    #[must_use]
+    pub fn is_signature_tag(self) -> bool {
+        matches!(
+            self,
+            DirectiveName::Param | DirectiveName::Returns | DirectiveName::Clobbers
+        )
     }
 
     /// Resolve a comment's first token to a directive name, reporting whether
@@ -1239,6 +1269,112 @@ pub enum RegionBound {
     End,
 }
 
+/// One of the 6502's status flags, as a [`Slot`]. `@nessemble-returns C` is how
+/// a 6502 routine returns a boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Flag {
+    /// Carry.
+    C,
+    /// Zero.
+    Z,
+    /// Negative.
+    N,
+    /// Overflow.
+    V,
+    /// Decimal.
+    D,
+    /// Interrupt disable.
+    I,
+}
+
+impl Flag {
+    /// The flag's one-letter name.
+    #[must_use]
+    pub fn letter(self) -> &'static str {
+        match self {
+            Flag::C => "C",
+            Flag::Z => "Z",
+            Flag::N => "N",
+            Flag::V => "V",
+            Flag::D => "D",
+            Flag::I => "I",
+        }
+    }
+}
+
+/// A place a value can live across a call — what a routine-signature annotation
+/// names.
+///
+/// The vocabulary is **closed**, which is what makes a typo reportable:
+/// `@nessemble-clobbers AX` is bad arguments, not a memory symbol called `AX`.
+/// Memory is therefore spelled with brackets (`[tmp1]`) or as a `$` address, so
+/// it can never be confused with a mistyped register.
+///
+/// The derived ordering is the canonical rendering order (`A`, `X`, `Y`, `S`,
+/// `P`, flags, symbols, addresses), so every consumer prints a slot list the
+/// same way without agreeing on anything.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Slot {
+    /// The accumulator.
+    A,
+    /// The `X` index register.
+    X,
+    /// The `Y` index register.
+    Y,
+    /// The stack pointer.
+    S,
+    /// The whole status register.
+    P,
+    /// One status flag.
+    Flag(Flag),
+    /// A named memory location, written `[name]`.
+    Symbol(String),
+    /// An address or inclusive address range, written `$NN` or `$NN-$NN`.
+    Address(u16, u16),
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Slot::A => f.write_str("A"),
+            Slot::X => f.write_str("X"),
+            Slot::Y => f.write_str("Y"),
+            Slot::S => f.write_str("S"),
+            Slot::P => f.write_str("P"),
+            Slot::Flag(flag) => f.write_str(flag.letter()),
+            Slot::Symbol(name) => write!(f, "[{name}]"),
+            Slot::Address(lo, hi) if lo == hi => write!(f, "{}", hex_addr(*lo)),
+            Slot::Address(lo, hi) => write!(f, "{}-{}", hex_addr(*lo), hex_addr(*hi)),
+        }
+    }
+}
+
+/// Render an address the width it was most likely written: two hex digits for
+/// zero page, four above it.
+fn hex_addr(addr: u16) -> String {
+    if addr <= 0xFF {
+        format!("${addr:02X}")
+    } else {
+        format!("${addr:04X}")
+    }
+}
+
+/// Format a slot list the way every surface shows it: canonical order, comma
+/// separated, or `none` when empty.
+#[must_use]
+pub fn format_slots(slots: &[Slot]) -> String {
+    if slots.is_empty() {
+        return "none".to_string();
+    }
+    let mut sorted: Vec<&Slot> = slots.iter().collect();
+    sorted.sort();
+    sorted
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A directive's parsed arguments. Parsing happens once, in the scanner, so no
 /// consumer re-parses argument text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1247,6 +1383,12 @@ pub enum DirectiveArgs {
     Strides(Vec<usize>),
     /// `@nessemble-coverage-ignore start` / `end`.
     Region(RegionBound),
+    /// `@nessemble-param` / `@nessemble-returns`: one slot and its description
+    /// (empty when none was written).
+    Slot(Slot, String),
+    /// `@nessemble-clobbers`: the slot list. **Empty means `none` was written**
+    /// — an explicit "preserves everything" claim, not a missing argument.
+    Slots(Vec<Slot>),
     /// The directive takes no arguments.
     None,
 }
@@ -1444,8 +1586,9 @@ fn parse_directive_tail(marker_len: usize, after_marker: &str) -> Option<(Parsed
         .split(|c: char| c.is_whitespace() || c == ';')
         .next()
         .unwrap_or(body);
-    // Arguments are what remains before any trailing prose comment.
-    let args = body[token.len()..].split(';').next().unwrap_or("").trim();
+    // The whole remainder. Stripping trailing prose at a `;` is per-directive:
+    // a `@nessemble-param` description is free text and may contain one.
+    let args = &body[token.len()..];
 
     let parsed = match DirectiveName::lookup(token) {
         Some((name, deprecated)) => match parse_args(name, args) {
@@ -1461,18 +1604,116 @@ fn parse_directive_tail(marker_len: usize, after_marker: &str) -> Option<(Parsed
     Some((parsed, offset, token.len()))
 }
 
-/// Parse a directive's argument text (trailing prose already stripped), or
-/// `None` if it does not match the directive's syntax.
+/// Parse a directive's argument text — everything after the name token, prose
+/// included — or `None` if it does not match the directive's syntax.
+///
+/// Stripping trailing prose at a `;` happens here rather than in the caller,
+/// because it is per-directive: a `@nessemble-param` description is free text
+/// and a `;` inside it is part of the description.
 fn parse_args(name: DirectiveName, args: &str) -> Option<DirectiveArgs> {
     match name {
-        DirectiveName::Format => parse_strides(args).map(DirectiveArgs::Strides),
-        DirectiveName::CoverageIgnore => match args {
+        DirectiveName::Format => parse_strides(before_prose(args)).map(DirectiveArgs::Strides),
+        DirectiveName::CoverageIgnore => match before_prose(args) {
             "start" => Some(DirectiveArgs::Region(RegionBound::Start)),
             "end" => Some(DirectiveArgs::Region(RegionBound::End)),
             _ => None,
         },
-        DirectiveName::CoverageIgnoreNextLine => args.is_empty().then_some(DirectiveArgs::None),
+        DirectiveName::CoverageIgnoreNextLine => {
+            before_prose(args).is_empty().then_some(DirectiveArgs::None)
+        }
+        DirectiveName::Param | DirectiveName::Returns => parse_slot_and_description(args),
+        DirectiveName::Clobbers => parse_slot_list(before_prose(args)).map(DirectiveArgs::Slots),
     }
+}
+
+/// A directive's arguments up to any trailing prose comment, trimmed.
+fn before_prose(args: &str) -> &str {
+    args.split(';').next().unwrap_or("").trim()
+}
+
+/// Parse `<slot> [description]`. The slot is the first whitespace-delimited
+/// token; everything after it is the description, verbatim — a `;` in there is
+/// prose, not a separator. A leading `-`, `--`, or `:` is stripped, so
+/// `A -- index` and `A index` describe identically.
+fn parse_slot_and_description(args: &str) -> Option<DirectiveArgs> {
+    let trimmed = args.trim();
+    let (token, rest) = match trimmed.find(char::is_whitespace) {
+        Some(i) => (&trimmed[..i], trimmed[i..].trim()),
+        None => (trimmed, ""),
+    };
+    let slot = parse_slot(token)?;
+    let description = rest
+        .strip_prefix("--")
+        .or_else(|| rest.strip_prefix('-'))
+        .or_else(|| rest.strip_prefix(':'))
+        .unwrap_or(rest)
+        .trim();
+    Some(DirectiveArgs::Slot(slot, description.to_string()))
+}
+
+/// Parse a `clobbers` argument: a comma-separated slot list, or the keyword
+/// `none` (which yields the empty list — an explicit claim, §5). `none` mixed
+/// with real slots is bad arguments, not a list containing nothing.
+fn parse_slot_list(args: &str) -> Option<Vec<Slot>> {
+    if args.is_empty() {
+        return None;
+    }
+    if args.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    args.split(',')
+        .map(|item| parse_slot(item.trim()))
+        .collect::<Option<Vec<_>>>()
+        .filter(|slots| !slots.is_empty())
+}
+
+/// Parse one slot token (§4). Register and flag names are case-insensitive —
+/// they are assembly operands, and nessemble accepts `lda` and `LDA` alike —
+/// while directive *names* stay case-sensitive registry identifiers.
+fn parse_slot(token: &str) -> Option<Slot> {
+    if let Some(inner) = token.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        // A memory symbol: any non-empty name without brackets or whitespace.
+        if inner.is_empty() || inner.contains(['[', ']']) || inner.contains(char::is_whitespace) {
+            return None;
+        }
+        return Some(Slot::Symbol(inner.to_string()));
+    }
+    if token.starts_with('$') {
+        let mut bounds = token.split('-');
+        let lo = parse_hex_addr(bounds.next()?)?;
+        let hi = match bounds.next() {
+            Some(hi) => parse_hex_addr(hi)?,
+            None => lo,
+        };
+        // A third bound, or an inverted range, is a mistake worth reporting.
+        if bounds.next().is_some() || hi < lo {
+            return None;
+        }
+        return Some(Slot::Address(lo, hi));
+    }
+    match token.to_ascii_uppercase().as_str() {
+        "A" => Some(Slot::A),
+        "X" => Some(Slot::X),
+        "Y" => Some(Slot::Y),
+        "S" => Some(Slot::S),
+        "P" => Some(Slot::P),
+        "C" => Some(Slot::Flag(Flag::C)),
+        "Z" => Some(Slot::Flag(Flag::Z)),
+        "N" => Some(Slot::Flag(Flag::N)),
+        "V" => Some(Slot::Flag(Flag::V)),
+        "D" => Some(Slot::Flag(Flag::D)),
+        "I" => Some(Slot::Flag(Flag::I)),
+        _ => None,
+    }
+}
+
+/// Parse a `$`-prefixed hex address of one to four digits.
+fn parse_hex_addr(token: &str) -> Option<u16> {
+    let digits = token.trim().strip_prefix('$')?;
+    if digits.is_empty() || digits.len() > 4 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u16::from_str_radix(digits, 16).ok()
 }
 
 /// Parse a `stride=N[,N,...]` argument into its stride list. Empty entries are
@@ -1492,6 +1733,219 @@ fn parse_strides(args: &str) -> Option<Vec<usize>> {
     } else {
         Some(strides)
     }
+}
+
+// ─── Routine signatures ──────────────────────────────────────────────────────
+//
+// The `@nessemble-param` / `-returns` / `-clobbers` annotations resolved against
+// the labels they document, so every consumer (hover, outline, the clobber
+// verifier) reads one structure instead of re-deriving it from directives.
+//
+// See `plans/010-routine-signatures.md`.
+
+/// A routine's declared calling convention, bound to the label below its
+/// annotations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signature {
+    /// The label the annotations bind to.
+    pub name: String,
+    /// Input slots, in written order, each with its description.
+    pub params: Vec<(Slot, String)>,
+    /// Output slots, in written order, each with its description.
+    pub returns: Vec<(Slot, String)>,
+    /// The declared clobber set. Empty when `none` was declared **or** when no
+    /// `@nessemble-clobbers` tag was written — see [`declares_clobbers`].
+    ///
+    /// [`declares_clobbers`]: Signature::declares_clobbers
+    pub clobbers: Vec<Slot>,
+    /// Whether a `@nessemble-clobbers` tag was written at all. This is the
+    /// difference between "provably preserves everything" (`none`, a claim the
+    /// verifier checks) and "undeclared" (no claim, never verified).
+    pub declares_clobbers: bool,
+    /// 1-based line of the label.
+    pub line: u32,
+    /// 1-based line of the first annotation, for a diagnostic that wants to
+    /// point at the block rather than the code.
+    pub first_tag_line: u32,
+}
+
+impl Signature {
+    /// Every slot the routine declares it writes: its clobbers plus its returns,
+    /// which are clobbered by definition (§5).
+    #[must_use]
+    pub fn declared_writes(&self) -> Vec<Slot> {
+        let mut out = self.clobbers.clone();
+        for (slot, _) in &self.returns {
+            if !out.contains(slot) {
+                out.push(slot.clone());
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+/// Why an annotation is not part of a usable signature. These are *binding*
+/// problems — the syntax parsed, but the annotation does not describe a routine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureProblemKind {
+    /// The annotation binds to no label: code intervenes, or the file ends.
+    Unbound,
+    /// The same slot is named twice in one role of one signature.
+    DuplicateSlot,
+}
+
+/// An annotation that parsed but does not contribute to a signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureProblem {
+    pub kind: SignatureProblemKind,
+    /// The directive token, or the repeated slot, for the message to quote.
+    pub subject: String,
+    /// 1-based line/column of the annotation.
+    pub line: u32,
+    pub column: u32,
+}
+
+/// Every routine signature in `source`, in source order.
+#[must_use]
+pub fn resolve_signatures(source: &str) -> Vec<Signature> {
+    resolve_signatures_with_errors(source).0
+}
+
+/// [`resolve_signatures`], plus the annotations that parsed but bind to nothing
+/// or repeat a slot — the input to the `invalid-routine-signature` rule.
+#[must_use]
+pub fn resolve_signatures_with_errors(source: &str) -> (Vec<Signature>, Vec<SignatureProblem>) {
+    let lexemes = lex(source);
+    let lines = split_lines(&lexemes);
+    let (directives, _) = scan_directive_lines(source, &lines);
+    resolve_signature_lines(source, &lines, &directives)
+}
+
+/// [`resolve_signatures_with_errors`] over an already-split stream and an
+/// already-scanned directive list, so the linter does neither twice.
+fn resolve_signature_lines(
+    source: &str,
+    lines: &[Vec<Lexeme>],
+    directives: &[Directive],
+) -> (Vec<Signature>, Vec<SignatureProblem>) {
+    let mut signatures: Vec<Signature> = Vec::new();
+    let mut problems = Vec::new();
+    // Label line (0-based) → index into `signatures`, so tags written above one
+    // label accumulate into one signature regardless of their order.
+    let mut by_label: Vec<(usize, usize)> = Vec::new();
+
+    for directive in directives
+        .iter()
+        // A trailing directive is inert everywhere (plan 009 §4.2);
+        // `ineffective-comment-directive` is what reports it.
+        .filter(|d| d.own_line && d.name.is_signature_tag())
+    {
+        let tag_line = directive.line as usize - 1;
+        let Some((label_idx, name)) = binding_target(source, lines, tag_line) else {
+            problems.push(SignatureProblem {
+                kind: SignatureProblemKind::Unbound,
+                subject: directive.name.canonical().to_string(),
+                line: directive.line,
+                column: directive.column,
+            });
+            continue;
+        };
+
+        let existing = by_label
+            .iter()
+            .find(|(l, _)| *l == label_idx)
+            .map(|&(_, i)| i);
+        let slot = existing.unwrap_or_else(|| {
+            signatures.push(Signature {
+                name: name.to_string(),
+                params: Vec::new(),
+                returns: Vec::new(),
+                clobbers: Vec::new(),
+                declares_clobbers: false,
+                line: label_idx as u32 + 1,
+                first_tag_line: directive.line,
+            });
+            by_label.push((label_idx, signatures.len() - 1));
+            signatures.len() - 1
+        });
+        let sig = &mut signatures[slot];
+        sig.first_tag_line = sig.first_tag_line.min(directive.line);
+
+        match (directive.name, &directive.args) {
+            (DirectiveName::Param, DirectiveArgs::Slot(slot, desc)) => {
+                push_slot(&mut sig.params, slot, desc, directive, &mut problems);
+            }
+            (DirectiveName::Returns, DirectiveArgs::Slot(slot, desc)) => {
+                push_slot(&mut sig.returns, slot, desc, directive, &mut problems);
+            }
+            (DirectiveName::Clobbers, DirectiveArgs::Slots(slots)) => {
+                sig.declares_clobbers = true;
+                for slot in slots {
+                    if sig.clobbers.contains(slot) {
+                        problems.push(SignatureProblem {
+                            kind: SignatureProblemKind::DuplicateSlot,
+                            subject: slot.to_string(),
+                            line: directive.line,
+                            column: directive.column,
+                        });
+                        continue;
+                    }
+                    sig.clobbers.push(slot.clone());
+                }
+            }
+            // The scanner pairs each name with its own argument shape, so no
+            // other combination can reach here.
+            _ => {}
+        }
+    }
+
+    signatures.sort_by_key(|s| s.line);
+    (signatures, problems)
+}
+
+/// Record one `param`/`returns` slot, reporting a repeat rather than silently
+/// keeping the first or the last.
+fn push_slot(
+    into: &mut Vec<(Slot, String)>,
+    slot: &Slot,
+    description: &str,
+    directive: &Directive,
+    problems: &mut Vec<SignatureProblem>,
+) {
+    if into.iter().any(|(s, _)| s == slot) {
+        problems.push(SignatureProblem {
+            kind: SignatureProblemKind::DuplicateSlot,
+            subject: slot.to_string(),
+            line: directive.line,
+            column: directive.column,
+        });
+        return;
+    }
+    into.push((slot.clone(), description.to_string()));
+}
+
+/// The label an annotation on line `tag_line` (0-based) binds to: scanning down,
+/// blank and comment lines are transparent — so prose and blank lines may sit
+/// inside an annotation block — and the first line with code must be a label
+/// definition. Anything else, or end of file, means the annotation binds to
+/// nothing.
+///
+/// Note this accepts **any** label, not only a block entry: an author who
+/// annotates a routine tucked directly under the previous one's `RTS` plainly
+/// meant that label. Whether a label *ought* to be documented is a separate
+/// question, asked only by `require-routine-doc`.
+fn binding_target<'a>(
+    source: &'a str,
+    lines: &[Vec<Lexeme>],
+    tag_line: usize,
+) -> Option<(usize, &'a str)> {
+    lines
+        .iter()
+        .enumerate()
+        .skip(tag_line + 1)
+        .find(|(_, line)| !is_blank(line) && !is_comment_only(line))
+        .and_then(|(idx, line)| block_label(source, line).map(|(name, _)| (idx, name)))
 }
 
 // ─── Linting ─────────────────────────────────────────────────────────────────
@@ -1514,15 +1968,27 @@ pub enum RuleId {
     DeprecatedCommentDirective,
     /// A well-formed directive that cannot apply where it is written.
     IneffectiveCommentDirective,
+    /// A routine-signature annotation that binds to no label, or repeats a slot.
+    InvalidRoutineSignature,
+    /// A routine that writes a register its `@nessemble-clobbers` omits.
+    UndeclaredClobber,
+    /// A routine that declares a clobber its body cannot produce.
+    OverdeclaredClobber,
+    /// A called routine with no signature annotations. Off by default.
+    RequireRoutineDoc,
 }
 
 impl RuleId {
     /// Every rule, in a stable order (also the [`SeverityMap`] index order).
-    pub const ALL: [RuleId; 4] = [
+    pub const ALL: [RuleId; 8] = [
         RuleId::RequireBlockComment,
         RuleId::UnknownCommentDirective,
         RuleId::DeprecatedCommentDirective,
         RuleId::IneffectiveCommentDirective,
+        RuleId::InvalidRoutineSignature,
+        RuleId::UndeclaredClobber,
+        RuleId::OverdeclaredClobber,
+        RuleId::RequireRoutineDoc,
     ];
 
     /// The stable kebab-case identifier used in `.nessemblerc` and in reports.
@@ -1533,6 +1999,10 @@ impl RuleId {
             RuleId::UnknownCommentDirective => "unknown-comment-directive",
             RuleId::DeprecatedCommentDirective => "deprecated-comment-directive",
             RuleId::IneffectiveCommentDirective => "ineffective-comment-directive",
+            RuleId::InvalidRoutineSignature => "invalid-routine-signature",
+            RuleId::UndeclaredClobber => "undeclared-clobber",
+            RuleId::OverdeclaredClobber => "overdeclared-clobber",
+            RuleId::RequireRoutineDoc => "require-routine-doc",
         }
     }
 
@@ -1542,6 +2012,21 @@ impl RuleId {
         RuleId::ALL.into_iter().find(|r| r.id() == s)
     }
 
+    /// This rule's severity when a project says nothing about it.
+    ///
+    /// Every rule is [`Warn`](RuleSeverity::Warn) except `require-routine-doc`,
+    /// which is [`Off`](RuleSeverity::Off): it would fire on every called label
+    /// in an existing project at once, and a rule that is loud on day one gets
+    /// switched off permanently rather than adopted
+    /// (`plans/010-routine-signatures.md` §13.4).
+    #[must_use]
+    pub fn default_severity(self) -> RuleSeverity {
+        match self {
+            RuleId::RequireRoutineDoc => RuleSeverity::Off,
+            _ => RuleSeverity::Warn,
+        }
+    }
+
     /// This rule's index into a [`SeverityMap`].
     fn index(self) -> usize {
         match self {
@@ -1549,12 +2034,28 @@ impl RuleId {
             RuleId::UnknownCommentDirective => 1,
             RuleId::DeprecatedCommentDirective => 2,
             RuleId::IneffectiveCommentDirective => 3,
+            RuleId::InvalidRoutineSignature => 4,
+            RuleId::UndeclaredClobber => 5,
+            RuleId::OverdeclaredClobber => 6,
+            RuleId::RequireRoutineDoc => 7,
         }
     }
 
     /// Whether this rule reads the directive scan rather than the lexeme lines.
     fn is_directive_rule(self) -> bool {
         !matches!(self, RuleId::RequireBlockComment)
+    }
+
+    /// Whether this rule reads resolved [`Signature`]s, which are shared across
+    /// the rules that need them and skipped when none is enabled.
+    fn needs_signatures(self) -> bool {
+        matches!(
+            self,
+            RuleId::InvalidRoutineSignature
+                | RuleId::UndeclaredClobber
+                | RuleId::OverdeclaredClobber
+                | RuleId::RequireRoutineDoc
+        )
     }
 }
 
@@ -1570,14 +2071,19 @@ pub enum RuleSeverity {
     Error,
 }
 
-/// Per-rule severities, one slot per [`RuleId`]. Defaults to every rule at
-/// [`RuleSeverity::Warn`] — the linter is on out of the box.
+/// Per-rule severities, one slot per [`RuleId`]. Defaults to each rule's
+/// [`default_severity`](RuleId::default_severity) — every rule warns out of the
+/// box except the opt-in `require-routine-doc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeverityMap([RuleSeverity; RuleId::ALL.len()]);
 
 impl Default for SeverityMap {
     fn default() -> Self {
-        SeverityMap([RuleSeverity::Warn; RuleId::ALL.len()])
+        let mut map = SeverityMap([RuleSeverity::Warn; RuleId::ALL.len()]);
+        for rule in RuleId::ALL {
+            map.set(rule, rule.default_severity());
+        }
+        map
     }
 }
 
@@ -1627,13 +2133,15 @@ pub struct LintOptions<'a> {
 }
 
 /// What every rule is handed: the source, its physical lines, and — for the
-/// directive rules — the one directive scan, shared so the rules that need it
-/// do not each re-scan the buffer.
+/// directive rules — the one directive scan and the one signature resolution,
+/// shared so the rules that need them do not each redo the work.
 struct LintCtx<'a> {
     source: &'a str,
     lines: &'a [Vec<Lexeme>],
     directives: &'a [Directive],
     malformed: &'a [MalformedDirective],
+    signatures: &'a [Signature],
+    signature_problems: &'a [SignatureProblem],
 }
 
 /// A rule implementation: scan the context and push any findings. Runs only
@@ -1655,6 +2163,13 @@ const RULES: &[(RuleId, RuleFn)] = &[
         RuleId::IneffectiveCommentDirective,
         rule_ineffective_comment_directive,
     ),
+    (
+        RuleId::InvalidRoutineSignature,
+        rule_invalid_routine_signature,
+    ),
+    (RuleId::UndeclaredClobber, rule_undeclared_clobber),
+    (RuleId::OverdeclaredClobber, rule_overdeclared_clobber),
+    (RuleId::RequireRoutineDoc, rule_require_routine_doc),
 ];
 
 /// Lint `source`, returning findings sorted by position. Every rule whose
@@ -1673,11 +2188,22 @@ pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
     } else {
         (Vec::new(), Vec::new())
     };
+    // Likewise the signature resolution, shared by the four routine rules.
+    let signatures_needed = RuleId::ALL
+        .into_iter()
+        .any(|r| r.needs_signatures() && opts.severities.get(r) != RuleSeverity::Off);
+    let (signatures, signature_problems) = if signatures_needed {
+        resolve_signature_lines(source, &lines, &directives)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let ctx = LintCtx {
         source,
         lines: &lines,
         directives: &directives,
         malformed: &malformed,
+        signatures: &signatures,
+        signature_problems: &signature_problems,
     };
     let mut findings = Vec::new();
     for &(rule, run) in RULES {
@@ -1812,6 +2338,404 @@ fn rule_ineffective_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &
             });
         }
     }
+}
+
+/// `invalid-routine-signature`: an annotation that parsed but does not describe
+/// a routine — it binds to no label, or repeats a slot the signature already
+/// names. Argument *syntax* errors are `unknown-comment-directive`'s job; these
+/// are the mistakes only binding can reveal.
+fn rule_invalid_routine_signature(ctx: &LintCtx, _opts: &LintOptions, out: &mut Vec<Finding>) {
+    for problem in ctx.signature_problems {
+        let subject = &problem.subject;
+        let message = match problem.kind {
+            SignatureProblemKind::Unbound => {
+                format!("routine annotation `{subject}` is not followed by a label")
+            }
+            SignatureProblemKind::DuplicateSlot => {
+                format!("routine annotation names `{subject}` twice")
+            }
+        };
+        out.push(Finding {
+            rule: RuleId::InvalidRoutineSignature,
+            line: problem.line,
+            column: problem.column,
+            subject: subject.clone(),
+            message,
+        });
+    }
+}
+
+/// `undeclared-clobber`: a routine whose body definitely writes a register its
+/// `@nessemble-clobbers` does not list.
+///
+/// Only routines that **declared** a clobber list are checked — an undeclared
+/// routine makes no claim, so there is nothing to contradict. Needs one definite
+/// write, so unknown callees and macros cannot suppress it; they can only hide
+/// writes the analysis never saw (§8.2).
+fn rule_undeclared_clobber(ctx: &LintCtx, opts: &LintOptions, out: &mut Vec<Finding>) {
+    for sig in ctx.signatures.iter().filter(|s| s.declares_clobbers) {
+        if (opts.ignore)(&sig.name) {
+            continue;
+        }
+        let declared = declared_regs(sig);
+        let effects = routine_effects(ctx, &sig.name);
+        let missing = RegSet::from_bits(effects.writes.bits() & !declared.bits());
+        if missing.is_empty() {
+            continue;
+        }
+        out.push(Finding {
+            rule: RuleId::UndeclaredClobber,
+            line: sig.line,
+            column: label_column(ctx, sig.line),
+            subject: sig.name.clone(),
+            message: format!(
+                "routine `{}` writes {} but does not declare {} clobbered",
+                sig.name,
+                reg_list(missing),
+                it_or_them(missing),
+            ),
+        });
+    }
+}
+
+/// `overdeclared-clobber`: a routine that declares a clobber its body cannot
+/// produce — the opposite drift, where a routine stopped using a register and
+/// still makes every caller spill it.
+///
+/// Over-declaring is *safe*, so this is a documentation-accuracy finding, and it
+/// fires only when the body is **fully understood**: any macro invocation,
+/// unannotated call, indirect jump, or data run inside the body suppresses it
+/// (§8.4).
+fn rule_overdeclared_clobber(ctx: &LintCtx, opts: &LintOptions, out: &mut Vec<Finding>) {
+    for sig in ctx.signatures.iter().filter(|s| s.declares_clobbers) {
+        if (opts.ignore)(&sig.name) {
+            continue;
+        }
+        let effects = routine_effects(ctx, &sig.name);
+        if effects.unknown {
+            continue;
+        }
+        // Only the clobber list is checked: a `returns` slot is a claim about
+        // the routine's output, answered by reading it, not by a write count.
+        let declared = slots_to_regs(&sig.clobbers);
+        let extra = RegSet::from_bits(declared.bits() & !effects.writes.bits());
+        if extra.is_empty() {
+            continue;
+        }
+        out.push(Finding {
+            rule: RuleId::OverdeclaredClobber,
+            line: sig.line,
+            column: label_column(ctx, sig.line),
+            subject: sig.name.clone(),
+            message: format!(
+                "routine `{}` declares {} clobbered but never writes {}",
+                sig.name,
+                reg_list(extra),
+                it_or_them(extra),
+            ),
+        });
+    }
+}
+
+/// `require-routine-doc`: a called, block-opening label with no signature
+/// annotations. **Off by default** — see [`RuleId::default_severity`].
+fn rule_require_routine_doc(ctx: &LintCtx, opts: &LintOptions, out: &mut Vec<Finding>) {
+    let called = call_targets(ctx);
+    for (idx, line) in ctx.lines.iter().enumerate() {
+        let Some((name, column)) = block_label(ctx.source, line) else {
+            continue;
+        };
+        if (opts.ignore)(name) || !is_block_entry(ctx.lines, idx) {
+            continue;
+        }
+        if !called.contains(name) {
+            continue;
+        }
+        if ctx.signatures.iter().any(|s| s.name == name) {
+            continue;
+        }
+        out.push(Finding {
+            rule: RuleId::RequireRoutineDoc,
+            line: (idx + 1) as u32,
+            column,
+            subject: name.to_string(),
+            message: format!("called routine `{name}` has no signature annotations"),
+        });
+    }
+}
+
+/// The registers a signature declares it writes: its clobbers plus its returns,
+/// narrowed to the four the verifier tracks. Flag and memory slots are
+/// documentation and are dropped here (§8.3).
+fn declared_regs(sig: &Signature) -> RegSet {
+    slots_to_regs(&sig.declared_writes())
+}
+
+/// The verifier-tracked registers among `slots`.
+fn slots_to_regs(slots: &[Slot]) -> RegSet {
+    slots.iter().fold(RegSet::EMPTY, |set, slot| {
+        set.union(match slot {
+            Slot::A => RegSet::A,
+            Slot::X => RegSet::X,
+            Slot::Y => RegSet::Y,
+            Slot::S => RegSet::S,
+            _ => RegSet::EMPTY,
+        })
+    })
+}
+
+/// The pronoun a message should use for `regs` — one register is "it", several
+/// are "them".
+fn it_or_them(regs: RegSet) -> &'static str {
+    if regs.bits().is_power_of_two() {
+        "it"
+    } else {
+        "them"
+    }
+}
+
+/// Render a register set for a message, in canonical order.
+fn reg_list(regs: RegSet) -> String {
+    [
+        (RegSet::A, "A"),
+        (RegSet::X, "X"),
+        (RegSet::Y, "Y"),
+        (RegSet::S, "S"),
+    ]
+    .into_iter()
+    .filter(|&(bit, _)| regs.contains(bit))
+    .map(|(_, name)| name)
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+/// The 1-based column of the label defined on 1-based `line`, for a finding that
+/// points at the routine rather than at its annotations.
+fn label_column(ctx: &LintCtx, line: u32) -> u32 {
+    ctx.lines
+        .get(line as usize - 1)
+        .and_then(|l| block_label(ctx.source, l))
+        .map_or(1, |(_, column)| column)
+}
+
+/// What a routine's body was observed to do.
+#[derive(Debug, Clone, Copy, Default)]
+struct BodyEffects {
+    /// Registers definitely written on some path through the body.
+    writes: RegSet,
+    /// Something in the body the analysis cannot read, so `writes` is a lower
+    /// bound rather than the whole story.
+    unknown: bool,
+}
+
+/// The effects of the routine named `name`, following calls to other annotated
+/// routines in this buffer.
+///
+/// A call to a routine with a signature contributes that routine's **declared**
+/// writes; a call to one without a signature — or outside this buffer — is an
+/// unknown. Recursion is broken by visiting each routine once, with a cycle
+/// counting as an unknown.
+fn routine_effects(ctx: &LintCtx, name: &str) -> BodyEffects {
+    let mut visiting = Vec::new();
+    routine_effects_inner(ctx, name, &mut visiting)
+}
+
+fn routine_effects_inner(ctx: &LintCtx, name: &str, visiting: &mut Vec<String>) -> BodyEffects {
+    if visiting.iter().any(|n| n == name) {
+        // A cycle: stop rather than recurse, and say we do not fully know.
+        return BodyEffects {
+            writes: RegSet::EMPTY,
+            unknown: true,
+        };
+    }
+    visiting.push(name.to_string());
+
+    let mut effects = BodyEffects::default();
+    for idx in body_lines(ctx, name) {
+        let line = &ctx.lines[idx];
+        let sig: Vec<&Lexeme> = line
+            .iter()
+            .filter(|l| l.kind != LexKind::Whitespace && l.kind != LexKind::Comment)
+            .collect();
+        let Some(first) = sig.first() else {
+            continue;
+        };
+        // A label inside the body (an internal branch target) is transparent.
+        if block_label(ctx.source, line).is_some() {
+            continue;
+        }
+        match first.kind {
+            LexKind::Directive => {
+                if !is_transparent_directive(text(ctx.source, first)) {
+                    effects.unknown = true;
+                }
+            }
+            LexKind::Ident => {
+                let mnemonic = text(ctx.source, first);
+                if !MNEMONICS.contains(&mnemonic.to_ascii_lowercase()) {
+                    // A macro invocation or custom pseudo-instruction: its
+                    // expansion is not analyzed.
+                    effects.unknown = true;
+                    continue;
+                }
+                let operand = operand_text(ctx.source, &sig);
+                if mnemonic.eq_ignore_ascii_case("jsr") || mnemonic.eq_ignore_ascii_case("jmp") {
+                    apply_call(ctx, &operand, visiting, &mut effects);
+                    continue;
+                }
+                match instruction_writes(mnemonic, &operand) {
+                    Some(writes) => effects.writes = effects.writes.union(writes),
+                    None => effects.unknown = true,
+                }
+            }
+            // A constant definition or anything else unexpected: not a write,
+            // but not something to claim understanding of either.
+            _ => effects.unknown = true,
+        }
+    }
+
+    visiting.pop();
+    effects
+}
+
+/// Fold a `JSR`/`JMP` into the caller's effects. A direct call to an annotated
+/// routine contributes its declared writes; anything else — an unannotated
+/// target, a target in another file, an indirect jump — is an unknown.
+fn apply_call(ctx: &LintCtx, operand: &str, visiting: &mut Vec<String>, effects: &mut BodyEffects) {
+    let target = operand.trim();
+    if target.starts_with('(') || target.is_empty() {
+        effects.unknown = true;
+        return;
+    }
+    match ctx.signatures.iter().find(|s| s.name == target) {
+        Some(callee) if callee.declares_clobbers => {
+            effects.writes = effects.writes.union(declared_regs(callee));
+        }
+        // Annotated but with no clobber list, or not annotated at all: the call
+        // makes no claim, so the body is not fully understood. Following its
+        // body would double-count what a declaration is for.
+        Some(_) | None => {
+            let inner = routine_effects_inner(ctx, target, visiting);
+            effects.writes = effects.writes.union(inner.writes);
+            effects.unknown = true;
+        }
+    }
+}
+
+/// The 0-based line indexes of the body of the routine labelled `name`: from its
+/// label to the last line before the next block-entry label, or end of file.
+///
+/// This **under-approximates** on purpose. A routine that falls through into the
+/// next one really does clobber what the next one clobbers, and this will not see
+/// it — a false negative, which costs a missed report. Following fall-through
+/// would risk attributing a neighbour's writes to this routine, which costs the
+/// rule its credibility (§8.1).
+fn body_lines(ctx: &LintCtx, name: &str) -> std::ops::Range<usize> {
+    let Some(start) = ctx.lines.iter().enumerate().position(|(idx, line)| {
+        block_label(ctx.source, line).is_some_and(|(label, _)| label == name)
+            && is_block_entry(ctx.lines, idx)
+    }) else {
+        return 0..0;
+    };
+    let end = ((start + 1)..ctx.lines.len())
+        .find(|&idx| {
+            block_label(ctx.source, &ctx.lines[idx]).is_some() && is_block_entry(ctx.lines, idx)
+        })
+        .unwrap_or(ctx.lines.len());
+    (start + 1)..end
+}
+
+/// The operand text of an instruction line: everything after the mnemonic, with
+/// the trailing comment already filtered out by the caller.
+fn operand_text(source: &str, sig: &[&Lexeme]) -> String {
+    match (sig.get(1), sig.last()) {
+        (Some(first), Some(last)) if sig.len() > 1 => {
+            source[first.start..last.end].trim().to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+/// The registers an instruction writes, or `None` when its effects are not
+/// recorded (an undocumented opcode).
+///
+/// Only the parts of the addressing mode that change the register effects are
+/// recovered from the operand text — accumulator mode, and indexing by `X` or
+/// `Y`. That is enough to distinguish `ASL A` (writes `A`) from `ASL $00` (does
+/// not) and `LDA $10,X` (reads `X`) from `LDA $10`, which is why the effect table
+/// is per opcode rather than per mnemonic.
+fn instruction_writes(mnemonic: &str, operand: &str) -> Option<RegSet> {
+    use nessemble_isa::AddressingMode as Mode;
+
+    let accumulator = operand.is_empty() || operand.eq_ignore_ascii_case("a");
+    let indexed_x = ends_with_index(operand, 'x');
+    let indexed_y = ends_with_index(operand, 'y');
+
+    let modes: &[Mode] = if accumulator {
+        &[Mode::Accumulator, Mode::Implied]
+    } else if indexed_x {
+        &[Mode::ZeroPageX, Mode::AbsoluteX, Mode::IndirectX]
+    } else if indexed_y {
+        &[Mode::ZeroPageY, Mode::AbsoluteY, Mode::IndirectY]
+    } else {
+        &[
+            Mode::Immediate,
+            Mode::ZeroPage,
+            Mode::Absolute,
+            Mode::Relative,
+            Mode::Indirect,
+            Mode::Implied,
+        ]
+    };
+    let opcode = modes
+        .iter()
+        .find_map(|&mode| nessemble_isa::find(mnemonic, mode))?;
+    opcode.effects_known.then_some(opcode.writes)
+}
+
+/// Whether an operand ends with `,X` / `,Y` (or `,X)` for indirect), ignoring
+/// case and spacing.
+fn ends_with_index(operand: &str, index: char) -> bool {
+    let trimmed = operand.trim_end_matches(')').trim_end();
+    match trimmed.rsplit_once(',') {
+        Some((_, last)) => last.trim().eq_ignore_ascii_case(&index.to_string()),
+        None => false,
+    }
+}
+
+/// Whether a directive inside a routine body is transparent to the verifier:
+/// it emits no bytes that could be executed and changes no register. Anything
+/// else — a data run, an include, an unknown pseudo-op — makes the body not
+/// fully understood.
+fn is_transparent_directive(name: &str) -> bool {
+    const TRANSPARENT: &[&str] = &[
+        ".if", ".ifdef", ".ifndef", ".else", ".elseif", ".endif", ".rs", ".rsset", ".enum",
+        ".ende", ".equ",
+    ];
+    TRANSPARENT
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(name.trim()))
+}
+
+/// Every label named as the direct target of a `JSR` in this buffer.
+fn call_targets<'a>(ctx: &LintCtx<'a>) -> HashSet<&'a str> {
+    let mut out = HashSet::new();
+    for line in ctx.lines {
+        let sig: Vec<&Lexeme> = line
+            .iter()
+            .filter(|l| l.kind != LexKind::Whitespace && l.kind != LexKind::Comment)
+            .collect();
+        let (Some(first), Some(second)) = (sig.first(), sig.get(1)) else {
+            continue;
+        };
+        if first.kind == LexKind::Ident
+            && second.kind == LexKind::Ident
+            && text(ctx.source, first).eq_ignore_ascii_case("jsr")
+        {
+            out.insert(text(ctx.source, second));
+        }
+    }
+    out
 }
 
 /// The index of the first significant line after 1-based `line` — skipping
@@ -2628,6 +3552,273 @@ mod tests {
         assert_eq!(format_with(".db $01\n.db $02\n", &opts), ".db $01,$02\n");
     }
 
+    // ── Routine signatures ──────────────────────────────────────────────────
+
+    fn sigs(source: &str) -> Vec<Signature> {
+        resolve_signatures(source)
+    }
+
+    fn sig_problems(source: &str) -> Vec<SignatureProblem> {
+        resolve_signatures_with_errors(source).1
+    }
+
+    #[test]
+    fn scans_each_signature_tag() {
+        let found = scan(
+            "; @nessemble-param A index\n\
+             ; @nessemble-returns C set on error\n\
+             ; @nessemble-clobbers A, X\n",
+        );
+        assert_eq!(
+            found.iter().map(|d| d.name).collect::<Vec<_>>(),
+            vec![
+                DirectiveName::Param,
+                DirectiveName::Returns,
+                DirectiveName::Clobbers
+            ]
+        );
+        assert_eq!(
+            found[0].args,
+            DirectiveArgs::Slot(Slot::A, "index".to_string())
+        );
+        assert_eq!(
+            found[1].args,
+            DirectiveArgs::Slot(Slot::Flag(Flag::C), "set on error".to_string())
+        );
+        assert_eq!(found[2].args, DirectiveArgs::Slots(vec![Slot::A, Slot::X]));
+    }
+
+    #[test]
+    fn parses_every_slot_kind() {
+        let cases = [
+            ("A", Slot::A),
+            ("X", Slot::X),
+            ("Y", Slot::Y),
+            ("S", Slot::S),
+            ("P", Slot::P),
+            ("C", Slot::Flag(Flag::C)),
+            ("Z", Slot::Flag(Flag::Z)),
+            ("N", Slot::Flag(Flag::N)),
+            ("V", Slot::Flag(Flag::V)),
+            ("D", Slot::Flag(Flag::D)),
+            ("I", Slot::Flag(Flag::I)),
+            ("[tmp1]", Slot::Symbol("tmp1".to_string())),
+            ("$10", Slot::Address(0x10, 0x10)),
+            ("$0300", Slot::Address(0x0300, 0x0300)),
+            ("$10-$1F", Slot::Address(0x10, 0x1F)),
+        ];
+        for (text, expected) in cases {
+            let found = scan(&format!("; @nessemble-param {text}\n"));
+            assert_eq!(
+                found[0].args,
+                DirectiveArgs::Slot(expected, String::new()),
+                "slot `{text}`"
+            );
+        }
+    }
+
+    #[test]
+    fn slot_names_are_case_insensitive_and_render_canonically() {
+        let found = scan("; @nessemble-clobbers a, x, c\n");
+        assert_eq!(
+            found[0].args,
+            DirectiveArgs::Slots(vec![Slot::A, Slot::X, Slot::Flag(Flag::C)])
+        );
+        assert_eq!(format_slots(&[Slot::X, Slot::A]), "A, X");
+    }
+
+    #[test]
+    fn slot_lists_render_in_canonical_order_whatever_the_input() {
+        let slots = vec![
+            Slot::Address(0x10, 0x1F),
+            Slot::Y,
+            Slot::Symbol("tmp".to_string()),
+            Slot::Flag(Flag::C),
+            Slot::A,
+        ];
+        assert_eq!(format_slots(&slots), "A, Y, C, [tmp], $10-$1F");
+        assert_eq!(format_slots(&[]), "none");
+    }
+
+    #[test]
+    fn a_description_may_contain_a_semicolon() {
+        // For `param`/`returns` the description is free text to end of comment;
+        // a `;` in it is prose, not the trailing-prose separator.
+        let found = scan("; @nessemble-param A the index; zero-based\n");
+        assert_eq!(
+            found[0].args,
+            DirectiveArgs::Slot(Slot::A, "the index; zero-based".to_string())
+        );
+    }
+
+    #[test]
+    fn description_separators_are_stripped() {
+        for text in ["A -- index", "A - index", "A : index", "A index"] {
+            let found = scan(&format!("; @nessemble-param {text}\n"));
+            assert_eq!(
+                found[0].args,
+                DirectiveArgs::Slot(Slot::A, "index".to_string()),
+                "`{text}`"
+            );
+        }
+    }
+
+    #[test]
+    fn clobbers_none_is_an_empty_list_and_a_claim() {
+        let found = scan("; @nessemble-clobbers none\nfoo:\n");
+        assert_eq!(found[0].args, DirectiveArgs::Slots(Vec::new()));
+        let sig = &sigs("; @nessemble-clobbers none\nfoo:\n")[0];
+        assert!(sig.clobbers.is_empty());
+        assert!(sig.declares_clobbers, "`none` is a declaration");
+        // No tag at all is *not* the same claim.
+        let undeclared = &sigs("; @nessemble-param A i\nfoo:\n")[0];
+        assert!(!undeclared.declares_clobbers);
+    }
+
+    #[test]
+    fn bad_slots_are_bad_arguments() {
+        for text in [
+            "; @nessemble-clobbers AX\n",
+            "; @nessemble-clobbers A, Q\n",
+            "; @nessemble-clobbers\n",
+            "; @nessemble-clobbers A, none\n",
+            "; @nessemble-param\n",
+            "; @nessemble-param [] empty\n",
+            "; @nessemble-param [a b] spaced\n",
+            "; @nessemble-param $1F-$10 inverted\n",
+            "; @nessemble-param $12345 too wide\n",
+        ] {
+            let malformed = bad(text);
+            assert_eq!(malformed.len(), 1, "expected bad args for `{text}`");
+            assert!(
+                matches!(malformed[0].reason, MalformedReason::BadArgs(_)),
+                "`{text}`"
+            );
+        }
+    }
+
+    #[test]
+    fn binds_across_blank_and_comment_lines() {
+        let sig = &sigs(
+            "; @nessemble-clobbers A, X\n\
+             \n\
+             ; called once, from the reset vector\n\
+             ppu_reset:\n\
+                 RTS\n",
+        )[0];
+        assert_eq!(sig.name, "ppu_reset");
+        assert_eq!(sig.line, 4);
+        assert_eq!(sig.first_tag_line, 1);
+        assert_eq!(sig.clobbers, vec![Slot::A, Slot::X]);
+    }
+
+    #[test]
+    fn tags_accumulate_into_one_signature_in_any_order() {
+        let sig = &sigs(
+            "; @nessemble-clobbers Y\n\
+             ; @nessemble-returns C carry set on error\n\
+             ; @nessemble-param A index\n\
+             ; @nessemble-param X column\n\
+             draw:\n",
+        )[0];
+        assert_eq!(
+            sig.params,
+            vec![
+                (Slot::A, "index".to_string()),
+                (Slot::X, "column".to_string())
+            ]
+        );
+        assert_eq!(
+            sig.returns,
+            vec![(Slot::Flag(Flag::C), "carry set on error".to_string())]
+        );
+        assert_eq!(sig.clobbers, vec![Slot::Y]);
+        // A returned slot is clobbered by definition, and joins declared writes.
+        assert_eq!(sig.declared_writes(), vec![Slot::Y, Slot::Flag(Flag::C)]);
+    }
+
+    #[test]
+    fn a_code_line_breaks_the_binding() {
+        let problems = sig_problems("; @nessemble-clobbers A\n    LDA #$00\nfoo:\n");
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].kind, SignatureProblemKind::Unbound);
+        assert_eq!(problems[0].subject, "@nessemble-clobbers");
+        assert!(sigs("; @nessemble-clobbers A\n    LDA #$00\nfoo:\n").is_empty());
+    }
+
+    #[test]
+    fn a_tag_at_end_of_file_binds_to_nothing() {
+        let problems = sig_problems("foo:\n    RTS\n; @nessemble-clobbers A\n");
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].kind, SignatureProblemKind::Unbound);
+    }
+
+    #[test]
+    fn a_trailing_tag_is_inert() {
+        // `own_line: false` — reported by `ineffective-comment-directive`, and
+        // never resolved into a signature (nor reported as unbound here).
+        assert!(sigs("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n").is_empty());
+        assert!(sig_problems("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n").is_empty());
+    }
+
+    #[test]
+    fn a_repeated_slot_is_reported_once_and_kept_once() {
+        let src = "; @nessemble-param A first\n\
+                   ; @nessemble-param A second\n\
+                   ; @nessemble-clobbers X, X\n\
+                   foo:\n";
+        let (found, problems) = resolve_signatures_with_errors(src);
+        assert_eq!(found[0].params, vec![(Slot::A, "first".to_string())]);
+        assert_eq!(found[0].clobbers, vec![Slot::X]);
+        assert_eq!(problems.len(), 2);
+        assert!(problems
+            .iter()
+            .all(|p| p.kind == SignatureProblemKind::DuplicateSlot));
+    }
+
+    #[test]
+    fn the_same_slot_may_be_an_input_and_an_output() {
+        let sig = &sigs("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n")[0];
+        assert_eq!(sig.params.len(), 1);
+        assert_eq!(sig.returns.len(), 1);
+        assert!(
+            sig_problems("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n").is_empty()
+        );
+    }
+
+    #[test]
+    fn binds_to_a_label_that_is_not_a_block_entry() {
+        // Tucked directly under the previous routine's RTS: the author plainly
+        // meant this label, so it binds. (Whether it *ought* to be documented is
+        // `require-routine-doc`'s question, not the resolver's.)
+        let sig = &sigs("prev:\n    RTS\n; @nessemble-clobbers A\nnext:\n")[0];
+        assert_eq!(sig.name, "next");
+    }
+
+    #[test]
+    fn each_label_gets_its_own_signature() {
+        let found = sigs(
+            "; @nessemble-clobbers A\n\
+             first:\n\
+             \n\
+             ; @nessemble-clobbers X\n\
+             second:\n",
+        );
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name, "first");
+        assert_eq!(found[1].name, "second");
+        assert_eq!(found[1].clobbers, vec![Slot::X]);
+    }
+
+    #[test]
+    fn prose_and_other_directives_are_left_alone() {
+        // `@param` without the namespace is prose; a format hint is not a tag.
+        let src = "; @param A not ours\n; @nessemble-format stride=2\n.db $01\n";
+        assert!(sigs(src).is_empty());
+        assert!(sig_problems(src).is_empty());
+        assert!(bad(src).is_empty());
+    }
+
     // ── Pass 2: blank line after RTS / RTI ──────────────────────────────────
 
     #[test]
@@ -3218,5 +4409,348 @@ data:
             assert_eq!(RuleId::from_id(rule.id()), Some(rule));
             assert_eq!(rule.index(), i);
         }
+    }
+
+    // ── Routine-signature rules ─────────────────────────────────────────────
+
+    /// Lint with the routine rules on and everything else off, so nothing
+    /// crowds the fixtures. `require-routine-doc` follows its shipped default
+    /// (off) unless a test asks for it.
+    fn lint_routines(source: &str) -> Vec<Finding> {
+        lint_routines_with(source, RuleSeverity::Off)
+    }
+
+    /// [`lint_routines`] with `require-routine-doc` turned on.
+    fn lint_routines_with_doc_rule(source: &str) -> Vec<Finding> {
+        lint_routines_with(source, RuleSeverity::Warn)
+    }
+
+    fn lint_routines_with(source: &str, doc_rule: RuleSeverity) -> Vec<Finding> {
+        let no_ignore = |_: &str| false;
+        let mut severities = SeverityMap([RuleSeverity::Off; RuleId::ALL.len()]);
+        for rule in RuleId::ALL.into_iter().filter(|r| r.needs_signatures()) {
+            severities.set(rule, RuleSeverity::Warn);
+        }
+        severities.set(RuleId::RequireRoutineDoc, doc_rule);
+        let opts = LintOptions {
+            severities,
+            window: 3,
+            ignore: &no_ignore,
+        };
+        lint(source, &opts)
+    }
+
+    /// The rules that fire on `source`, with their messages.
+    fn rules_of(findings: &[Finding]) -> Vec<RuleId> {
+        findings.iter().map(|f| f.rule).collect()
+    }
+
+    #[test]
+    fn require_routine_doc_is_off_by_default() {
+        // It would fire on every called label in an existing project at once
+        // (§13.4); every other rule warns out of the box.
+        let defaults = SeverityMap::default();
+        assert_eq!(
+            defaults.get(RuleId::RequireRoutineDoc),
+            RuleSeverity::Off,
+            "require-routine-doc must be opt-in"
+        );
+        for rule in RuleId::ALL
+            .into_iter()
+            .filter(|r| *r != RuleId::RequireRoutineDoc)
+        {
+            assert_eq!(defaults.get(rule), RuleSeverity::Warn, "{}", rule.id());
+        }
+    }
+
+    #[test]
+    fn lint_flags_an_unbound_annotation() {
+        let findings = lint_routines("; @nessemble-clobbers A\n    LDA #$00\nfoo:\n    RTS\n");
+        assert_eq!(rules_of(&findings), vec![RuleId::InvalidRoutineSignature]);
+        assert!(findings[0].message.contains("is not followed by a label"));
+    }
+
+    #[test]
+    fn lint_flags_a_repeated_slot() {
+        let findings =
+            lint_routines("; @nessemble-param A one\n; @nessemble-param A two\nfoo:\n    RTS\n");
+        assert_eq!(rules_of(&findings), vec![RuleId::InvalidRoutineSignature]);
+        assert!(findings[0].message.contains("twice"));
+    }
+
+    #[test]
+    fn lint_flags_an_undeclared_clobber() {
+        let findings = lint_routines(
+            "; @nessemble-clobbers A\n\
+             draw:\n\
+             \x20   LDA #$00\n\
+             \x20   LDX #$10\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::UndeclaredClobber]);
+        assert_eq!(findings[0].line, 2, "points at the routine");
+        assert_eq!(findings[0].subject, "draw");
+        assert!(
+            findings[0].message.contains("writes X"),
+            "{:?}",
+            findings[0]
+        );
+    }
+
+    #[test]
+    fn lint_accepts_a_correct_clobber_list() {
+        assert!(lint_routines(
+            "; @nessemble-clobbers A, X\n\
+             draw:\n\
+             \x20   LDA #$00\n\
+             \x20   LDX #$10\n\
+             \x20   RTS\n",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn lint_never_checks_an_undeclared_routine() {
+        // No clobber list is no claim, so there is nothing to contradict —
+        // even with `require-routine-doc` on, an annotated routine is documented.
+        let findings = lint_routines(
+            "; @nessemble-param A index\n\
+             draw:\n\
+             \x20   LDX #$10\n\
+             \x20   RTS\n",
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn lint_counts_a_returned_slot_as_declared() {
+        // A `returns` slot is clobbered by definition and need not be repeated.
+        assert!(lint_routines(
+            "; @nessemble-returns A the value\n\
+             ; @nessemble-clobbers none\n\
+             read:\n\
+             \x20   LDA #$01\n\
+             \x20   RTS\n",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn lint_catches_a_false_none_claim() {
+        let findings = lint_routines(
+            "; @nessemble-clobbers none\n\
+             touch:\n\
+             \x20   LDY #$00\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::UndeclaredClobber]);
+        assert!(findings[0].message.contains("writes Y"));
+    }
+
+    #[test]
+    fn the_addressing_mode_decides_whether_a_is_written() {
+        // `ASL A` writes A; `ASL $00` does not. The whole reason the effect
+        // table is per opcode rather than per mnemonic.
+        let shifts_a = lint_routines(
+            "; @nessemble-clobbers none\n\
+             shift:\n\
+             \x20   ASL A\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&shifts_a), vec![RuleId::UndeclaredClobber]);
+        assert!(lint_routines(
+            "; @nessemble-clobbers none\n\
+             shift:\n\
+             \x20   ASL $00\n\
+             \x20   RTS\n",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn lint_flags_an_overdeclared_clobber() {
+        let findings = lint_routines(
+            "; @nessemble-clobbers A, Y\n\
+             touch:\n\
+             \x20   LDA #$00\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::OverdeclaredClobber]);
+        assert!(findings[0].message.contains("declares Y"));
+    }
+
+    #[test]
+    fn an_unknown_body_suppresses_overdeclaration_only() {
+        // A macro invocation is an unknown: it could be what writes Y, so the
+        // over-declaration is not reported…
+        let with_macro = lint_routines(
+            "; @nessemble-clobbers A, Y\n\
+             touch:\n\
+             \x20   LDA #$00\n\
+             \x20   do_something\n\
+             \x20   RTS\n",
+        );
+        assert!(with_macro.is_empty(), "{with_macro:?}");
+        // …while a definite write it fails to declare still is.
+        let undeclared = lint_routines(
+            "; @nessemble-clobbers A\n\
+             touch:\n\
+             \x20   LDA #$00\n\
+             \x20   do_something\n\
+             \x20   LDX #$00\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&undeclared), vec![RuleId::UndeclaredClobber]);
+    }
+
+    #[test]
+    fn a_data_run_in_a_body_is_an_unknown() {
+        let findings = lint_routines(
+            "; @nessemble-clobbers A, Y\n\
+             touch:\n\
+             \x20   LDA #$00\n\
+             .db $FF\n\
+             \x20   RTS\n",
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn an_annotated_callee_inflates_the_caller() {
+        let src = "; @nessemble-clobbers A\n\
+                   caller:\n\
+                   \x20   LDA #$00\n\
+                   \x20   JSR callee\n\
+                   \x20   RTS\n\
+                   \n\
+                   ; @nessemble-clobbers X, Y\n\
+                   callee:\n\
+                   \x20   LDX #$00\n\
+                   \x20   LDY #$00\n\
+                   \x20   RTS\n";
+        let findings = lint_routines(src);
+        assert_eq!(rules_of(&findings), vec![RuleId::UndeclaredClobber]);
+        assert_eq!(findings[0].subject, "caller");
+        assert!(findings[0].message.contains("writes X, Y"));
+    }
+
+    #[test]
+    fn an_unannotated_callee_is_an_unknown() {
+        // The callee's writes are still folded in (they are definite), but the
+        // body is not fully understood, so over-declaration stays quiet.
+        let src = "; @nessemble-clobbers A, Y\n\
+                   caller:\n\
+                   \x20   LDA #$00\n\
+                   \x20   JSR helper\n\
+                   \x20   RTS\n\
+                   \n\
+                   helper:\n\
+                   \x20   RTS\n";
+        assert!(lint_routines(src).is_empty());
+    }
+
+    #[test]
+    fn an_indirect_jump_is_an_unknown() {
+        let findings = lint_routines(
+            "; @nessemble-clobbers A, Y\n\
+             dispatch:\n\
+             \x20   LDA #$00\n\
+             \x20   JMP ($0200)\n",
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn mutual_recursion_terminates() {
+        // The cycle counts as an unknown rather than recursing forever.
+        let src = "; @nessemble-clobbers A\n\
+                   ping:\n\
+                   \x20   JSR pong\n\
+                   \x20   RTS\n\
+                   \n\
+                   pong:\n\
+                   \x20   JSR ping\n\
+                   \x20   RTS\n";
+        let findings = lint_routines(src);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn fall_through_is_a_documented_false_negative() {
+        // `first` falls through into `second` and so really does clobber Y, but
+        // the body walk stops at the next block entry (§8.1). Pinned so the
+        // behavior is documented rather than discovered.
+        let src = "; @nessemble-clobbers A\n\
+                   first:\n\
+                   \x20   LDA #$00\n\
+                   \n\
+                   second:\n\
+                   \x20   LDY #$00\n\
+                   \x20   RTS\n";
+        let findings = lint_routines(src);
+        assert!(
+            findings.is_empty(),
+            "fall-through is under-approximated: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn require_routine_doc_flags_only_called_undocumented_routines() {
+        let src = "\n\
+                   main:\n\
+                   \x20   JSR helper\n\
+                   \x20   RTS\n\
+                   \n\
+                   helper:\n\
+                   \x20   RTS\n\
+                   \n\
+                   ; @nessemble-clobbers none\n\
+                   documented:\n\
+                   \x20   RTS\n";
+        let findings = lint_routines_with_doc_rule(src);
+        assert_eq!(rules_of(&findings), vec![RuleId::RequireRoutineDoc]);
+        assert_eq!(
+            findings[0].subject, "helper",
+            "`main` is never called and `documented` is annotated"
+        );
+    }
+
+    #[test]
+    fn routine_rules_honor_the_ignore_predicate() {
+        let ignore = |name: &str| name.starts_with("loc_");
+        let mut severities = SeverityMap([RuleSeverity::Off; RuleId::ALL.len()]);
+        severities.set(RuleId::UndeclaredClobber, RuleSeverity::Warn);
+        let opts = LintOptions {
+            severities,
+            window: 3,
+            ignore: &ignore,
+        };
+        let src = "; @nessemble-clobbers none\n\
+                   loc_8000:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        assert!(lint(src, &opts).is_empty());
+    }
+
+    #[test]
+    fn routine_rules_stay_quiet_on_undocumented_code() {
+        // The adoption guarantee: a project that has never heard of these
+        // annotations gets nothing from any of the routine rules (bar the
+        // opt-in doc rule, which is off by default).
+        let src = "\n\
+                   ; a hand-rolled convention from before this feature existed\n\
+                   ; in: A = index, clobbers X\n\
+                   draw:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        let mut severities = SeverityMap::default();
+        severities.set(RuleId::RequireBlockComment, RuleSeverity::Off);
+        let no_ignore = |_: &str| false;
+        let opts = LintOptions {
+            severities,
+            window: 3,
+            ignore: &no_ignore,
+        };
+        assert!(lint(src, &opts).is_empty());
     }
 }

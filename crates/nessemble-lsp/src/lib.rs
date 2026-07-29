@@ -2063,6 +2063,14 @@ fn comment_directive_items() -> Vec<CompletionItem> {
                 format!("{canonical} stride="),
                 directive_docs(name),
             )),
+            // A signature tag is useless without a slot, so offer the space the
+            // author is about to type anyway.
+            tooling::DirectiveName::Param
+            | tooling::DirectiveName::Returns
+            | tooling::DirectiveName::Clobbers => items.push(directive_completion(
+                format!("{canonical} "),
+                directive_docs(name),
+            )),
             tooling::DirectiveName::CoverageIgnoreNextLine => {
                 items.push(directive_completion(
                     canonical.to_string(),
@@ -2106,6 +2114,22 @@ fn directive_docs(name: tooling::DirectiveName) -> &'static str {
         tooling::DirectiveName::CoverageIgnoreNextLine => {
             "Exclude the next significant line from `nessemble coverage` (blank and comment \
              lines in between are skipped, so an explanation may follow this directive)."
+        }
+        tooling::DirectiveName::Param => {
+            "Document a register or memory slot the routine below **reads on entry**. One slot \
+             per tag; everything after the slot is its description. Slots are `A`, `X`, `Y`, \
+             `S`, `P`, a flag (`C`, `Z`, `N`, `V`, `D`, `I`), a memory symbol (`[tmp1]`), or an \
+             address or range (`$10-$1F`)."
+        }
+        tooling::DirectiveName::Returns => {
+            "Document a slot the routine below **defines on exit** — `@nessemble-returns C` is \
+             how a 6502 routine returns a boolean. A returned slot is clobbered by definition \
+             and need not be repeated in `@nessemble-clobbers`."
+        }
+        tooling::DirectiveName::Clobbers => {
+            "Declare the slots the routine below **destroys**; anything not listed is preserved. \
+             `none` claims it preserves everything. `A`, `X`, `Y`, and `S` are checked against \
+             what the routine actually writes; flags and memory slots are documentation."
         }
     }
 }

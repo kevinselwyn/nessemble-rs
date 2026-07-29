@@ -1,0 +1,80 @@
+# Register effects per mnemonic, for the clobber verifier
+# (`plans/010-routine-signatures.md` §6.2). Kept out of `opcodes.csv` so that
+# file stays a verbatim import of the upstream reference table.
+#
+#   MNEMONIC,writes,reads
+#
+# `writes`/`reads` are strings over A, X, Y, S; empty means none. Only the
+# registers are tracked — flags are documentation, not verified (§8.3).
+#
+# Effects that follow from the *addressing mode* are added mechanically in
+# build.rs and must not be listed here:
+#   - indexed modes (ZeroPageX, AbsoluteX, IndirectX) read X;
+#   - indexed modes (ZeroPageY, AbsoluteY, IndirectY) read Y;
+#   - accumulator mode reads and writes A (ASL/LSR/ROL/ROR).
+#
+# A mnemonic absent from this table has *unknown* effects: the verifier treats a
+# routine containing one as not fully understood, which suppresses
+# `overdeclared-clobber` without ever inventing a write. Every undocumented
+# ("illegal") opcode is deliberately absent.
+#
+# One deliberate approximation: the stack pointer is written only by TXS. PHA,
+# PLA, PHP, PLP, JSR, RTS, RTI, and BRK all move S, but routines balance them,
+# and counting them as writing S would flag every routine that touches the
+# stack. "Clobbers S" means "moved the stack pointer", which is TXS.
+LDA,A,
+LDX,X,
+LDY,Y,
+STA,,A
+STX,,X
+STY,,Y
+TAX,X,A
+TAY,Y,A
+TXA,A,X
+TYA,A,Y
+TSX,X,S
+TXS,S,X
+PHA,,A
+PLA,A,
+PHP,,
+PLP,,
+AND,A,A
+ORA,A,A
+EOR,A,A
+ADC,A,A
+SBC,A,A
+CMP,,A
+CPX,,X
+CPY,,Y
+BIT,,A
+INC,,
+DEC,,
+INX,X,X
+INY,Y,Y
+DEX,X,X
+DEY,Y,Y
+ASL,,
+LSR,,
+ROL,,
+ROR,,
+JMP,,
+JSR,,
+RTS,,
+RTI,,
+BRK,,
+NOP,,
+CLC,,
+SEC,,
+CLI,,
+SEI,,
+CLV,,
+CLD,,
+SED,,
+BPL,,
+BMI,,
+BVC,,
+BVS,,
+BCC,,
+BCS,,
+BNE,,
+BEQ,,
