@@ -1,7 +1,8 @@
 # nessemble-rs: A Plan for Routine Signature Annotations
 
-> Status: **Proposed — ready to build; the four load-bearing decisions are
-> settled ([§13](#13-decisions)).** This document designs the JSDoc-shaped
+> Status: **Complete — Phases 0–4 shipped ([§11](#11-phased-plan)); decisions
+> settled ([§13](#13-decisions)); four deviations found by building it recorded
+> in [§16](#16-as-built).** This document designs the JSDoc-shaped
 > comment annotations that document a subroutine's **register calling
 > convention**: which registers it takes, which it returns, and which it
 > destroys. It lands as three rows in the
@@ -689,3 +690,46 @@ than defaults. Say the word on any of them.
   *Mitigation:* a documented `sed`-able mapping in the docs, and the fact that
   the old comment stays visible on hover as prose alongside the new table, so
   migration can be partial and gradual.
+
+## 16. As built
+
+Four things changed between designing this and writing it. Each was settled by
+the code rather than by argument, and each is the version that shipped.
+
+1. **`effects.csv` is its own file, not two columns on `opcodes.csv`** (§6.2).
+   `opcodes.csv` is documented as a verbatim import of the upstream reference
+   project's table; widening it would break the one thing that makes re-importing
+   safe. The effects live in `crates/nessemble-isa/data/effects.csv`, keyed by
+   mnemonic, and `build.rs` merges them per opcode — adding the mode-derived
+   effects (indexed modes read their index register, accumulator mode reads and
+   writes `A`) mechanically rather than listing them per row. The per-opcode
+   distinction the plan insisted on is preserved; only the data's shape moved.
+2. **`none` mixed with real slots is bad arguments, not a binding problem.**
+   §7 assigned `@nessemble-clobbers A, none` to `invalid-routine-signature`.
+   Writing it, that was plainly wrong: it violates the directive's declared
+   argument syntax, which is exactly what `unknown-comment-directive` reports,
+   with `arg_syntax()` quoted in the message for free. `invalid-routine-signature`
+   is left with the two problems only *binding* can reveal — an annotation
+   attached to no label, and a repeated slot.
+3. **An annotation binds to any label, not only a block entry** (§4). Requiring
+   `is_block_entry` would have made a routine tucked directly under the previous
+   one's `RTS` unannotatable, reporting the author's obviously-intended tags as
+   unbound. Whether a label *ought* to be documented is a separate question, and
+   only `require-routine-doc` asks it. The body-extent walk (§8.1) still uses
+   block entries, where the under-approximation is the point.
+4. **The stack pointer is written only by `TXS`.** `PHA`, `PLA`, `PHP`, `PLP`,
+   `JSR`, `RTS`, `RTI`, and `BRK` all move `S`, but routines balance them, so
+   recording them as writes would have made `undeclared-clobber` fire on every
+   routine that touches the stack — the credibility failure §15 warns about,
+   built straight into the data. "Clobbers `S`" means "moved the stack pointer",
+   which is `TXS`. Pinned by a test over the whole table.
+
+One addition: `tooling::missing_clobbers` — the registers a named routine writes
+but does not declare — is public, because the editor's quick fix needs exactly
+what the rule computed, and recomputing it in the LSP would have been the second
+copy of the analysis this plan exists to avoid.
+
+---
+
+*Shipped. Phases 0–1 and the analysis in 3–4 landed in one commit, the editor
+surfaces in a second, and the docs in a third, under one `minor` changeset.*

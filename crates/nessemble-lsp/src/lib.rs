@@ -43,7 +43,8 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
-    GotoDefinition, HoverRequest, References, Rename, Request as _, SemanticTokensFullRequest,
+    GotoDefinition, HoverRequest, InlayHintRequest, References, Rename, Request as _,
+    SemanticTokensFullRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -52,13 +53,14 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     FoldingRange, FoldingRangeKind, FoldingRangeParams, FoldingRangeProviderCapability,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range,
-    ReferenceParams, RenameParams, SemanticToken, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    Url, WorkDoneProgressOptions, WorkspaceEdit,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, InlayHint,
+    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range, ReferenceParams,
+    RenameParams, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
+    WorkspaceEdit,
 };
 
 use nessemble_core::tooling::{self, LexKind, RuleSeverity};
@@ -399,7 +401,13 @@ impl Server {
         // Inside a comment, code completions are noise — offer the comment
         // directives instead, which are otherwise undiscoverable.
         if in_comment(&doc.text, pos) {
-            return comment_directive_items();
+            let mut items = comment_directive_items();
+            // Above a label, offer the whole signature block in one item. This
+            // is how the annotations get discovered at all.
+            if let Some(indent) = documentable_routine_indent(&doc.text, pos) {
+                items.insert(0, signature_scaffold_item(&indent));
+            }
+            return items;
         }
         let mut items = mnemonic_items();
         items.extend(directive_items());
@@ -435,10 +443,14 @@ impl Server {
     /// defined in the buffer, with its name range. `None` if `uri` is unknown.
     fn document_symbols(&self, uri: &Url) -> Option<Vec<DocumentSymbol>> {
         let text = &self.documents.get(uri)?.text;
+        let signatures = tooling::resolve_signatures(text);
         Some(
             definitions(text)
                 .into_iter()
-                .map(|d| document_symbol(&d))
+                .map(|d| {
+                    let signature = signatures.iter().find(|s| s.name == d.name);
+                    document_symbol(&d, signature)
+                })
                 .collect(),
         )
     }
@@ -552,7 +564,12 @@ impl Server {
         let token = token_at(&doc.text, pos)?;
         let markdown = match token.kind {
             LexKind::Directive => directive_hover(token.text)?,
-            LexKind::Ident => ident_hover(token.text, &doc.text, &doc.symbols)?,
+            LexKind::Ident => ident_hover(
+                token.text,
+                &doc.text,
+                &doc.symbols,
+                self.signature_for(uri, token.text).as_ref(),
+            )?,
             LexKind::Comment => return comment_directive_hover(&doc.text, pos),
             _ => return None,
         };
@@ -562,6 +579,67 @@ impl Server {
                 value: markdown,
             }),
             range: Some(token.range),
+        })
+    }
+
+    /// Inlay hints for `range` in the document at `uri`: the clobber set of each
+    /// `JSR`'s target, rendered at the end of the call line.
+    ///
+    /// This is the one surface that puts text on lines the author did not write,
+    /// so it is deliberately narrow: only `JSR` lines, only when the target
+    /// declares a clobber list, and clients toggle it off wholesale.
+    fn inlay_hints(&self, uri: &Url, range: Range) -> Vec<InlayHint> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut hints = Vec::new();
+        for (idx, line) in doc.text.lines().enumerate() {
+            let line_no = idx as u32;
+            if line_no < range.start.line || line_no > range.end.line {
+                continue;
+            }
+            let Some(target) = jsr_target(line) else {
+                continue;
+            };
+            let Some(sig) = self.signature_for(uri, target) else {
+                continue;
+            };
+            if !sig.declares_clobbers {
+                continue;
+            }
+            hints.push(InlayHint {
+                position: Position::new(line_no, utf16_len(line)),
+                label: InlayHintLabel::String(format!(
+                    "  ‹{}›",
+                    tooling::format_slots(&sig.clobbers)
+                )),
+                kind: Some(InlayHintKind::PARAMETER),
+                tooltip: None,
+                padding_left: Some(true),
+                padding_right: None,
+                text_edits: None,
+                data: None,
+            });
+        }
+        hints
+    }
+
+    /// The routine signature declared for `name`, looked up in the document at
+    /// `uri` first and then across every other open document.
+    ///
+    /// Project-wide on purpose: the point of a signature is to be readable at
+    /// the **call site**, and a `JSR` routinely names a routine defined in a
+    /// sibling or parent file.
+    fn signature_for(&self, uri: &Url, name: &str) -> Option<tooling::Signature> {
+        let here = self
+            .documents
+            .get(uri)
+            .and_then(|doc| find_signature(&doc.text, name));
+        here.or_else(|| {
+            self.documents
+                .iter()
+                .filter(|(other, _)| *other != uri)
+                .find_map(|(_, doc)| find_signature(&doc.text, name))
         })
     }
 
@@ -602,7 +680,8 @@ impl Server {
     }
 
     /// Code actions offered for `range` in the document at `uri`: base
-    /// conversions when the cursor is on a numeric literal.
+    /// conversions when the cursor is on a numeric literal, the deprecated
+    /// directive rename, and the two routine-signature actions.
     fn code_actions(&self, uri: &Url, range: Range) -> Vec<CodeActionOrCommand> {
         let Some(doc) = self.documents.get(uri) else {
             return Vec::new();
@@ -610,6 +689,17 @@ impl Server {
         // A deprecated directive on the requested line gets a rename fix; it is
         // what makes the deprecation actionable rather than nagging.
         let fixes = deprecated_directive_fixes(uri, &doc.text, range);
+        if !fixes.is_empty() {
+            return fixes;
+        }
+        // The verifier found a missing register: offer to add it rather than
+        // making the author retype the list.
+        let fixes = undeclared_clobber_fixes(uri, &doc.text, range);
+        if !fixes.is_empty() {
+            return fixes;
+        }
+        // On an undocumented routine's label, offer the scaffold.
+        let fixes = document_routine_actions(uri, &doc.text, range);
         if !fixes.is_empty() {
             return fixes;
         }
@@ -1274,17 +1364,23 @@ fn definitions(text: &str) -> Vec<Definition> {
     defs
 }
 
-/// Build a document-outline entry for a definition.
-fn document_symbol(def: &Definition) -> DocumentSymbol {
-    let (kind, detail) = match def.kind {
+/// Build a document-outline entry for a definition. A documented routine carries
+/// its clobber list in the outline's detail, so a whole file's register
+/// discipline is visible in one panel.
+fn document_symbol(def: &Definition, signature: Option<&tooling::Signature>) -> DocumentSymbol {
+    let (kind, base) = match def.kind {
         DefKind::Label => (SymbolKind::FUNCTION, "label"),
         DefKind::Constant => (SymbolKind::CONSTANT, "constant"),
         DefKind::Macro => (SymbolKind::FUNCTION, "macro"),
     };
+    let detail = match signature.filter(|s| s.declares_clobbers) {
+        Some(sig) => format!("{base} · clobbers {}", tooling::format_slots(&sig.clobbers)),
+        None => base.to_string(),
+    };
     #[allow(deprecated)] // `deprecated` field is required but unused.
     DocumentSymbol {
         name: def.name.clone(),
-        detail: Some(detail.to_string()),
+        detail: Some(detail),
         kind,
         tags: None,
         deprecated: None,
@@ -1327,7 +1423,16 @@ fn directive_hover(name: &str) -> Option<String> {
 
 /// Hover markdown for an identifier: opcode/addressing details if it is a
 /// mnemonic, the resolved value if it is a defined symbol, or a macro note.
-fn ident_hover(name: &str, text: &str, symbols: &[ListSymbol]) -> Option<String> {
+///
+/// When the identifier names a routine with a signature, the signature table is
+/// rendered too — so hovering the operand of a `JSR` answers "does this call eat
+/// my `Y`?" without leaving the call site.
+fn ident_hover(
+    name: &str,
+    text: &str,
+    symbols: &[ListSymbol],
+    signature: Option<&tooling::Signature>,
+) -> Option<String> {
     if let Some(md) = mnemonic_hover(name) {
         return Some(md);
     }
@@ -1347,12 +1452,70 @@ fn ident_hover(name: &str, text: &str, symbols: &[ListSymbol]) -> Option<String>
             md.push_str("\n\n");
             md.push_str(&doc);
         }
+        if let Some(sig) = signature {
+            md.push_str("\n\n");
+            md.push_str(&signature_md(sig));
+        }
         return Some(md);
+    }
+    // A routine the assembler could not resolve to an address still has a
+    // contract worth showing.
+    if let Some(sig) = signature {
+        return Some(format!("**{name}** (routine)\n\n{}", signature_md(sig)));
     }
     if macro_names(text).iter().any(|m| m == name) {
         return Some(format!("**{name}** (macro)"));
     }
     None
+}
+
+/// The label a line calls with a direct `JSR`, or `None` for anything else —
+/// including an indirect `JSR ($…)`, which names no label.
+fn jsr_target(line: &str) -> Option<&str> {
+    let code = line.split(';').next().unwrap_or("").trim();
+    let (mnemonic, operand) = code.split_once(char::is_whitespace)?;
+    if !mnemonic.eq_ignore_ascii_case("jsr") {
+        return None;
+    }
+    let target = operand.trim();
+    (!target.is_empty()
+        && target
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.'))
+    .then_some(target)
+}
+
+/// The signature declared for `name` in `text`, if any.
+fn find_signature(text: &str, name: &str) -> Option<tooling::Signature> {
+    tooling::resolve_signatures(text)
+        .into_iter()
+        .find(|s| s.name == name)
+}
+
+/// Render a routine signature as hover markdown: a table of inputs, a table of
+/// outputs, and the clobber list.
+fn signature_md(sig: &tooling::Signature) -> String {
+    use std::fmt::Write as _;
+
+    let mut md = String::new();
+    for (heading, rows) in [("in", &sig.params), ("out", &sig.returns)] {
+        if rows.is_empty() {
+            continue;
+        }
+        let _ = writeln!(md, "| {heading} | |\n| --- | --- |");
+        for (slot, description) in rows {
+            let _ = writeln!(md, "| `{slot}` | {description} |");
+        }
+        md.push('\n');
+    }
+    if sig.declares_clobbers {
+        let _ = write!(
+            md,
+            "**clobbers** `{}`",
+            tooling::format_slots(&sig.clobbers)
+        );
+    }
+    md.trim_end().to_string()
 }
 
 /// The documentation for the symbol `name`: the run of line comments
@@ -2063,6 +2226,14 @@ fn comment_directive_items() -> Vec<CompletionItem> {
                 format!("{canonical} stride="),
                 directive_docs(name),
             )),
+            // A signature tag is useless without a slot, so offer the space the
+            // author is about to type anyway.
+            tooling::DirectiveName::Param
+            | tooling::DirectiveName::Returns
+            | tooling::DirectiveName::Clobbers => items.push(directive_completion(
+                format!("{canonical} "),
+                directive_docs(name),
+            )),
             tooling::DirectiveName::CoverageIgnoreNextLine => {
                 items.push(directive_completion(
                     canonical.to_string(),
@@ -2072,6 +2243,59 @@ fn comment_directive_items() -> Vec<CompletionItem> {
         }
     }
     items
+}
+
+/// The comment prefix (`;` plus one space, at the line's own indent) to use for a
+/// signature block, when the line at `pos` is a comment that a label follows and
+/// that label has no signature yet. `None` otherwise.
+fn documentable_routine_indent(text: &str, pos: Position) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let line = lines.get(pos.line as usize)?;
+    let indent: String = line
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    // Scan down past blank and comment lines the way the resolver binds.
+    let target = lines
+        .iter()
+        .skip(pos.line as usize + 1)
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with(';'))?;
+    let name = target.trim().strip_suffix(':')?;
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    // Already documented? Then the scaffold would duplicate tags.
+    if find_signature(text, name).is_some() {
+        return None;
+    }
+    Some(indent)
+}
+
+/// The one composite completion that scaffolds a whole signature block.
+fn signature_scaffold_item(indent: &str) -> CompletionItem {
+    let body = format!(
+        "@nessemble-param ${{1:A}} ${{2:description}}\n\
+         {indent}; @nessemble-returns ${{3:C}} ${{4:description}}\n\
+         {indent}; @nessemble-clobbers ${{5:A, X}}"
+    );
+    CompletionItem {
+        label: "@nessemble routine signature block".to_string(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some("nessemble comment directive".to_string()),
+        insert_text: Some(body),
+        insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+        // Sort ahead of the individual tags: above a label, the block is what
+        // the author almost always wants.
+        sort_text: Some("0".to_string()),
+        documentation: Some(lsp_types::Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: "Document the routine below: the registers it takes, what it returns, and \
+                    what it destroys. `A`, `X`, `Y`, and `S` in the clobber list are checked \
+                    against what the routine actually writes."
+                .to_string(),
+        })),
+        ..Default::default()
+    }
 }
 
 fn directive_completion(label: String, documentation: &str) -> CompletionItem {
@@ -2106,6 +2330,22 @@ fn directive_docs(name: tooling::DirectiveName) -> &'static str {
         tooling::DirectiveName::CoverageIgnoreNextLine => {
             "Exclude the next significant line from `nessemble coverage` (blank and comment \
              lines in between are skipped, so an explanation may follow this directive)."
+        }
+        tooling::DirectiveName::Param => {
+            "Document a register or memory slot the routine below **reads on entry**. One slot \
+             per tag; everything after the slot is its description. Slots are `A`, `X`, `Y`, \
+             `S`, `P`, a flag (`C`, `Z`, `N`, `V`, `D`, `I`), a memory symbol (`[tmp1]`), or an \
+             address or range (`$10-$1F`)."
+        }
+        tooling::DirectiveName::Returns => {
+            "Document a slot the routine below **defines on exit** — `@nessemble-returns C` is \
+             how a 6502 routine returns a boolean. A returned slot is clobbered by definition \
+             and need not be repeated in `@nessemble-clobbers`."
+        }
+        tooling::DirectiveName::Clobbers => {
+            "Declare the slots the routine below **destroys**; anything not listed is preserved. \
+             `none` claims it preserves everything. `A`, `X`, `Y`, and `S` are checked against \
+             what the routine actually writes; flags and memory slots are documentation."
         }
     }
 }
@@ -2167,6 +2407,132 @@ fn deprecated_directive_fixes(uri: &Url, text: &str, range: Range) -> Vec<CodeAc
             })
         })
         .collect()
+}
+
+/// Quick fixes for an `undeclared-clobber` on the requested line: rewrite the
+/// routine's `@nessemble-clobbers` list to include the register the verifier
+/// found it writing, in canonical order.
+///
+/// The verifier already knows which register is missing; making the author
+/// retype the list is the difference between a rule people fix and a rule people
+/// switch off.
+fn undeclared_clobber_fixes(uri: &Url, text: &str, range: Range) -> Vec<CodeActionOrCommand> {
+    let line = range.start.line + 1;
+    let Some(sig) = tooling::resolve_signatures(text)
+        .into_iter()
+        .find(|s| s.declares_clobbers && s.line == line)
+    else {
+        return Vec::new();
+    };
+    let Some(missing) = tooling::missing_clobbers(text, &sig.name) else {
+        return Vec::new();
+    };
+    if missing.is_empty() {
+        return Vec::new();
+    }
+
+    // The tag to rewrite: the `@nessemble-clobbers` bound to this routine.
+    let Some(directive) = tooling::scan_directives(text).into_iter().find(|d| {
+        d.own_line
+            && d.name == tooling::DirectiveName::Clobbers
+            && d.line < sig.line
+            && d.line >= sig.first_tag_line
+    }) else {
+        return Vec::new();
+    };
+    let mut slots = sig.clobbers.clone();
+    slots.extend(missing.iter().cloned());
+    let new_list = tooling::format_slots(&slots);
+    let added = tooling::format_slots(&missing);
+
+    // Replace from the end of the directive token to the start of any trailing
+    // prose (or end of line), so `; @nessemble-clobbers A ; why` keeps its why.
+    let line_start = line_start_byte(text, directive.line as usize - 1);
+    let line_text = text[line_start..].lines().next().unwrap_or("");
+    let args_start = directive.end;
+    let args_end = line_start + trailing_prose_offset(line_text, args_start - line_start);
+    let mut changes = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: byte_range_to_lsp(text, args_start, args_end),
+            new_text: format!(" {new_list}"),
+        }],
+    );
+    vec![CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Add `{added}` to `@nessemble-clobbers`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })]
+}
+
+/// The byte offset, within `line_text`, where the argument text starting at
+/// `from` ends: at the `;` that opens trailing prose, or end of line, with any
+/// whitespace before it excluded so the prose keeps its separating space.
+fn trailing_prose_offset(line_text: &str, from: usize) -> usize {
+    let end = match line_text[from..].find(';') {
+        Some(i) => from + i,
+        None => line_text.len(),
+    };
+    line_text[from..end].trim_end().len() + from
+}
+
+/// The byte offset of 0-based `line` in `text`.
+fn line_start_byte(text: &str, line: usize) -> usize {
+    text.split_inclusive('\n')
+        .take(line)
+        .map(str::len)
+        .sum::<usize>()
+}
+
+/// A "Document this routine" action on an undocumented label: insert a signature
+/// block above it, at the label's own indentation.
+fn document_routine_actions(uri: &Url, text: &str, range: Range) -> Vec<CodeActionOrCommand> {
+    let lines: Vec<&str> = text.lines().collect();
+    let idx = range.start.line as usize;
+    let Some(line) = lines.get(idx) else {
+        return Vec::new();
+    };
+    let Some(name) = line.trim().strip_suffix(':') else {
+        return Vec::new();
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Vec::new();
+    }
+    if find_signature(text, name).is_some() {
+        return Vec::new();
+    }
+    let indent: String = line
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let block = format!(
+        "{indent}; @nessemble-param A description\n\
+         {indent}; @nessemble-returns C description\n\
+         {indent}; @nessemble-clobbers A, X\n"
+    );
+    let at = Position::new(range.start.line, 0);
+    let mut changes = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: Range::new(at, at),
+            new_text: block,
+        }],
+    );
+    vec![CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Document routine `{name}`"),
+        kind: Some(CodeActionKind::REFACTOR),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })]
 }
 
 /// Convert a byte range that lies within one line into an LSP [`Range`]
@@ -2332,6 +2698,7 @@ fn server_capabilities() -> ServerCapabilities {
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         rename_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -2423,6 +2790,13 @@ fn main_loop(connection: &Connection, workspace_roots: Vec<PathBuf>) -> LspResul
                         let result = serde_json::from_value::<SemanticTokensParams>(req.params)
                             .ok()
                             .and_then(|p| server.semantic_tokens(&p.text_document.uri));
+                        Response::new_ok(req.id, result)
+                    }
+                    InlayHintRequest::METHOD => {
+                        let result = serde_json::from_value::<InlayHintParams>(req.params)
+                            .ok()
+                            .map(|p| server.inlay_hints(&p.text_document.uri, p.range))
+                            .unwrap_or_default();
                         Response::new_ok(req.id, result)
                     }
                     DocumentSymbolRequest::METHOD => {
@@ -3759,6 +4133,205 @@ mod tests {
         );
         // The type legend is unchanged — the wire ids stay frozen.
         assert_eq!(opts.legend.token_types.len(), 7);
+    }
+
+    // ---- Routine signatures -----------------------------------------------
+
+    /// A documented routine and a call site for it, in one buffer.
+    const SIGNED: &str = "; Draw one metasprite.\n\
+                          ;\n\
+                          ; @nessemble-param A metasprite index\n\
+                          ; @nessemble-returns C set when clipped\n\
+                          ; @nessemble-clobbers A, X, [oam_cursor]\n\
+                          draw_metasprite:\n\
+                          \x20   RTS\n\
+                          \n\
+                          main:\n\
+                          \x20   JSR draw_metasprite\n\
+                          \x20   RTS\n";
+
+    #[test]
+    fn hover_on_a_call_site_shows_the_callees_signature() {
+        // The headline surface: the contract is readable where the call is,
+        // without scrolling to the callee.
+        let md = hover_markdown("file:///sig.asm", SIGNED, Position::new(9, 12))
+            .expect("hover on the JSR operand");
+        assert!(md.contains("| in | |"), "{md}");
+        assert!(md.contains("| `A` | metasprite index |"), "{md}");
+        assert!(md.contains("| `C` | set when clipped |"), "{md}");
+        assert!(md.contains("**clobbers** `A, X, [oam_cursor]`"), "{md}");
+    }
+
+    #[test]
+    fn hover_on_the_definition_shows_the_same_signature() {
+        let md = hover_markdown("file:///sig.asm", SIGNED, Position::new(5, 3))
+            .expect("hover on the label");
+        assert!(md.contains("**clobbers** `A, X, [oam_cursor]`"), "{md}");
+        // The prose above the tags still comes through as documentation.
+        assert!(md.contains("Draw one metasprite."), "{md}");
+    }
+
+    #[test]
+    fn hover_finds_a_signature_in_another_open_document() {
+        // A `JSR` routinely names a routine defined in a sibling file, which is
+        // exactly where the contract is least visible.
+        let mut server = Server::default();
+        open(
+            &mut server,
+            "file:///lib.asm",
+            "; @nessemble-clobbers Y\nhelper:\n    RTS\n",
+        );
+        open(&mut server, "file:///main.asm", "main:\n    JSR helper\n");
+        let uri = Url::parse("file:///main.asm").unwrap();
+        let hover = server.hover(&uri, Position::new(1, 10)).expect("hover");
+        let HoverContents::Markup(m) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(m.value.contains("**clobbers** `Y`"), "{}", m.value);
+    }
+
+    #[test]
+    fn outline_detail_carries_the_clobber_list() {
+        let mut server = Server::default();
+        open(&mut server, "file:///o2.asm", SIGNED);
+        let uri = Url::parse("file:///o2.asm").unwrap();
+        let syms = server.document_symbols(&uri).expect("known document");
+        let drawn = syms
+            .iter()
+            .find(|s| s.name == "draw_metasprite")
+            .expect("the routine is in the outline");
+        assert_eq!(
+            drawn.detail.as_deref(),
+            Some("label · clobbers A, X, [oam_cursor]")
+        );
+        // An undocumented label keeps the plain detail.
+        let main = syms.iter().find(|s| s.name == "main").expect("main");
+        assert_eq!(main.detail.as_deref(), Some("label"));
+    }
+
+    #[test]
+    fn completion_offers_the_signature_tags_and_a_scaffold_above_a_label() {
+        let mut server = Server::default();
+        open(&mut server, "file:///c2.asm", "; @\nwidget:\n    RTS\n");
+        let uri = Url::parse("file:///c2.asm").unwrap();
+        let ls = labels(server.complete(&uri, Position::new(0, 3)));
+        assert!(ls.iter().any(|l| l == "@nessemble-param "), "{ls:?}");
+        assert!(ls.iter().any(|l| l == "@nessemble-returns "), "{ls:?}");
+        assert!(ls.iter().any(|l| l == "@nessemble-clobbers "), "{ls:?}");
+        assert!(
+            ls.iter().any(|l| l == "@nessemble routine signature block"),
+            "the scaffold is offered above a label: {ls:?}"
+        );
+
+        // Not above a label, the scaffold would bind to nothing.
+        open(&mut server, "file:///c3.asm", "; @\n.db $01\n");
+        let uri3 = Url::parse("file:///c3.asm").unwrap();
+        let ls = labels(server.complete(&uri3, Position::new(0, 3)));
+        assert!(
+            !ls.iter().any(|l| l == "@nessemble routine signature block"),
+            "{ls:?}"
+        );
+    }
+
+    #[test]
+    fn code_action_documents_an_undocumented_routine() {
+        let mut server = Server::default();
+        open(&mut server, "file:///r.asm", "widget:\n    RTS\n");
+        let uri = Url::parse("file:///r.asm").unwrap();
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(0, 0), Position::new(0, 0)));
+        let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(action.title, "Document routine `widget`");
+        let edits = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+        assert!(edits[&uri][0].new_text.contains("@nessemble-clobbers"));
+
+        // An already-documented routine is not offered it again.
+        open(
+            &mut server,
+            "file:///r2.asm",
+            "; @nessemble-clobbers A\nwidget:\n",
+        );
+        let uri2 = Url::parse("file:///r2.asm").unwrap();
+        let actions =
+            server.code_actions(&uri2, Range::new(Position::new(1, 0), Position::new(1, 0)));
+        assert!(actions.is_empty(), "{actions:?}");
+    }
+
+    #[test]
+    fn quick_fix_adds_the_missing_register_to_the_clobber_list() {
+        let mut server = Server::default();
+        open(
+            &mut server,
+            "file:///f.asm",
+            "; @nessemble-clobbers A ; only A, supposedly\ndraw:\n    LDA #$00\n    LDX #$10\n    RTS\n",
+        );
+        let uri = Url::parse("file:///f.asm").unwrap();
+        // The diagnostic sits on the routine's label line.
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(1, 0), Position::new(1, 0)));
+        let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(action.title, "Add `X` to `@nessemble-clobbers`");
+        let edits = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+        let edit = &edits[&uri][0];
+        assert_eq!(edit.new_text, " A, X", "canonical order");
+        // The replaced span is exactly the argument text — the trailing prose
+        // and the space before it survive.
+        assert_eq!(
+            edit.range,
+            Range::new(Position::new(0, 21), Position::new(0, 23))
+        );
+        let mut fixed = String::from("; @nessemble-clobbers A ; only A, supposedly");
+        fixed.replace_range(21..23, &edit.new_text);
+        assert_eq!(fixed, "; @nessemble-clobbers A, X ; only A, supposedly");
+    }
+
+    #[test]
+    fn inlay_hints_show_a_callees_clobbers_on_jsr_lines() {
+        let mut server = Server::default();
+        open(&mut server, "file:///i.asm", SIGNED);
+        let uri = Url::parse("file:///i.asm").unwrap();
+        let all = Range::new(Position::new(0, 0), Position::new(20, 0));
+        let hints = server.inlay_hints(&uri, all);
+        assert_eq!(hints.len(), 1, "only the JSR line: {hints:?}");
+        assert_eq!(hints[0].position.line, 9);
+        let InlayHintLabel::String(label) = &hints[0].label else {
+            panic!("expected a string label");
+        };
+        assert!(label.contains("A, X, [oam_cursor]"), "{label}");
+
+        // A call to an undocumented routine gets no hint.
+        open(
+            &mut server,
+            "file:///i2.asm",
+            "main:\n    JSR helper\nhelper:\n    RTS\n",
+        );
+        let uri2 = Url::parse("file:///i2.asm").unwrap();
+        assert!(server.inlay_hints(&uri2, all).is_empty());
+    }
+
+    #[test]
+    fn signature_diagnostics_reach_the_editor() {
+        let dir = workspace("sig-diag");
+        let file = dir.join("a.asm");
+        let uri = Url::from_file_path(&file).unwrap();
+        let diags = lint_diagnostics(
+            &uri,
+            "; @nessemble-clobbers none\ndraw:\n    LDX #$00\n    RTS\n",
+        );
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("writes X")),
+            "{messages:?}"
+        );
+        assert!(diags
+            .iter()
+            .all(|d| d.source.as_deref() == Some("nessemble-lint")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
