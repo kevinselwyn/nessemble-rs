@@ -1948,6 +1948,48 @@ fn binding_target<'a>(
         .and_then(|(idx, line)| block_label(source, line).map(|(name, _)| (idx, name)))
 }
 
+/// The registers the routine named `name` writes but does not declare — what
+/// `undeclared-clobber` reports, exposed so an editor can offer to add them
+/// rather than making the author retype the list.
+///
+/// `None` when `name` names no routine, or one that declared no clobber list
+/// (which makes no claim to contradict). An empty list means the declaration is
+/// accurate.
+#[must_use]
+pub fn missing_clobbers(source: &str, name: &str) -> Option<Vec<Slot>> {
+    let lexemes = lex(source);
+    let lines = split_lines(&lexemes);
+    let (directives, _) = scan_directive_lines(source, &lines);
+    let (signatures, problems) = resolve_signature_lines(source, &lines, &directives);
+    let sig = signatures
+        .iter()
+        .find(|s| s.name == name && s.declares_clobbers)?;
+
+    let ctx = LintCtx {
+        source,
+        lines: &lines,
+        directives: &directives,
+        malformed: &[],
+        signatures: &signatures,
+        signature_problems: &problems,
+    };
+    let declared = declared_regs(sig);
+    let written = routine_effects(&ctx, name).writes;
+    let missing = RegSet::from_bits(written.bits() & !declared.bits());
+    Some(
+        [
+            (RegSet::A, Slot::A),
+            (RegSet::X, Slot::X),
+            (RegSet::Y, Slot::Y),
+            (RegSet::S, Slot::S),
+        ]
+        .into_iter()
+        .filter(|&(bit, _)| missing.contains(bit))
+        .map(|(_, slot)| slot)
+        .collect(),
+    )
+}
+
 // ─── Linting ─────────────────────────────────────────────────────────────────
 //
 // A read-only lint pass over the same lossless lexeme stream the formatter uses.
