@@ -11,6 +11,10 @@ for the full design.
 You can scaffold a changeset with `cargo run -p xtask -- changeset add <major|minor|patch|none> "summary"`,
 or just write the file by hand in the format below.
 
+> **The changeset is the only thing you write.** `CHANGELOG.md` is generated from
+> the changesets at release time — never edit it by hand, and never add an entry
+> there "as well as" a changeset. You would get two copies of the same line.
+
 ## File format
 
 A changeset is a `.md` file in the format the

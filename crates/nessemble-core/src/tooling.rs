@@ -1168,6 +1168,10 @@ pub enum DirectiveName {
     Returns,
     /// `@nessemble-clobbers` — the slots a routine destroys.
     Clobbers,
+    /// `@nessemble-lint-ignore-next-line` — suppress findings on one line.
+    LintIgnoreNextLine,
+    /// `@nessemble-lint-ignore` — a suppression region boundary.
+    LintIgnore,
 }
 
 /// The directive registry: token → name, plus whether the token is a deprecated
@@ -1191,6 +1195,12 @@ const DIRECTIVES: &[(&str, DirectiveName, bool)] = &[
     ("@nessemble-param", DirectiveName::Param, false),
     ("@nessemble-returns", DirectiveName::Returns, false),
     ("@nessemble-clobbers", DirectiveName::Clobbers, false),
+    (
+        "@nessemble-lint-ignore-next-line",
+        DirectiveName::LintIgnoreNextLine,
+        false,
+    ),
+    ("@nessemble-lint-ignore", DirectiveName::LintIgnore, false),
     // Deprecated alias, honored indefinitely: `@fmt` is a shipped, documented
     // spelling, and dropping it would silently re-flow every project that uses
     // it. Reported by the linter, never by the formatter.
@@ -1203,13 +1213,15 @@ const DIRECTIVE_NAMESPACE: &str = "@nessemble-";
 
 impl DirectiveName {
     /// Every directive name, in registry order.
-    pub const ALL: [DirectiveName; 6] = [
+    pub const ALL: [DirectiveName; 8] = [
         DirectiveName::Format,
         DirectiveName::CoverageIgnore,
         DirectiveName::CoverageIgnoreNextLine,
         DirectiveName::Param,
         DirectiveName::Returns,
         DirectiveName::Clobbers,
+        DirectiveName::LintIgnoreNextLine,
+        DirectiveName::LintIgnore,
     ];
 
     /// The canonical (non-deprecated) spelling, including the `@`.
@@ -1222,6 +1234,8 @@ impl DirectiveName {
             DirectiveName::Param => "@nessemble-param",
             DirectiveName::Returns => "@nessemble-returns",
             DirectiveName::Clobbers => "@nessemble-clobbers",
+            DirectiveName::LintIgnoreNextLine => "@nessemble-lint-ignore-next-line",
+            DirectiveName::LintIgnore => "@nessemble-lint-ignore",
         }
     }
 
@@ -1235,6 +1249,8 @@ impl DirectiveName {
             DirectiveName::CoverageIgnoreNextLine => "",
             DirectiveName::Param | DirectiveName::Returns => "<slot> [description]",
             DirectiveName::Clobbers => "<slot>[, <slot>...] | none",
+            DirectiveName::LintIgnoreNextLine => "[rule[, rule...]]",
+            DirectiveName::LintIgnore => "start|end [rule[, rule...]]",
         }
     }
 
@@ -1389,6 +1405,13 @@ pub enum DirectiveArgs {
     /// `@nessemble-clobbers`: the slot list. **Empty means `none` was written**
     /// — an explicit "preserves everything" claim, not a missing argument.
     Slots(Vec<Slot>),
+    /// `@nessemble-lint-ignore-next-line`: the rules to suppress. **Empty means
+    /// every rule** — the bare form is the blanket one.
+    Rules(Vec<RuleId>),
+    /// `@nessemble-lint-ignore start|end`: the bound, and the rules to suppress
+    /// (empty for every rule). Rules are read from the `start`; an `end` closes
+    /// whatever is open.
+    RegionRules(RegionBound, Vec<RuleId>),
     /// The directive takes no arguments.
     None,
 }
@@ -1623,7 +1646,41 @@ fn parse_args(name: DirectiveName, args: &str) -> Option<DirectiveArgs> {
         }
         DirectiveName::Param | DirectiveName::Returns => parse_slot_and_description(args),
         DirectiveName::Clobbers => parse_slot_list(before_prose(args)).map(DirectiveArgs::Slots),
+        DirectiveName::LintIgnoreNextLine => {
+            parse_rule_list(before_prose(args)).map(DirectiveArgs::Rules)
+        }
+        DirectiveName::LintIgnore => parse_region_rules(before_prose(args)),
     }
+}
+
+/// Parse `start|end [rule[, rule...]]`.
+fn parse_region_rules(args: &str) -> Option<DirectiveArgs> {
+    let (bound, rest) = match args.find(char::is_whitespace) {
+        Some(i) => (&args[..i], args[i..].trim()),
+        None => (args, ""),
+    };
+    let bound = match bound {
+        "start" => RegionBound::Start,
+        "end" => RegionBound::End,
+        _ => return None,
+    };
+    parse_rule_list(rest).map(|rules| DirectiveArgs::RegionRules(bound, rules))
+}
+
+/// Parse a comma-separated list of lint rule ids. Empty is the blanket form
+/// (every rule). An unknown name is `None`, so it reports as bad arguments —
+/// the same treatment every other mistyped directive argument gets.
+///
+/// Names are validated against [`RuleId::ALL`], so the accepted set is the rule
+/// registry itself and cannot drift from it.
+fn parse_rule_list(args: &str) -> Option<Vec<RuleId>> {
+    if args.is_empty() {
+        return Some(Vec::new());
+    }
+    args.split(',')
+        .map(|item| RuleId::from_id(item.trim()))
+        .collect::<Option<Vec<_>>>()
+        .filter(|rules| !rules.is_empty())
 }
 
 /// A directive's arguments up to any trailing prose comment, trimmed.
@@ -2083,11 +2140,6 @@ impl RuleId {
         }
     }
 
-    /// Whether this rule reads the directive scan rather than the lexeme lines.
-    fn is_directive_rule(self) -> bool {
-        !matches!(self, RuleId::RequireBlockComment)
-    }
-
     /// Whether this rule reads resolved [`Signature`]s, which are shared across
     /// the rules that need them and skipped when none is enabled.
     fn needs_signatures(self) -> bool {
@@ -2216,15 +2268,21 @@ const RULES: &[(RuleId, RuleFn)] = &[
 
 /// Lint `source`, returning findings sorted by position. Every rule whose
 /// severity is not [`RuleSeverity::Off`] is run. This never mutates source.
+///
+/// Findings suppressed by a `@nessemble-lint-ignore…` directive are filtered out
+/// **here**, so a suppressed finding does not exist as far as any caller is
+/// concerned: it cannot print, cannot count toward `--max-warnings`, and cannot
+/// affect an exit code, whatever its configured severity. Suppression reaches
+/// rule findings only — parse and assembly errors never travel this path.
 #[must_use]
 pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
     let lexemes = lex(source);
     let lines = split_lines(&lexemes);
-    // The directive scan is shared by three rules, and skipped entirely when all
-    // of them are off.
+    // The directive scan feeds three rules *and* the suppression pass, so it is
+    // needed whenever any rule at all can produce a finding.
     let scan_needed = RuleId::ALL
         .into_iter()
-        .any(|r| r.is_directive_rule() && opts.severities.get(r) != RuleSeverity::Off);
+        .any(|r| opts.severities.get(r) != RuleSeverity::Off);
     let (directives, malformed) = if scan_needed {
         scan_directive_lines(source, &lines)
     } else {
@@ -2253,8 +2311,76 @@ pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
             run(&ctx, opts, &mut findings);
         }
     }
+    let suppressions = LintSuppressions::resolve(&lines, &directives);
+    findings.retain(|f| !suppressions.suppresses(f.rule, f.line));
     findings.sort_by_key(|f| (f.line, f.column));
     findings
+}
+
+/// The `@nessemble-lint-ignore…` suppressions in one file, as line ranges each
+/// carrying the rules it silences.
+///
+/// Matching is **by the line a finding is reported at**, which is what lets one
+/// mechanism cover both line-anchored rules (`require-block-comment`, reported at
+/// the label) and routine-level ones (`undeclared-clobber` and friends, also
+/// reported at the label) with no special cases. Note that
+/// `invalid-routine-signature` is reported at the *annotation*, not the label, so
+/// only the region form can reach it — see the docs.
+#[derive(Debug, Default)]
+struct LintSuppressions {
+    /// `(first, last, rules)` — inclusive line range, empty `rules` meaning
+    /// every rule.
+    ranges: Vec<(u32, u32, Vec<RuleId>)>,
+}
+
+impl LintSuppressions {
+    /// Resolve one file's directives into suppression ranges, mirroring
+    /// [`crate::coverage::resolve_ignores`]: `-next-line` targets the next
+    /// **significant** line (so the directive may sit above a whole annotation
+    /// block and still land on the label), `start` opens a region and `end`
+    /// closes it, an unclosed region runs to end of file, regions do not nest,
+    /// and a trailing-comment directive is inert.
+    fn resolve(lines: &[Vec<Lexeme>], directives: &[Directive]) -> LintSuppressions {
+        let mut out = LintSuppressions::default();
+        let mut region: Option<(u32, Vec<RuleId>)> = None;
+        for d in directives.iter().filter(|d| d.own_line) {
+            match (d.name, &d.args) {
+                (DirectiveName::LintIgnoreNextLine, DirectiveArgs::Rules(rules)) => {
+                    if let Some(target) = significant_line_after(lines, d.line) {
+                        out.ranges
+                            .push((target as u32 + 1, target as u32 + 1, rules.clone()));
+                    }
+                }
+                (DirectiveName::LintIgnore, DirectiveArgs::RegionRules(bound, rules)) => {
+                    match bound {
+                        RegionBound::Start => {
+                            if region.is_none() {
+                                region = Some((d.line, rules.clone()));
+                            }
+                        }
+                        RegionBound::End => {
+                            if let Some((start, rules)) = region.take() {
+                                out.ranges.push((start, d.line, rules));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // An unclosed region runs to the end of the file.
+        if let Some((start, rules)) = region {
+            out.ranges.push((start, u32::MAX, rules));
+        }
+        out
+    }
+
+    /// Whether `rule` is suppressed at 1-based `line`.
+    fn suppresses(&self, rule: RuleId, line: u32) -> bool {
+        self.ranges.iter().any(|(first, last, rules)| {
+            (*first..=*last).contains(&line) && (rules.is_empty() || rules.contains(&rule))
+        })
+    }
 }
 
 /// `require-block-comment`: warn on a block-opening label with no comment within
@@ -2334,12 +2460,14 @@ fn rule_deprecated_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &m
 /// An **unclosed** ignore region is deliberately not flagged: running to end of
 /// file is the documented way to exclude a whole file.
 fn rule_ineffective_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &mut Vec<Finding>) {
+    // The coverage and lint ignore regions nest independently of one another.
     let mut region_open = false;
+    let mut lint_region_open = false;
     for d in ctx.directives {
         let token = &ctx.source[d.start..d.end];
         let reason = if d.own_line {
             match (d.name, &d.args) {
-                (DirectiveName::CoverageIgnoreNextLine, _) => {
+                (DirectiveName::CoverageIgnoreNextLine | DirectiveName::LintIgnoreNextLine, _) => {
                     significant_line_after(ctx.lines, d.line)
                         .is_none()
                         .then(|| "has no following line to ignore".to_string())
@@ -2363,6 +2491,17 @@ fn rule_ineffective_comment_directive(ctx: &LintCtx, _opts: &LintOptions, out: &
                         }
                     };
                     region_open = *bound == RegionBound::Start;
+                    ineffective
+                }
+                (DirectiveName::LintIgnore, DirectiveArgs::RegionRules(bound, _)) => {
+                    let ineffective = match bound {
+                        RegionBound::Start => lint_region_open
+                            .then(|| "is already inside an open ignore region".to_string()),
+                        RegionBound::End => {
+                            (!lint_region_open).then(|| "has no matching `start`".to_string())
+                        }
+                    };
+                    lint_region_open = *bound == RegionBound::Start;
                     ineffective
                 }
                 _ => None,
@@ -4772,6 +4911,302 @@ data:
                    \x20   LDX #$00\n\
                    \x20   RTS\n";
         assert!(lint(src, &opts).is_empty());
+    }
+
+    // ── Lint suppression (`@nessemble-lint-ignore…`) ────────────────────────
+
+    /// Lint with every rule on, including the opt-in doc rule, so a suppression
+    /// fixture has something to suppress.
+    fn lint_all(source: &str) -> Vec<Finding> {
+        let no_ignore = |_: &str| false;
+        let mut severities = SeverityMap::default();
+        severities.set(RuleId::RequireRoutineDoc, RuleSeverity::Warn);
+        let opts = LintOptions {
+            severities,
+            window: 3,
+            ignore: &no_ignore,
+        };
+        lint(source, &opts)
+    }
+
+    #[test]
+    fn a_bare_ignore_suppresses_every_rule_on_the_next_line() {
+        let src = "; @nessemble-lint-ignore-next-line\n\
+                   ; @nessemble-clobbers A\n\
+                   draw:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        assert!(lint_routines(src).is_empty(), "{:?}", lint_routines(src));
+    }
+
+    #[test]
+    fn a_named_ignore_suppresses_only_that_rule() {
+        // The routine both over- and under-declares; naming one rule leaves the
+        // other reported.
+        let src = "; @nessemble-lint-ignore-next-line undeclared-clobber\n\
+                   ; @nessemble-clobbers A\n\
+                   draw:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        assert_eq!(
+            rules_of(&lint_routines(src)),
+            vec![RuleId::OverdeclaredClobber]
+        );
+
+        let both = "; @nessemble-lint-ignore-next-line undeclared-clobber, overdeclared-clobber\n\
+                    ; @nessemble-clobbers A\n\
+                    draw:\n\
+                    \x20   LDX #$00\n\
+                    \x20   RTS\n";
+        assert!(lint_routines(both).is_empty());
+    }
+
+    #[test]
+    fn a_non_matching_named_ignore_leaves_the_finding_reported() {
+        let src = "; @nessemble-lint-ignore-next-line require-block-comment\n\
+                   ; @nessemble-clobbers none\n\
+                   draw:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        assert_eq!(
+            rules_of(&lint_routines(src)),
+            vec![RuleId::UndeclaredClobber]
+        );
+    }
+
+    #[test]
+    fn next_line_skips_blanks_prose_and_an_annotation_block() {
+        // The directive sits above a whole signature block and must still land
+        // on the label, which is where the routine rules report.
+        let src = "; @nessemble-lint-ignore-next-line undeclared-clobber\n\
+                   \n\
+                   ; Draw one metasprite.\n\
+                   ; @nessemble-param A index\n\
+                   ; @nessemble-returns C set on error\n\
+                   ; @nessemble-clobbers none\n\
+                   draw:\n\
+                   \x20   LDY #$00\n\
+                   \x20   RTS\n";
+        assert!(lint_routines(src).is_empty(), "{:?}", lint_routines(src));
+    }
+
+    #[test]
+    fn a_region_suppresses_everything_between_its_bounds() {
+        let src = "; @nessemble-lint-ignore start\n\
+                   ; @nessemble-clobbers A\n\
+                   inside:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n\
+                   ; @nessemble-lint-ignore end\n\
+                   \n\
+                   ; @nessemble-clobbers A\n\
+                   outside:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        let findings = lint_routines(src);
+        assert!(
+            findings.iter().all(|f| f.subject == "outside"),
+            "only the routine past `end` reports: {findings:?}"
+        );
+        assert!(!findings.is_empty());
+    }
+
+    #[test]
+    fn a_named_region_suppresses_only_those_rules() {
+        let src = "; @nessemble-lint-ignore start overdeclared-clobber\n\
+                   ; @nessemble-clobbers A\n\
+                   inside:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n\
+                   ; @nessemble-lint-ignore end\n";
+        assert_eq!(
+            rules_of(&lint_routines(src)),
+            vec![RuleId::UndeclaredClobber]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_region_runs_to_end_of_file() {
+        let src = "; @nessemble-lint-ignore start\n\
+                   \n\
+                   ; @nessemble-clobbers A\n\
+                   first:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n\
+                   \n\
+                   ; @nessemble-clobbers A\n\
+                   second:\n\
+                   \x20   LDY #$00\n\
+                   \x20   RTS\n";
+        assert!(lint_routines(src).is_empty(), "{:?}", lint_routines(src));
+    }
+
+    #[test]
+    fn an_unknown_rule_name_is_bad_arguments() {
+        for src in [
+            "; @nessemble-lint-ignore-next-line no-such-rule\nfoo:\n",
+            "; @nessemble-lint-ignore start no-such-rule\nfoo:\n",
+            "; @nessemble-lint-ignore sideways\nfoo:\n",
+        ] {
+            let malformed = bad(src);
+            assert_eq!(malformed.len(), 1, "expected bad args for `{src}`");
+            assert!(
+                matches!(malformed[0].reason, MalformedReason::BadArgs(_)),
+                "`{src}`"
+            );
+        }
+        // And the rule reports it, quoting the expected syntax.
+        let findings = lint_all("; @nessemble-lint-ignore-next-line no-such-rule\nfoo:\n    RTS\n");
+        assert!(findings
+            .iter()
+            .any(|f| f.rule == RuleId::UnknownCommentDirective
+                && f.message.contains("[rule[, rule...]]")));
+    }
+
+    #[test]
+    fn the_ignore_directives_are_not_themselves_unknown() {
+        let src = "; @nessemble-lint-ignore-next-line\n\
+                   ; @nessemble-lint-ignore start\n\
+                   ; @nessemble-lint-ignore end\n\
+                   \n\
+                   ; documented\n\
+                   foo:\n\
+                   \x20   RTS\n";
+        assert!(bad(src).is_empty(), "{:?}", bad(src));
+        assert!(!lint_all(src)
+            .iter()
+            .any(|f| f.rule == RuleId::UnknownCommentDirective));
+    }
+
+    #[test]
+    fn a_dangling_next_line_ignore_is_ineffective() {
+        let findings =
+            lint_all("\n; documented\nfoo:\n    RTS\n\n; @nessemble-lint-ignore-next-line\n");
+        assert!(findings
+            .iter()
+            .any(|f| f.rule == RuleId::IneffectiveCommentDirective
+                && f.message.contains("has no following line to ignore")));
+    }
+
+    #[test]
+    fn an_unbalanced_ignore_region_is_ineffective() {
+        let findings = lint_all("; @nessemble-lint-ignore end\n\n; documented\nfoo:\n    RTS\n");
+        assert!(findings
+            .iter()
+            .any(|f| f.rule == RuleId::IneffectiveCommentDirective
+                && f.message.contains("has no matching `start`")));
+        // An unclosed `start` is *not* flagged — running to EOF is the
+        // documented whole-file opt-out, exactly as for coverage.
+        let unclosed = lint_all("; @nessemble-lint-ignore start\n\n; documented\nfoo:\n    RTS\n");
+        assert!(!unclosed
+            .iter()
+            .any(|f| f.rule == RuleId::IneffectiveCommentDirective));
+    }
+
+    #[test]
+    fn a_trailing_ignore_directive_is_inert() {
+        // Consistent with every other directive: on a code line it does nothing,
+        // and `ineffective-comment-directive` says so.
+        let src = "; @nessemble-clobbers none\n\
+                   draw:\n\
+                   \x20   LDX #$00 ; @nessemble-lint-ignore-next-line\n\
+                   \x20   RTS\n";
+        let findings = lint_routines(src);
+        assert_eq!(rules_of(&findings), vec![RuleId::UndeclaredClobber]);
+    }
+
+    #[test]
+    fn suppression_is_independent_of_configured_severity() {
+        // Severity is the user's own choice in `.nessemblerc`, so it is not a
+        // reason to take away their escape hatch. A suppressed finding does not
+        // reach the caller at all, which is what keeps it out of the error
+        // count, the warning count, and the exit code alike.
+        let src = "; @nessemble-lint-ignore-next-line\n\
+                   ; @nessemble-clobbers A\n\
+                   draw:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        let no_ignore = |_: &str| false;
+        for severity in [RuleSeverity::Warn, RuleSeverity::Error] {
+            let mut severities = SeverityMap([RuleSeverity::Off; RuleId::ALL.len()]);
+            severities.set(RuleId::UndeclaredClobber, severity);
+            severities.set(RuleId::OverdeclaredClobber, severity);
+            let opts = LintOptions {
+                severities,
+                window: 3,
+                ignore: &no_ignore,
+            };
+            assert!(
+                lint(src, &opts).is_empty(),
+                "not suppressed at severity {severity:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn suppression_reaches_line_anchored_rules_too() {
+        // One mechanism, no special cases: `require-block-comment` is reported
+        // at the label, and so are the routine rules.
+        let src = "\n; @nessemble-lint-ignore-next-line require-block-comment\nwidget:\n    RTS\n";
+        assert!(!lint_all(src)
+            .iter()
+            .any(|f| f.rule == RuleId::RequireBlockComment));
+    }
+
+    #[test]
+    fn fall_through_entry_point_can_carry_its_truthful_annotation() {
+        // Motivating case 1: `assign_chr_bank` falls through into the next
+        // routine, which the body walk does not follow (§8.1), so its truthful
+        // `A, X, Y` reads as over-declared. The suppression is what lets the
+        // annotation stay truthful.
+        let src = "; @nessemble-clobbers A, X, Y, [chr_bank_arg]\n\
+                   assign_chr_bank:\n\
+                   \x20   STA <chr_bank_arg\n\
+                   \n\
+                   ; @nessemble-clobbers A, X, Y\n\
+                   find_or_evict_chr_slot:\n\
+                   \x20   LDA #$00\n\
+                   \x20   LDX #$00\n\
+                   \x20   LDY #$00\n\
+                   \x20   RTS\n";
+        assert_eq!(
+            rules_of(&lint_routines(src)),
+            vec![RuleId::OverdeclaredClobber],
+            "the blind spot this exists for"
+        );
+
+        let suppressed = format!("; @nessemble-lint-ignore-next-line overdeclared-clobber\n{src}");
+        assert!(
+            lint_routines(&suppressed).is_empty(),
+            "{:?}",
+            lint_routines(&suppressed)
+        );
+    }
+
+    #[test]
+    fn save_restore_routine_can_carry_its_truthful_annotation() {
+        // Motivating case 2: the `PLA` restore is not modeled, so `A` — which
+        // the routine hands back intact — reads as clobbered. Declaring it would
+        // invert the tag's documented meaning.
+        let src = "; @nessemble-clobbers X, Y, [draw_tmp]\n\
+                   ppu_set_xy_addr:\n\
+                   \x20   PHA\n\
+                   \x20   LDX #$00\n\
+                   \x20   LDY #$00\n\
+                   \x20   PLA\n\
+                   \x20   RTS\n";
+        assert_eq!(
+            rules_of(&lint_routines(src)),
+            vec![RuleId::UndeclaredClobber],
+            "the blind spot this exists for"
+        );
+
+        let suppressed = format!("; @nessemble-lint-ignore-next-line undeclared-clobber\n{src}");
+        assert!(
+            lint_routines(&suppressed).is_empty(),
+            "{:?}",
+            lint_routines(&suppressed)
+        );
     }
 
     #[test]
