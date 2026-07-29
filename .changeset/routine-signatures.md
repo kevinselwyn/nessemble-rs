@@ -1,4 +1,0 @@
----
-nessemble: minor
----
-Document a subroutine's register calling convention in comments the tooling reads: `@nessemble-param`, `@nessemble-returns`, and `@nessemble-clobbers` name the registers, flags, and memory a routine takes, returns, and destroys. Hovering any use of a documented routine — including the operand of a `JSR`, in this file or another open one — shows its signature, the outline carries each routine's clobber list, and completion offers a scaffold for the whole block. `nessemble lint` checks the declaration against the code: `undeclared-clobber` reports a routine that writes a register its list omits (with an editor quick fix that adds it), `overdeclared-clobber` reports one that declares a register it never writes, `invalid-routine-signature` reports an annotation that binds to no label, and the opt-in `require-routine-doc` reports a called routine with no annotations at all.
