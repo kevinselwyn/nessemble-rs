@@ -2214,7 +2214,10 @@ fn comment_directive_items() -> Vec<CompletionItem> {
     for name in tooling::DirectiveName::ALL {
         let canonical = name.canonical();
         match name {
-            tooling::DirectiveName::CoverageIgnore => {
+            // Both region directives are useless as a bare stem, so offer each
+            // bound pre-filled rather than leaving the author to complete it
+            // (and get flagged for it).
+            tooling::DirectiveName::CoverageIgnore | tooling::DirectiveName::LintIgnore => {
                 for bound in ["start", "end"] {
                     items.push(directive_completion(
                         format!("{canonical} {bound}"),
@@ -2234,7 +2237,8 @@ fn comment_directive_items() -> Vec<CompletionItem> {
                 format!("{canonical} "),
                 directive_docs(name),
             )),
-            tooling::DirectiveName::CoverageIgnoreNextLine => {
+            tooling::DirectiveName::CoverageIgnoreNextLine
+            | tooling::DirectiveName::LintIgnoreNextLine => {
                 items.push(directive_completion(
                     canonical.to_string(),
                     directive_docs(name),
@@ -2346,6 +2350,18 @@ fn directive_docs(name: tooling::DirectiveName) -> &'static str {
             "Declare the slots the routine below **destroys**; anything not listed is preserved. \
              `none` claims it preserves everything. `A`, `X`, `Y`, and `S` are checked against \
              what the routine actually writes; flags and memory slots are documentation."
+        }
+        tooling::DirectiveName::LintIgnoreNextLine => {
+            "Suppress lint findings reported on the next significant line (blank and comment \
+             lines in between are skipped, so this may sit above a whole annotation block and \
+             still land on the label). Bare, it suppresses every rule; with a comma-separated \
+             list of rule ids, only those."
+        }
+        tooling::DirectiveName::LintIgnore => {
+            "Bound a region in which lint findings are suppressed. `start` opens it, `end` \
+             closes it; an unclosed region runs to the end of the file. Bare, it suppresses \
+             every rule; a comma-separated list of rule ids on the `start` suppresses only \
+             those."
         }
     }
 }

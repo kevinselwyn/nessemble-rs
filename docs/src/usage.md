@@ -213,6 +213,80 @@ list are configured under the [`lint`](#lint) key of `.nessemblerc`. The editor
 including quick fixes for the deprecated directive spelling and for a register
 missing from a clobber list.
 
+#### Suppressing a finding
+
+Two directives silence findings at the site, for when a rule is wrong about a
+particular routine:
+
+```text
+; @nessemble-lint-ignore-next-line [rule[, rule...]]
+; @nessemble-lint-ignore start|end [rule[, rule...]]
+```
+
+Bare, they suppress every rule. With a comma-separated list of rule ids, only
+those. An unknown rule name is reported as
+[`unknown-comment-directive`](#lint-opt--path-), so a typo cannot silently
+silence nothing.
+
+**These exist because the clobber analysis has two known blind spots**, both of
+which force an author to choose between a false annotation and a false finding.
+Suppressing at the site is the third, better option:
+
+**Fall-through entry points.** A routine's body is read as its own block plus
+the `JSR`/`JMP` targets it names; a routine that falls through into the next one
+is not followed. So `assign_chr_bank` below really does clobber `A, X, Y` — via
+the routine it falls into — but its own block writes no register, and
+`overdeclared-clobber` fires:
+
+```asm
+; @nessemble-lint-ignore-next-line overdeclared-clobber
+; @nessemble-clobbers A, X, Y, [chr_bank_arg]
+assign_chr_bank:
+    STA <chr_bank_arg
+                            ; falls through ↓
+; @nessemble-clobbers A, X, Y
+find_or_evict_chr_slot:
+    ...
+```
+
+**Save/restore pairs.** A `PHA` … `PLA` around a routine's body preserves `A`,
+but the restore is not modeled, so `undeclared-clobber` asks you to declare `A`
+clobbered — inverting what the tag means:
+
+```asm
+; @nessemble-lint-ignore-next-line undeclared-clobber
+; @nessemble-clobbers X, Y, [draw_tmp]
+ppu_set_xy_addr:
+    PHA
+    ...
+    PLA
+    RTS
+```
+
+In both cases the annotation stays **truthful** — it is what a caller needs to
+know — and exactly one bogus finding is suppressed.
+
+The rules are the coverage directives' rules, because it is the same mechanism:
+
+- `-next-line` targets the next **significant** line, skipping blank and comment
+  lines. That is what lets it sit above a whole `@nessemble-param` block and
+  still land on the label, which is where the routine rules report.
+- `start` opens a region and `end` closes it; an unclosed region runs to end of
+  file (the whole-file opt-out), regions do not nest, and a region never crosses
+  into an `.include`d file.
+- A directive in a trailing comment is inert, and reported.
+- **Matching is by the line a finding is reported at.** Most rules report at the
+  label — including `undeclared-clobber`, `overdeclared-clobber`, and
+  `require-block-comment` — so `-next-line` above the label reaches them.
+  `invalid-routine-signature` and the comment-directive rules report at the
+  *annotation* line instead, so use the region form to suppress those.
+- A suppressed finding is **gone, not downgraded**: it does not print, does not
+  count toward `--max-warnings`, and does not affect the exit code, even when the
+  rule's configured severity is `error`. Severity is your choice in
+  `.nessemblerc`, so it is not a reason to withhold the escape hatch.
+- Suppression applies to lint findings only. It never silences a parse or
+  assembly error.
+
 ### coverage &lt;infile.asm&gt; --cdl &lt;file.cdl&gt; ...
 
 Reports **runtime execution coverage** of an assembled ROM against a **CDL**
@@ -281,6 +355,8 @@ do.
 | `@nessemble-param <slot> [description]` | the routine below — a register it reads | [`lint`](#lint-opt--path-), [editor](editor.md) |
 | `@nessemble-returns <slot> [description]` | the routine below — a slot it defines | [`lint`](#lint-opt--path-), [editor](editor.md) |
 | `@nessemble-clobbers <slot>[, ...]` \| `none` | the routine below — what it destroys | [`lint`](#lint-opt--path-), [editor](editor.md) |
+| `@nessemble-lint-ignore-next-line [rule[, ...]]` | findings on the next significant line | [`lint`](#lint-opt--path-) |
+| `@nessemble-lint-ignore start` \| `end` `[rule[, ...]]` | findings on every line between the two | [`lint`](#lint-opt--path-) |
 | `@fmt stride=N[,N,...]` | *deprecated alias of `@nessemble-format`* | [`format`](#format-opt--path-) |
 
 The rules are the same for every directive:
@@ -420,7 +496,11 @@ src/prg/sprite.asm
   inside the body makes the body "not fully understood", which silences
   `overdeclared-clobber` but never `undeclared-clobber`.
 - A routine that falls through into the next one is under-reported rather than
-  over-reported: the analysis prefers a missed warning to a wrong one.
+  over-reported: the analysis prefers a missed warning to a wrong one. Where that
+  costs a *wrong* finding — a fall-through entry point, or a `PHA`/`PLA` pair the
+  analysis does not model — suppress it at the site with
+  [`@nessemble-lint-ignore…`](#suppressing-a-finding) and keep the annotation
+  truthful.
 - The stack pointer counts as clobbered only for `TXS`. Pushes and pulls move
   `S`, but routines balance them.
 
