@@ -1,6 +1,7 @@
 # nessemble-rs: A Plan for Routine Signature Annotations
 
-> Status: **Proposed — for review.** This document designs the JSDoc-shaped
+> Status: **Proposed — ready to build; the four load-bearing decisions are
+> settled ([§13](#13-decisions)).** This document designs the JSDoc-shaped
 > comment annotations that document a subroutine's **register calling
 > convention**: which registers it takes, which it returns, and which it
 > destroys. It lands as three rows in the
@@ -203,7 +204,7 @@ Rules, each chosen so the resolver never guesses:
 5. **Any one tag makes the label a documented routine.** There is no
    `@nessemble-routine` marker to remember; a routine with no inputs and no
    clobbers is spelled `@nessemble-clobbers none`, which says something
-   (§13 Q4).
+   (§13.5).
 
 ## 5. What "clobbers" means
 
@@ -348,7 +349,7 @@ capabilities except the optional inlay-hint provider in Phase 4.
 
 - **The formatter never touches a signature block.** Comments are the author's
   text (plan 009 §6.2, decision 2). Aligning the tag columns is tempting and is
-  arguably spacing rather than content — deliberately not proposed; see §13 Q6.
+  arguably spacing rather than content — deliberately not proposed; see §13.6.
 - **The assembler is untouched.** Annotations are comments; not one assembled
   byte moves. `xtask parity` stays 122/122 through every phase, which is the
   cheap regression signal for this whole plan.
@@ -505,7 +506,7 @@ Each item is an addition inside an existing handler.
   (`textDocument/inlayHint`). It is also the surface most likely to be
   divisive — it puts text on every call line — so it ships last, behind the
   standard client-side toggle, and can be dropped without touching anything
-  else (§13 Q7).
+  else (§13.7).
 
 ## 10. Docs
 
@@ -540,7 +541,7 @@ Each phase is independently shippable and independently revertible.
   body-extent walk; `undeclared-clobber` and `overdeclared-clobber`; the
   "Add `X` to clobbers" quick fix.
 - **Phase 4 — optional extras.** `require-routine-doc` (a `JSR`-targeted
-  block-entry label with no signature; default `off`, §13 Q5) and inlay hints.
+  block-entry label with no signature; default `off`, §13.4) and inlay hints.
 
 Phases 0–1 are small. Phase 3 is the bulk of the work and the bulk of the value;
 Phase 2 is what makes anyone write the annotations in the first place, which is
@@ -568,47 +569,66 @@ Listed so the boundary is a decision rather than an oversight:
   first argument in `A`"). A configurable policy engine on top of this data;
   premature until signatures exist in the wild.
 
-## 13. Decisions to settle
+## 13. Decisions
 
-Recommendations first, alternatives stated. These are the questions worth
-answering before Phase 0, because they are the ones that are expensive to change
-after annotations exist in a project.
+### Settled with the maintainer
 
-1. **Tag names — `@nessemble-param` / `-returns` / `-clobbers`.** *Recommended.*
-   The ask was JSDoc-like, and these are the JSDoc spellings with the mandatory
-   namespace (plan 009 keeps bare `@param` as prose forever, so the prefix is not
-   optional). *Alternative:* the 6502-idiomatic `-in` / `-out` / `-clobbers`,
-   which is shorter and matches how existing NES sources write it by hand.
-2. **Bracketed memory symbols (`[tmp1]`) and `$` addresses in v1.** *Recommended*
-   — scratch-RAM clobbering is the other half of the real-world problem, the
-   brackets keep the vocabulary closed (§4), and the slots render on hover even
-   though v1 does not verify them. *Alternative:* registers and flags only in
-   v1, memory described in prose.
-3. **Verification ships in v1 (Phase 3).** *Recommended* — it is the difference
-   between a convention and a contract, and §8's scoping (A/X/Y/S only, opt-in
-   by declaring, unknowns suppress) is what keeps it quiet. *Alternative:* ship
-   Phases 0–2 and treat verification as a follow-up plan, at the risk that the
-   annotations land, drift, and lose trust before the check arrives.
-4. **`@nessemble-clobbers none` as the explicit "preserves everything" claim,
-   distinct from omitting the tag.** *Recommended.* *Alternative:* no `none`
-   keyword, and an empty list is a syntax error — but then the strongest and most
-   useful statement a routine can make is unwriteable.
-5. **`require-routine-doc` defaults to `off`.** *Recommended* — unlike
-   `require-block-comment` (warn), this rule would fire on every routine in every
-   existing project at once, and a rule that is loud on day one gets switched off
-   permanently. Off by default, on for projects that adopt the convention.
-   *Alternative:* `warn`, consistent with its sibling.
-6. **The formatter does not align signature blocks.** *Recommended*, consistent
-   with plan 009 decision 2. *Alternative:* treat tag-column alignment as
-   spacing (which the formatter already normalizes) rather than content, and
-   align the slot column within a run — attractive, and a slippery slope worth
-   entering deliberately if at all.
-7. **Inlay hints on `JSR` lines.** *Recommended as Phase 4, last and optional* —
-   the highest-delight/highest-annoyance surface here. Easy to cut.
-8. **Multi-slot `param` (`@nessemble-param A, X  the coordinate pair`).** *Not
-   recommended* — one tag per slot keeps the description attached to the thing it
-   describes and keeps rendering trivial. Noting it because a pointer passed in
-   two registers is a real 6502 idiom and someone will ask.
+These four were the ones worth answering before Phase 0 — the ones that are
+expensive to change once annotations exist in a project. The alternative each
+one closed off is recorded, because a decision without its rejected option is
+just an assertion.
+
+1. **Tag names are `@nessemble-param` / `-returns` / `-clobbers`.** The ask was
+   JSDoc-like, and these are the JSDoc spellings with the mandatory namespace
+   (plan 009 keeps bare `@param` as prose forever, so the prefix is not
+   optional). *Rejected:* the shorter, more 6502-idiomatic `-in` / `-out`, and
+   registering both spellings as aliases — plan 009's alias mechanism exists for
+   a token that shipped before the namespace did, not as a way to offer two live
+   spellings of a new one.
+2. **Memory slots are in the v1 vocabulary, rendered but not verified.**
+   `[tmp1]` and `$10-$1F` parse, validate, and appear on hover; the Phase 3
+   verifier ignores them (§8.3). Scratch-RAM clobbering is the other half of the
+   real-world problem, and the brackets are what keep the vocabulary closed so a
+   typo stays reportable (§4). *Rejected:* registers and flags only (memory
+   would have to go in prose, then want converting later); and verifying
+   absolute/zero-page stores in Phase 3, which pulls symbol resolution into the
+   verifier and is the natural v2 instead (§12).
+3. **Verification ships in v1, as Phase 3.** It is the difference between a
+   convention and a contract, and §8's scoping — A/X/Y/S only, opt-in by
+   declaring, unknowns suppress — is what keeps it quiet enough to leave on.
+   *Rejected:* shipping Phases 0–2 and deferring the check to its own plan, at
+   the risk that annotations land, drift, and lose trust before the checker
+   arrives; and shipping `undeclared-clobber` alone, which is the cheaper two
+   thirds but leaves the opposite drift (a routine that stopped using `Y` and
+   still makes every caller spill it) unreported.
+4. **`require-routine-doc` defaults to `off`.** Unlike `require-block-comment`
+   (`warn`), it would fire on every `JSR`-targeted label in an existing project
+   at once, and a rule that is loud on day one gets switched off permanently
+   rather than adopted. Projects opt in once they are using the convention.
+   *Rejected:* `warn` for consistency with its sibling; and dropping the rule
+   from the plan, which would leave the convention with no way to be required.
+
+### Still the author's call
+
+Lower-stakes, all reversible cheaply, all recorded so they are decisions rather
+than defaults. Say the word on any of them.
+
+5. **`@nessemble-clobbers none` is the explicit "preserves everything" claim,
+   distinct from omitting the tag.** *Alternative:* no `none` keyword and an
+   empty list is a syntax error — but then the strongest and most useful
+   statement a routine can make is unwriteable.
+6. **The formatter does not align signature blocks**, consistent with plan 009
+   decision 2. *Alternative:* treat tag-column alignment as spacing (which the
+   formatter already normalizes) rather than content, and align the slot column
+   within a run — attractive, and a slippery slope worth entering deliberately
+   if at all.
+7. **Inlay hints on `JSR` lines ship last, in Phase 4, and are optional.** The
+   highest-delight and highest-annoyance surface in the plan; easy to cut without
+   touching anything else.
+8. **No multi-slot `param` (`@nessemble-param A, X  the coordinate pair`).** One
+   tag per slot keeps the description attached to the thing it describes and
+   keeps rendering trivial. Noted because a pointer passed in two registers is a
+   real 6502 idiom and someone will ask.
 
 ## 14. Testing strategy
 
