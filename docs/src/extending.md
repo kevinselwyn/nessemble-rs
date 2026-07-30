@@ -121,6 +121,40 @@ fn custom(ints, texts) {
 }
 ```
 
+### Declaring file arguments
+
+A script's string argument is opaque to the assembler: `.tilemap "map.png"` could
+be a filename, an easing name, or a label. Prefix it with `file://` to say that it
+names an input file:
+
+```nessemble
+.tilemap "file://map.png", "file://tiles.png"
+```
+
+The script sees the path **with the prefix stripped** — `texts[0]` is `"map.png"`
+— so nothing about the script changes, and adding the declaration to a call site
+is a one-word edit. What it buys:
+
+- **The file is checked before the script runs.** A missing declared file is
+  reported against the directive, on its own line, the same way a missing
+  `.incbin` file is — instead of whatever error the script happens to throw when
+  its `open_file` fails. The script is not run at all in that case.
+- **The path is visible to tooling.** Editors resolve a declared path, so
+  cmd/ctrl-clicking it opens the file, hovering it shows where it resolved to, and
+  typing inside the quotes completes filenames — see
+  [editor support](editor.md#features). None of that requires running the script.
+
+Relative paths resolve against the **source file's directory** — the same base as
+the script's own [file reads](#filesystem-access) — and an absolute path
+(`file:///home/me/assets/map.png`) is used as-is.
+
+Declaring is optional and per-argument. A script that treats a missing file as
+*optional* — falling back to a default when it isn't there — should leave the
+prefix off that argument and keep its own fallback, since a declared file that is
+absent is an error. The same prefix is accepted on the
+[built-in filename directives](syntax.md#declaring-a-filename-argument), where it
+is redundant but harmless, so a project can spell every path the same way.
+
 ### Errors
 
 Signal an error with `throw`. The thrown message becomes the assembler

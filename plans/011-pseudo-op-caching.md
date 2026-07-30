@@ -1,9 +1,9 @@
 # nessemble-rs: A Plan for Caching Custom Pseudo-Instructions
 
-> Status: **Phase 0 shipped ([§12](#12-phased-plan)); Phases 1–5 proposed and
+> Status: **Phases 0–2 shipped ([§12](#12-phased-plan)); Phases 3–5 proposed and
 > awaiting go-ahead. Decisions settled with the maintainer in
-> [§16](#16-decisions); the one deviation building Phase 0 turned up is recorded
-> in [§17](#17-as-built).** This document designs caching
+> [§16](#16-decisions); deviations found by building each phase are recorded in
+> [§17](#17-as-built).** This document designs caching
 > for custom pseudo-op scripts, in **three layers**: per-assembly
 > **memoization** so a directive's `custom()` runs once instead of once per
 > assembler pass ([§6.1](#61-layer-1--per-assembly-memoization-core)),
@@ -115,7 +115,7 @@ Two argument-evaluation facts that constrain the key (§7.1):
    same arguments in two different source directories reads two different files,
    so `base_dir` is key material.
 
-## 4. The syntax: `file://`
+## 4. The syntax: `file://` — **as built (Phase 1)**
 
 A filename argument may carry a `file://` prefix to declare that it names an
 input file:
@@ -390,7 +390,7 @@ Two more bypasses, both structural rather than detected:
   invocation is exactly as informative as two.
 - **`--no-cache`** (§10) skips read and write.
 
-## 9. The editor surface
+## 9. The editor surface — **as built (Phase 2)**
 
 Declaring a path should pay off while you are typing, not only at build time.
 Three surfaces, all keyed off `LexKind::String` tokens in a file-taking
@@ -486,13 +486,15 @@ the prefix before the payoff it was invented for exists.
   script work in every build and fixes the `rand` pass-skew in §2. One deviation
   from the design as written, recorded in §17.1. Tests in
   `crates/nessemble-core/tests/custom_memo.rs`.
-- **Phase 1 — `file://` (core).** Prefix stripping for custom directives and the
-  seven file-taking directives, the existence check, the `could-not-open`
-  diagnostic, parser-level tests that the AST is unchanged. Useful with no cache
-  and no editor at all — it turns a script's confusing throw into a diagnostic on
-  the right line, and (§9.1) lights up in the editor for free.
-- **Phase 2 — the editor surface (LSP).** Document links, path hover, filtered
-  path completion (§9.2–9.3). Depends on Phase 1's syntax and nothing else.
+- **Phase 1 — `file://` (core). — shipped.** Prefix stripping for custom
+  directives and the seven file-taking directives, the existence check, the
+  `could-not-open` diagnostic. Useful with no cache and no editor at all — it
+  turns a script's confusing throw into a diagnostic on the right line, and
+  (§9.1) lights up in the editor for free. Notes in §17.2; tests in
+  `crates/nessemble-core/tests/file_url.rs`.
+- **Phase 2 — the editor surface (LSP). — shipped.** Document links, path hover,
+  filtered path completion (§9.2–9.3). Notes in §17.3; tests in the
+  `nessemble-lsp` test module.
 - **Phase 3 — input recording (`nessemble-script`).** The recorder in `engine`,
   `RunOutcome`, `run_with_inputs`, the §8 static impurity scan. No behavior
   change yet — this phase only *reports*. *Review this hardest: everything in
@@ -741,3 +743,53 @@ Two smaller notes from the same phase:
   the two invocations really are identical as far as the resolver can tell. The
   test for pass-dependent arguments pads the label to 3 to avoid pinning that
   coincidence.
+
+### 17.2 `file://` landed at four choke points, and added no importer check (Phase 1)
+
+Stripping did not need seven call sites. Every media importer reads through
+`Assembler::read_media_file`, so stripping there covers `.incbin`, `.incpng`,
+`.incpal`, `.incrle` and `.incwav` at once; `.include` and `.inestrn` share
+`Pre::do_include`. The only extra sites are the three importer error messages,
+which name the **bare** path rather than echoing the declaration back.
+
+Two notes on what the phase deliberately does *not* do:
+
+- **No new existence check for the importers.** A missing `.incbin` file was
+  already `could-not-read`/`could-not-open`; the declaration changes nothing
+  there. The check §4 describes exists only for custom pseudo-ops, which are the
+  only directives where the assembler could not otherwise tell a string is a path.
+- **The check runs on both passes.** It is one `Path::exists` per declared
+  argument per pass, ahead of the memo lookup, which is far cheaper than
+  arranging to remember that it already ran.
+
+`strip_file_url` and `FILE_URL_PREFIX` are **public** in `nessemble-core`, not
+private helpers: the language server needs exactly the same rule to compute a
+link's range (§9.2), and two implementations of "what counts as a declaration"
+would drift.
+
+### 17.3 Path arguments include the empty one, and one filter is looser than §16.11 (Phase 2)
+
+**`path_args` reports an argument whose path is empty.** A half-typed `"` is an
+empty path, and that is precisely when completion has to fire; the first version
+skipped empties and completion silently fell through to offering mnemonics inside
+a string. Links and hover reject them instead — an empty path resolves to the
+containing directory, which is not a file, so the link filter already excludes it
+and hover checks explicitly.
+
+**Three directives are not extension-filtered.** §16.11 settled on filtering
+completion by directive, and `.incpng`/`.incpal` (PNG), `.incwav` (WAV) and
+`.include`/`.inestrn` (`asm`, `inc`, `s`) do. But `.incbin` and `.incrle` take an
+*arbitrary* blob, and a `file://` argument on a custom pseudo-op can be any format
+its script understands — a guessed extension list there would hide the author's
+own naming for no benefit, so those offer every file. Directories are always
+offered regardless, since they are on the way to a file.
+
+Two smaller notes:
+
+- **PNG dimensions come from the IHDR, not a decode.** Hover fires on every mouse
+  pause, and `nessemble-media`'s decoder would expand a full-resolution image to
+  learn two numbers. Reading the 24-byte header keeps the LSP crate's dependency
+  list unchanged as well.
+- **A trailing comma continues the argument list.** A directive's arguments end at
+  the line break *except* when the line ends in `,`, matching the parser's
+  continuation rule — so a declared path on a continuation line still links.

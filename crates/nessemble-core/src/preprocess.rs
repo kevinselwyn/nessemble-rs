@@ -237,7 +237,11 @@ impl Pre<'_> {
             return Err(self.diag(file_id, line, t!("too-many-includes")));
         }
 
-        let name = target.trim_matches('"').to_string();
+        // A `file://` declaration is stripped like any other filename argument,
+        // so `.include "file://defs.asm"` resolves to `defs.asm`.
+        let name = crate::strip_file_url(target.trim_matches('"'))
+            .0
+            .to_string();
         // Resolve relative to the directory of the file that contains the
         // directive, so a nested include (or an include in a subdirectory) is
         // resolved from *its* location rather than the top-level file's.
