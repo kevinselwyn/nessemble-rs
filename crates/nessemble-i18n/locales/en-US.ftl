@@ -83,6 +83,9 @@ init-choose-mirroring = Choose a mirroring between 0-15
 ## scripts
 
 scripts-installed = Installed scripts to { $path }
+cache-info = Cache: { $path }
+cache-entries = { $count } entries, { $bytes } bytes
+cache-cleared = Cleared { $count } entries, { $bytes } bytes
 
 ## Miscellaneous
 

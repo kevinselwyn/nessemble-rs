@@ -105,7 +105,9 @@ pub fn run(args: &CoverageArgs) -> u8 {
     #[cfg(feature = "coverage")]
     let resolver = match &scripts_cov {
         Some(cov) => custom::build_resolver_with_coverage(args.pseudo.as_deref(), cov.clone()),
-        None => custom::build_resolver(args.pseudo.as_deref()),
+        // Coverage needs every script to really execute (see `custom`), so the
+        // persistent cache is bypassed on this path.
+        None => custom::build_resolver(args.pseudo.as_deref(), false),
     };
     #[cfg(not(feature = "coverage"))]
     let resolver = {
@@ -114,7 +116,7 @@ pub fn run(args: &CoverageArgs) -> u8 {
                 "nessemble: this build lacks Rhai script-coverage support; ignoring --scripts"
             );
         }
-        custom::build_resolver(args.pseudo.as_deref())
+        custom::build_resolver(args.pseudo.as_deref(), false)
     };
 
     let assembly = match assemble_file_with(Path::new(&args.infile), &options, resolver) {

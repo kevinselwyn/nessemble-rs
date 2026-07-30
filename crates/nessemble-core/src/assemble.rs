@@ -1736,7 +1736,13 @@ impl Assembler {
 }
 
 /// CRC-32 (poly 0xEDB88320), matching the reference `crc_32`.
-fn crc_32(data: &[u8]) -> u32 {
+///
+/// Used by `.checksum`, and re-exported (as [`crate::crc_32`]) for naming
+/// content-addressed files — never as a correctness boundary: a CRC collision
+/// must be *detected* by whatever compares the real contents, not relied upon
+/// not to happen.
+#[must_use]
+pub fn crc_32(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (i, entry) in table.iter_mut().enumerate() {
         let mut rem = i as u32;

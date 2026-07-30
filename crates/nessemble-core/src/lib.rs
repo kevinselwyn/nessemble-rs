@@ -18,7 +18,7 @@ mod parse;
 mod preprocess;
 pub mod tooling;
 
-pub use assemble::{CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
+pub use assemble::{crc_32, CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
 pub use preprocess::FileOverlay;
 
 /// The NES palette mapping `.color` performs, re-exported so tooling (the

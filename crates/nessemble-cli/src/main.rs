@@ -13,6 +13,7 @@
 //! that branded output is preserved; clap's own version flag is disabled in
 //! favor of these.
 
+mod cache;
 mod coverage;
 mod custom;
 mod format;
@@ -84,6 +85,10 @@ struct Cli {
     #[arg(short = 'c', long)]
     check: bool,
 
+    /// do not read or write the custom pseudo-instruction cache
+    #[arg(long)]
+    no_cache: bool,
+
     /// display program version
     #[arg(short = 'v', long)]
     version: bool,
@@ -131,6 +136,20 @@ enum Command {
     Lint(lint::LintArgs),
     /// report runtime coverage from a CDL capture
     Coverage(coverage::CoverageArgs),
+    /// inspect or clear the custom pseudo-instruction cache
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+}
+
+/// `nessemble cache …`.
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// report where the cache is and what is in it
+    Info,
+    /// delete every cached entry
+    Clear,
 }
 
 fn main() -> ExitCode {
@@ -152,6 +171,37 @@ fn main() -> ExitCode {
     };
 
     ExitCode::from(dispatch(cli))
+}
+
+/// `nessemble cache info` / `clear`: report or empty the custom pseudo-instruction
+/// cache. Both are no-ops (reported as an error) without a home directory to keep
+/// it in.
+fn cache_command(command: &CacheCommand) -> u8 {
+    let Some(cache) = cache::Cache::open() else {
+        eprintln!("nessemble: {}", nessemble_i18n::t!("no-home"));
+        return RETURN_EPERM;
+    };
+    match command {
+        CacheCommand::Info => {
+            let (count, bytes) = cache.stats();
+            println!(
+                "{}",
+                nessemble_i18n::t!("cache-info", path = cache.root().display().to_string())
+            );
+            println!(
+                "{}",
+                nessemble_i18n::t!("cache-entries", count = count, bytes = bytes)
+            );
+        }
+        CacheCommand::Clear => {
+            let (count, bytes) = cache.clear();
+            println!(
+                "{}",
+                nessemble_i18n::t!("cache-cleared", count = count, bytes = bytes)
+            );
+        }
+    }
+    RETURN_OK
 }
 
 /// Dispatch a parsed command line: `-v`/`-L`, a subcommand, or assemble mode.
@@ -177,6 +227,7 @@ fn dispatch(cli: Cli) -> u8 {
         Some(Command::Format(args)) => format::run(&args),
         Some(Command::Lint(args)) => lint::run(&args),
         Some(Command::Coverage(args)) => coverage::run(&args),
+        Some(Command::Cache { command }) => cache_command(&command),
         None => assemble_mode(&cli),
     }
 }
@@ -198,13 +249,13 @@ fn assemble_mode(cli: &Cli) -> u8 {
         Some(path) => assemble_file_with(
             path,
             &options,
-            custom::build_resolver(cli.pseudo.as_deref()),
+            custom::build_resolver(cli.pseudo.as_deref(), !cli.no_cache),
         ),
         None => match read_stdin() {
             Ok(source) => assemble_with(
                 &source,
                 &options,
-                custom::build_resolver(cli.pseudo.as_deref()),
+                custom::build_resolver(cli.pseudo.as_deref(), !cli.no_cache),
             ),
             Err(e) => {
                 eprintln!("nessemble: could not read input: {e}");

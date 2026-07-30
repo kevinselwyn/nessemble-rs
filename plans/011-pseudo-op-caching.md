@@ -1,9 +1,9 @@
 # nessemble-rs: A Plan for Caching Custom Pseudo-Instructions
 
-> Status: **Phases 0–2 shipped ([§12](#12-phased-plan)); Phases 3–5 proposed and
-> awaiting go-ahead. Decisions settled with the maintainer in
-> [§16](#16-decisions); deviations found by building each phase are recorded in
-> [§17](#17-as-built).** This document designs caching
+> Status: **Complete — Phases 0–5 shipped ([§12](#12-phased-plan)); decisions
+> settled with the maintainer in [§16](#16-decisions); the deviations found by
+> building each phase are recorded in [§17](#17-as-built).** This document
+> designs caching
 > for custom pseudo-op scripts, in **three layers**: per-assembly
 > **memoization** so a directive's `custom()` runs once instead of once per
 > assembler pass ([§6.1](#61-layer-1--per-assembly-memoization-core)),
@@ -217,7 +217,7 @@ is unconditional and unconfigurable; `--no-cache` (§10) does not disable it,
 because it is not a cache of anything outside the current process and switching
 it off would restore the ROM-sizing bug in §2.
 
-### 6.2 Layer 2 — recorded inputs (`nessemble-script`)
+### 6.2 Layer 2 — recorded inputs (`nessemble-script`) — **as built (Phase 3)**
 
 `engine(base_dir)` gains a recorder — an `Rc<RefCell<BTreeSet<PathBuf>>>` — that
 the three path-taking registrations push into: the shadowed `path` (which every
@@ -254,7 +254,7 @@ The one route it cannot see is `import`, which rhai resolves through its own
 are therefore not cached at all (§8, §16.8) — refused rather than recorded
 incompletely.
 
-### 6.3 Layer 3 — the on-disk cache (CLI)
+### 6.3 Layer 3 — the on-disk cache (CLI) — **as built (Phase 4)**
 
 `Resolver::resolve` (`nessemble-cli/src/custom.rs:49`) becomes:
 
@@ -364,7 +364,7 @@ It is recorded here as a **known, accepted limitation** (§16.4), so that a futu
 that it applies to scripts as well as assets (§16.9): the one dependency a
 developer edits ten times an hour is under the same rule as a PNG.
 
-## 8. Uncacheable runs
+## 8. Uncacheable runs — **as built (Phase 3)**
 
 Some runs must not be cached at all. They are detected by a **static scan of the
 compiled AST** for a small deny-list of impure host functions, done once per
@@ -442,7 +442,7 @@ the request LSP defines for exactly this. The existing `.foo` → script jump at
   any format. A per-directive extension table, plus `/` added to the completion
   trigger characters (today only `.`, `lib.rs:2695`).
 
-## 10. CLI surface
+## 10. CLI surface — **as built (Phase 5)**
 
 - **`--no-cache`** on the assemble path: no reads, no writes, no entry mtime
   bumps. The escape hatch §7.4 promises, and the flag a bug report gets asked to
@@ -495,18 +495,19 @@ the prefix before the payoff it was invented for exists.
 - **Phase 2 — the editor surface (LSP). — shipped.** Document links, path hover,
   filtered path completion (§9.2–9.3). Notes in §17.3; tests in the
   `nessemble-lsp` test module.
-- **Phase 3 — input recording (`nessemble-script`).** The recorder in `engine`,
-  `RunOutcome`, `run_with_inputs`, the §8 static impurity scan. No behavior
-  change yet — this phase only *reports*. *Review this hardest: everything in
-  Phase 4 trusts that the recorded set is complete.*
-- **Phase 4 — the on-disk cache (CLI).** Key material, `crc_32` filenames with
-  exact comparison, entry read/write with atomic rename, freshness checks for
-  inputs and the script (§7.3), the coverage bypass, `--no-cache`.
-- **Phase 5 — cache management and docs.** `nessemble cache info` / `clear`,
-  eviction (§16.10), and the docs in §11.
+- **Phase 3 — input recording (`nessemble-script`). — shipped.** The recorder in
+  `engine_recording`, `RunOutcome`, `run_with_inputs`, the §8 impurity scan (now
+  its own `purity` module). Notes in §17.4.
+- **Phase 4 — the on-disk cache (CLI). — shipped.** Key material, `crc_32`
+  filenames with exact comparison, entry read/write with atomic rename, freshness
+  checks for inputs and the script (§7.3), the coverage bypass, `--no-cache`.
+  Notes in §17.5; tests in `crates/nessemble-cli/src/cache.rs` and
+  `crates/nessemble-cli/tests/cli.rs`.
+- **Phase 5 — cache management and docs. — shipped.** `nessemble cache info` /
+  `clear`, eviction (§16.10), and the docs in §11. Notes in §17.6.
 
-Phases 0–1 are small and land immediately. Phase 3 is the careful one. Phase 4 is
-the payoff.
+Phases 0–1 were small and landed immediately. Phase 3 was the careful one. Phase 4
+is the payoff.
 
 ## 13. Explicitly not in v1
 
@@ -793,3 +794,65 @@ Two smaller notes:
 - **A trailing comma continues the argument list.** A directive's arguments end at
   the line break *except* when the line ends in `,`, matching the parser's
   continuation rule — so a declared path on a continuation line still links.
+
+### 17.4 The purity scan is its own module, and `internals` is no longer optional (Phase 3)
+
+**`rhai/internals` moved from the `coverage` feature to a plain dependency
+feature.** The scan walks the compiled AST, and the AST types live behind
+`internals`; the cache path needs the scan on every build, not only under
+`nessemble coverage`. The `coverage` feature now enables just `rhai/debugging`.
+
+Three things the AST turned out to require:
+
+- **Method calls are a separate variant.** `rand(0, 255)` is an `Expr::FnCall`,
+  but `array.shuffle()` and `file.write(bytes)` are `Expr::MethodCall`s. Matching
+  only the first missed `shuffle` entirely — caught by a test, and the reason the
+  scan matches both shapes.
+- **rhai's optimizer folds constant-guarded branches** before the scan sees them,
+  so `if false { rand() }` is not merely uncacheable-in-theory, it is *gone*. That
+  is fine — code that cannot run cannot make the result vary — and the
+  conservatism §8 promises applies to branches guarded by anything runtime.
+- **An `import`ing script cannot be tested through `run_with_inputs`** at all:
+  rhai resolves modules against the process directory, so such a script fails at
+  runtime long before caching matters. That is the same fact that makes modules
+  invisible to the recorder (§16.8), so the test scans a compiled AST directly.
+
+`RunOutcome` also carries **why** a run is uncacheable (`Option<Impurity>`), not
+just a bool. It costs nothing to keep the reason, and a "why is this script
+re-running every build?" question is otherwise unanswerable.
+
+### 17.5 An entry is two files, and a hit rewrites the smaller one (Phase 4)
+
+`nessemble_core::crc_32` became **public** (`pub fn`, re-exported from the crate
+root) with a doc comment saying what it may and may not be used for. §7.2's design
+depends on it, and reimplementing CRC-32 in the CLI to avoid a `pub` would have
+been worse.
+
+Three implementation choices worth recording:
+
+- **Bytes are written before metadata.** A reader that finds an entry's metadata
+  therefore always finds the bytes it describes; an orphaned `.bin` (from a crash
+  between the two) is harmless and gets overwritten.
+- **A hit rewrites the metadata file** so eviction can be least-recently-*used*
+  (§16.10). Rewriting the small JSON is the portable way to move an mtime without
+  a `filetime` dependency, and it leaves the `.bin` — the part that can be large —
+  untouched. The cost is one few-hundred-byte write per hit, against the script
+  execution a hit avoids.
+- **`put` stores nothing if any input cannot be stamped.** A dependency that
+  vanished between the script reading it and the cache stamping it could never be
+  confirmed again, so the entry would either be permanently stale or permanently
+  missing; refusing to write it is the honest outcome.
+
+### 17.6 The end-to-end hit test documents the blind spot (Phase 5)
+
+A CLI-level test cannot see "the script did not run" directly. The one observable
+proof is to change what the script *would* return while leaving its stamp alone —
+which is exactly §7.4's blind spot, reproduced deliberately with
+`std::fs::File::set_modified` (stable since 1.75, and this workspace requires
+1.83, so no dependency). `a_hit_answers_without_running_the_script` therefore
+asserts both halves of the honest story: the cache serves the stored bytes, and
+`--no-cache` reaches the edited script.
+
+The rest of the CLI tests assert the wiring through `nessemble cache info`: an
+ordinary build leaves one entry, `--no-cache` leaves none, a `rand`-using script
+leaves none, and `cache clear` reports what it removed.
