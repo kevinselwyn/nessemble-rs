@@ -1,7 +1,9 @@
 # nessemble-rs: A Plan for Caching Custom Pseudo-Instructions
 
-> Status: **Proposed — awaiting go-ahead. Decisions settled with the maintainer
-> in [§16](#16-decisions); nothing built yet.** This document designs caching
+> Status: **Phase 0 shipped ([§12](#12-phased-plan)); Phases 1–5 proposed and
+> awaiting go-ahead. Decisions settled with the maintainer in
+> [§16](#16-decisions); the one deviation building Phase 0 turned up is recorded
+> in [§17](#17-as-built).** This document designs caching
 > for custom pseudo-op scripts, in **three layers**: per-assembly
 > **memoization** so a directive's `custom()` runs once instead of once per
 > assembler pass ([§6.1](#61-layer-1--per-assembly-memoization-core)),
@@ -179,22 +181,33 @@ Three layers, each in the crate that owns the relevant knowledge. They stack:
 layer 1 answers from memory, layer 3 answers from disk, layer 2 is what makes
 layer 3 trustworthy.
 
-### 6.1 Layer 1 — per-assembly memoization (core)
+### 6.1 Layer 1 — per-assembly memoization (core) — **as built (Phase 0)**
 
 A map on `Assembler`, consulted by `exec_custom`:
 
 ```rust
-/// Every distinct custom-directive invocation in this assembly, and what it
-/// emitted. Keyed so that pass 1 and pass 2 share one execution of a script
-/// whose arguments resolved identically — which is all of them except the ones
-/// with forward-referenced symbols (§3).
-custom_memo: HashMap<(String, Vec<i64>, Vec<String>, PathBuf), Result<Vec<u8>, String>>,
+/// Identifies one custom-directive invocation: name, evaluated arguments, and the
+/// site it was written at (file index into `files`, and line).
+type CustomKey = (String, Vec<i64>, Vec<String>, u32, u32);
+
+/// What each custom-directive invocation in this run emitted, so a directive's
+/// script executes once rather than once per pass.
+custom_memo: HashMap<CustomKey, Result<Vec<u8>, String>>,
 ```
 
 `exec_custom` builds the key from the name, the evaluated `ints`, the stripped
-`texts`, and `cur_dir()`, and calls the resolver only on a miss. The map lives
-for the whole assembly — it is deliberately **not** cleared between passes, since
-sharing across passes is the entire point.
+`texts`, and `(cur_file, cur_line)`, and calls the resolver only on a miss. The
+map lives for the whole assembly — it is deliberately **not** cleared between
+passes, since sharing across passes is the entire point.
+
+**The invocation site is part of the key** (§17.1): two *separate* directives with
+identical arguments each resolve once, rather than the second reusing the first's
+bytes. That confines the change to the pass duplication — a script that varies its
+output on purpose (the `.noise` example in the extending docs) keeps varying
+between call sites, exactly as it does today — and it leaves cross-site
+deduplication to layer 3, which is keyed without the site and is the layer
+designed to decide whether a script is safe to reuse (§8). The base directory does
+not appear in the key because the file index implies it.
 
 Why core and not the CLI resolver: it is where the duplication is, it is the only
 place with `&mut self`, and it benefits every embedder — including
@@ -468,10 +481,11 @@ its own. The editor work comes **before** the cache (§16.12): the clickable pat
 is the visible reward for writing `file://`, so authors have a reason to adopt
 the prefix before the payoff it was invented for exists.
 
-- **Phase 0 — memoization (core).** `custom_memo` in `Assembler`, consulted by
-  `exec_custom`. No new syntax, no disk, no configuration. Halves script work in
-  every build and fixes the `rand` pass-skew in §2. *Ship this first: it is the
-  largest win per line of code in the whole plan.*
+- **Phase 0 — memoization (core). — shipped.** `custom_memo` in `Assembler`,
+  consulted by `exec_custom`. No new syntax, no disk, no configuration. Halves
+  script work in every build and fixes the `rand` pass-skew in §2. One deviation
+  from the design as written, recorded in §17.1. Tests in
+  `crates/nessemble-core/tests/custom_memo.rs`.
 - **Phase 1 — `file://` (core).** Prefix stripping for custom directives and the
   seven file-taking directives, the existence check, the `could-not-open`
   diagnostic, parser-level tests that the AST is unchanged. Useful with no cache
@@ -688,3 +702,42 @@ any of them.
 16. **`--no-cache` does not disable layer 1 memoization.** *Alternative:* a flag
     that forces every invocation to execute, useful for diagnosing a script whose
     output legitimately varies — but that is the behavior §2 identifies as a bug.
+
+## 17. As built
+
+Deviations found by building a phase, recorded here rather than by quietly
+rewriting the design above.
+
+### 17.1 The memo key includes the invocation site (Phase 0)
+
+**Designed:** `(name, ints, texts, base_dir)` (§6.1, as originally written).
+**Built:** `(name, ints, texts, cur_file, cur_line)`.
+
+The designed key deduplicates across *call sites*, not only across passes: two
+`.noise 16` directives in one file would have shared one resolution and emitted
+**identical** bytes, where today they emit different ones. That is a change to
+what a program assembles to, in a direction the extending docs specifically
+advertise ("a `.noise` directive that emits `\1` random bytes"), and it is a
+separate question from the pass skew this phase exists to fix.
+
+Adding the site makes Phase 0 a strict improvement with **no other observable
+change**: same site, same arguments, two passes → one execution (the bug fixed);
+different sites → one execution each (today's behavior preserved). Cross-site
+reuse is left to layer 3, which is keyed without the site and already has the
+machinery to decide whether a script is safe to reuse at all (§8) — a rand-using
+script is uncacheable there, so it never collapses two call sites.
+
+The base directory dropped out of the key: `cur_file` indexes `dirs`, so the file
+index already implies it.
+
+Two smaller notes from the same phase:
+
+- **A `Result` is memoized, not just the bytes.** A resolver error is still
+  reported on every pass that reaches the directive (collect mode dedupes,
+  `assemble.rs:1699`), but the resolver is asked once. Covered by
+  `a_resolver_error_is_reported_once_and_asked_once`.
+- **The pass-1 placeholder for an undefined symbol is `1`**, so a forward
+  reference whose resolved value *is* 1 memoizes legitimately between passes —
+  the two invocations really are identical as far as the resolver can tell. The
+  test for pass-dependent arguments pads the label to 3 to avoid pinning that
+  coincidence.

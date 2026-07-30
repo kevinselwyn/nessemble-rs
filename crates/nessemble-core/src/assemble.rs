@@ -6,6 +6,7 @@
 //! here we set the iNES-related state (so address math and `.org` validation
 //! match) but emit the raw written region.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -276,6 +277,11 @@ pub struct Assembler {
     /// numeric and string arguments, and the base directory, it returns the
     /// bytes to emit (or an error message).
     custom: CustomResolver,
+    /// What each custom-directive invocation in this run emitted, so a
+    /// directive's script executes **once** rather than once per pass. See
+    /// [`Assembler::exec_custom`]; kept for the whole run (not cleared between
+    /// passes), since sharing across passes is the point.
+    custom_memo: HashMap<CustomKey, Result<Vec<u8>, String>>,
 }
 
 /// A source span as collected during assembly: like [`SourceSpan`] but keyed by
@@ -291,6 +297,15 @@ struct RawSpan {
 /// Resolves a custom pseudo-op to the bytes it emits. See [`Assembler::custom`].
 pub type CustomResolver =
     Box<dyn Fn(&str, &[i64], &[String], &std::path::Path) -> Result<Vec<u8>, String>>;
+
+/// Identifies one custom-directive invocation: the directive name, its evaluated
+/// integer and string arguments, and the **site** it was written at (file index
+/// into `Assembler::files` and line). The site keeps two identical-looking calls
+/// distinct, so a script that deliberately returns something different each time
+/// (`rand`, per the extending docs' `.noise` example) still varies *between* call
+/// sites; the base directory is implied by the file index, so it is not stored
+/// separately. See [`Assembler::custom_memo`].
+type CustomKey = (String, Vec<i64>, Vec<String>, u32, u32);
 
 impl Assembler {
     pub fn new(
@@ -338,6 +353,7 @@ impl Assembler {
             dirs,
             paths,
             custom,
+            custom_memo: HashMap::new(),
         }
     }
 
@@ -1249,6 +1265,22 @@ impl Assembler {
 
     /// Resolve and run a custom pseudo-op via the injected resolver, writing the
     /// bytes it returns (or reporting the resolver's error).
+    ///
+    /// The resolver runs **at most once per invocation site** ([`CustomKey`]):
+    /// both passes visit every directive, so without this a script executes twice
+    /// per assembly — and one returning non-deterministic bytes (say via `rand`)
+    /// could return a different *length* on each pass and mis-size the ROM. An
+    /// invocation whose arguments genuinely differ between passes (an `Int`
+    /// argument referencing a forward-declared symbol, undefined on pass 1) has a
+    /// different key on each, and so is resolved on each, as it must be.
+    ///
+    /// Two *separate* directives with identical arguments each still resolve
+    /// once, because the site is part of the key — deduplicating those would
+    /// change what a deliberately non-deterministic script emits, which is a
+    /// different thing from the pass skew above.
+    ///
+    /// The result is memoized either way: a resolver error is reported on both
+    /// passes, as before, without asking the resolver twice.
     fn exec_custom(&mut self, name: &str, args: &[CustomArg]) {
         let mut ints = Vec::new();
         let mut texts = Vec::new();
@@ -1258,7 +1290,21 @@ impl Assembler {
                 CustomArg::Str(s) => texts.push(s.clone()),
             }
         }
-        match (self.custom)(name, &ints, &texts, self.cur_dir()) {
+        let key = (
+            name.to_string(),
+            ints.clone(),
+            texts.clone(),
+            self.cur_file,
+            self.cur_line,
+        );
+        let result = if let Some(memoized) = self.custom_memo.get(&key) {
+            memoized.clone()
+        } else {
+            let resolved = (self.custom)(name, &ints, &texts, self.cur_dir());
+            self.custom_memo.insert(key, resolved.clone());
+            resolved
+        };
+        match result {
             Ok(bytes) => self.write_all(&bytes),
             Err(msg) => self.hard_error(msg),
         }
