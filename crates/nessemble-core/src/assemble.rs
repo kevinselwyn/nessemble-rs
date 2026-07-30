@@ -1189,7 +1189,9 @@ impl Assembler {
                         let out = nessemble_media::incbin_slice(&bytes, off, lim);
                         self.write_all(&out);
                     }
-                    None => self.hard_error(t!("could-not-read", file = file)),
+                    None => {
+                        self.hard_error(t!("could-not-read", file = crate::strip_file_url(file).0));
+                    }
                 }
             }
             Pseudo::Incpng(file, offset, limit) => {
@@ -1215,7 +1217,9 @@ impl Assembler {
                     let out = nessemble_media::rle_encode(&bytes);
                     self.write_all(&out);
                 }
-                None => self.hard_error(t!("could-not-read", file = file)),
+                None => {
+                    self.hard_error(t!("could-not-read", file = crate::strip_file_url(file).0));
+                }
             },
             Pseudo::Incwav(file, amp) => {
                 let amplitude = amp.as_ref().map_or(24, |e| self.eval(e)) as i32;
@@ -1281,13 +1285,33 @@ impl Assembler {
     ///
     /// The result is memoized either way: a resolver error is reported on both
     /// passes, as before, without asking the resolver twice.
+    ///
+    /// A string argument carrying a `file://` declaration
+    /// ([`crate::strip_file_url`]) reaches the resolver as the bare path, and is
+    /// checked for existence *first*: a missing declared file is reported against
+    /// this directive and the script is not run at all.
     fn exec_custom(&mut self, name: &str, args: &[CustomArg]) {
         let mut ints = Vec::new();
         let mut texts = Vec::new();
+        let mut declared = Vec::new();
         for arg in args {
             match arg {
                 CustomArg::Int(e) => ints.push(self.eval(e)),
-                CustomArg::Str(s) => texts.push(s.clone()),
+                CustomArg::Str(s) => {
+                    let (path, is_declared) = crate::strip_file_url(s);
+                    if is_declared {
+                        declared.push(path.to_string());
+                    }
+                    texts.push(path.to_string());
+                }
+            }
+        }
+        // A declared input that is not there is this directive's error, reported
+        // before the script gets a chance to fail on its own terms.
+        for path in &declared {
+            if !self.cur_dir().join(path).exists() {
+                self.hard_error(t!("could-not-open", file = path));
+                return;
             }
         }
         let key = (
@@ -1330,8 +1354,12 @@ impl Assembler {
 
     /// Read a media file resolved against the directory of the file that
     /// contains the directive (see [`Self::cur_dir`]).
+    ///
+    /// A `file://` declaration is stripped first ([`crate::strip_file_url`]), so
+    /// `.incbin "file://logo.chr"` reads the same file `.incbin "logo.chr"` does.
     fn read_media_file(&self, name: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.cur_dir().join(name)).ok()
+        let (path, _declared) = crate::strip_file_url(name);
+        std::fs::read(self.cur_dir().join(path)).ok()
     }
 
     /// Read and decode a media PNG (open failure and decode failure are
@@ -1343,7 +1371,7 @@ impl Assembler {
 
     fn exec_incwav(&mut self, file: &str, amplitude: i32) {
         let Some(bytes) = self.read_media_file(file) else {
-            self.hard_error(t!("could-not-open", file = file));
+            self.hard_error(t!("could-not-open", file = crate::strip_file_url(file).0));
             return;
         };
         match nessemble_media::wav_to_dpcm(&bytes, amplitude) {

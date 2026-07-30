@@ -46,6 +46,13 @@ Once connected, the server provides:
   each with its documentation. A comment directly above an undocumented label
   also offers a **routine signature block**, which scaffolds
   `@nessemble-param` / `-returns` / `-clobbers` in one insertion.
+  Inside a **filename argument** — the path of `.include`, `.incbin`, `.incpng`,
+  `.incpal`, `.incrle`, `.incwav`, `.inestrn`, or any argument written with a
+  [`file://` prefix](syntax.md#declaring-a-filename-argument) — filenames from
+  that directory are offered instead, filtered to what the directive can use
+  (`.incpng` offers PNGs, `.include` offers assembly sources, a custom
+  pseudo-instruction offers everything, since its script may read any format).
+  Directories are always offered, and typing `/` walks into one.
 - **Formatting** — “format document” applies the opinionated house style
   (indentation, comma spacing, data-block consolidation, routine spacing) while
   preserving comments. It runs the **same engine** as the
@@ -62,6 +69,15 @@ Once connected, the server provides:
   file's register discipline reads at a glance; go-to-definition (cmd/ctrl-click) and find-all-references for symbols.
   With a workspace folder open, go-to-definition follows `.include`s across the
   project, so it reaches a symbol defined in a sibling or parent file.
+- **Clickable file paths** — every filename argument is a link, so
+  cmd/ctrl-clicking the path in `.include "defs.asm"` or `.incpng "hero.png"`
+  opens that file. A custom pseudo-instruction's argument becomes clickable when
+  it is declared with a
+  [`file://` prefix](syntax.md#declaring-a-filename-argument), which is how the
+  editor knows the string is a path at all. Paths resolve the way the assembler
+  resolves them — relative to the file that contains the directive — and a path
+  that doesn't resolve is deliberately *not* linked: it is reported as an error
+  instead.
 - **Hover** — opcode and addressing-mode details for an instruction, the
   description of a directive or [comment directive](usage.md#comment-directives),
   and the resolved value of a constant or label.
@@ -81,6 +97,9 @@ Once connected, the server provides:
   first, and an argument the buffer can't resolve is listed as unresolved rather
   than guessed at. The swatches are drawn as an image, which graphical editors
   render inline; a terminal editor shows the same values as text.
+  Hovering a **filename argument** shows the absolute path it resolved to and what
+  is there — the file's size, a PNG's pixel dimensions, or **not found** — which
+  answers "is it picking up the file I think it is?" without assembling.
 - **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)
   blocks, and runs of consecutive comments, can be collapsed.
 - **Rename** — renaming a symbol updates its definition and every use across the

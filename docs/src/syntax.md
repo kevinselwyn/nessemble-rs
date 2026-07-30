@@ -996,6 +996,29 @@ Example:
 > A file included from a subdirectory therefore resolves its own includes and
 > assets from that subdirectory, not from the top-level project directory.
 
+### Declaring a filename argument
+
+Any filename argument may be written with a `file://` prefix, which declares
+that the string names an input file:
+
+```nessemble
+.incbin "file://logo.chr"
+.include "file://defs.asm"
+```
+
+The prefix is stripped before the path is used, so the two spellings load exactly
+the same file — `file://` adds information *about* the argument rather than
+changing it. It is a marker, not a URL scheme: there is no host part and no
+percent-decoding, and `file:///path/to/logo.chr` is simply the absolute spelling.
+
+The declaration earns its keep on a
+[custom pseudo-instruction](extending.md#declaring-file-arguments), where the
+assembler otherwise cannot tell that a string is a path. On the built-in
+directives above it is accepted, harmless, and redundant — their arguments are
+already known to be filenames — but it lets you write every path in a project the
+same way. Editors make a declared path
+[clickable](editor.md#features) either way.
+
 ### .incpal
 
 Include palette from PNG.

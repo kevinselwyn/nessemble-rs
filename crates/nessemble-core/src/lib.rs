@@ -436,6 +436,28 @@ fn default_custom_resolver() -> CustomResolver {
     })
 }
 
+/// The prefix that declares a directive's string argument to be an input file:
+/// `.tilemap "file://map.png"`. See [`strip_file_url`].
+pub const FILE_URL_PREFIX: &str = "file://";
+
+/// Strip a leading [`FILE_URL_PREFIX`] from a filename argument, returning the
+/// bare path and whether the prefix was there.
+///
+/// The prefix is an argument-level marker, not a URL scheme: no host part, no
+/// percent-decoding, and `file:///abs/path` is simply the absolute spelling (the
+/// third slash starts the path). Every consumer of a filename argument strips it,
+/// so a script or importer sees the same path it would have without the
+/// declaration; what the declaration adds is that a *missing* file is reported
+/// against the directive before the script runs, and that tooling can see the
+/// dependency without executing anything.
+#[must_use]
+pub fn strip_file_url(arg: &str) -> (&str, bool) {
+    match arg.strip_prefix(FILE_URL_PREFIX) {
+        Some(path) => (path, true),
+        None => (arg, false),
+    }
+}
+
 /// Parse a `--pseudo`-style custom pseudo-op mapping into `(name, path)` pairs,
 /// the name without its leading dot. A line contributes an entry only when it is
 /// `<name> = <path>` with a valid directive identifier for the key (an ASCII

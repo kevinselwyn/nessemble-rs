@@ -42,8 +42,8 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, Completion, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
-    GotoDefinition, HoverRequest, InlayHintRequest, References, Rename, Request as _,
+    CodeActionRequest, Completion, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    Formatting, GotoDefinition, HoverRequest, InlayHintRequest, References, Rename, Request as _,
     SemanticTokensFullRequest,
 };
 use lsp_types::{
@@ -51,16 +51,16 @@ use lsp_types::{
     CodeActionProviderCapability, CompletionItem, CompletionItemKind, CompletionOptions,
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    FoldingRange, FoldingRangeKind, FoldingRangeParams, FoldingRangeProviderCapability,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range, ReferenceParams,
-    RenameParams, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
-    WorkspaceEdit,
+    DocumentFormattingParams, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeKind,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InlayHint, InlayHintKind,
+    InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind, NumberOrString, OneOf,
+    Position, PublishDiagnosticsParams, Range, ReferenceParams, RenameParams, SemanticToken,
+    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 
 use nessemble_core::tooling::{self, LexKind, RuleSeverity};
@@ -409,6 +409,10 @@ impl Server {
             }
             return items;
         }
+        // Inside a filename argument, offer filenames — nothing else can go there.
+        if let Some(items) = self.path_completions(uri, pos) {
+            return items;
+        }
         let mut items = mnemonic_items();
         items.extend(directive_items());
         items.extend(doc.symbols.iter().map(|s| symbol_item(&s.name)));
@@ -564,6 +568,14 @@ impl Server {
         let token = token_at(&doc.text, pos)?;
         let markdown = match token.kind {
             LexKind::Directive => directive_hover(token.text)?,
+            // A filename argument reports where it resolved to and what is there.
+            LexKind::String => {
+                let base = Self::base_dir(uri)?;
+                let arg = path_args(&doc.text)
+                    .into_iter()
+                    .find(|arg| arg.token_range == token.range && !arg.path.is_empty())?;
+                path_arg_hover(&base, &arg)
+            }
             LexKind::Ident => ident_hover(
                 token.text,
                 &doc.text,
@@ -580,6 +592,95 @@ impl Server {
             }),
             range: Some(token.range),
         })
+    }
+
+    /// The directory a document's filename arguments resolve against: the
+    /// directory of the document itself, as the assembler uses. `None` for a
+    /// non-`file:` URI (an untitled buffer), which has no directory at all.
+    fn base_dir(uri: &Url) -> Option<PathBuf> {
+        if uri.scheme() != "file" {
+            return None;
+        }
+        uri_to_path(uri).parent().map(Path::to_path_buf)
+    }
+
+    /// Clickable links for every filename argument in the document at `uri`
+    /// ([`path_args`]), so cmd/ctrl-clicking a path opens the file.
+    ///
+    /// A path that does not resolve to an existing file gets **no link** — the
+    /// missing-file diagnostic is the feedback there, and a link that opens
+    /// nothing is worse than no link.
+    fn document_links(&self, uri: &Url) -> Option<Vec<DocumentLink>> {
+        let doc = self.documents.get(uri)?;
+        let base = Self::base_dir(uri)?;
+        let links = path_args(&doc.text)
+            .into_iter()
+            .filter_map(|arg| {
+                let target = resolve_path_arg(&base, arg.path);
+                if !target.is_file() {
+                    return None;
+                }
+                Some(DocumentLink {
+                    range: arg.range,
+                    target: Some(Url::from_file_path(&target).ok()?),
+                    tooltip: None,
+                    data: None,
+                })
+            })
+            .collect();
+        Some(links)
+    }
+
+    /// Filename completions inside a filename argument, or `None` when the cursor
+    /// is not in one (in which case the ordinary code completions apply).
+    ///
+    /// Entries come from the directory the partially-typed path points at, so
+    /// `"sprites/he` completes against `sprites/`. Files are filtered by what the
+    /// directive can actually use ([`FILE_DIRECTIVES`]); directories are always
+    /// offered, since they are on the way to a file.
+    fn path_completions(&self, uri: &Url, pos: Position) -> Option<Vec<CompletionItem>> {
+        let doc = self.documents.get(uri)?;
+        let base = Self::base_dir(uri)?;
+        let arg = path_args(&doc.text).into_iter().find(|arg| {
+            arg.token_range.start.line == pos.line
+                && pos.character > arg.token_range.start.character
+                && pos.character <= arg.token_range.end.character
+        })?;
+
+        // Complete against the part of the path before the cursor: everything up
+        // to the last separator is the directory to list, the rest is the prefix
+        // being typed.
+        let typed_len = pos.character.saturating_sub(arg.range.start.character) as usize;
+        let typed: String = arg.path.chars().take(typed_len).collect();
+        let (dir_part, partial) = match typed.rsplit_once('/') {
+            Some((dir, rest)) => (dir.to_string(), rest.to_string()),
+            None => (String::new(), typed),
+        };
+        let dir = resolve_path_arg(&base, &dir_part);
+        let exts = file_directive_exts(&arg.directive);
+
+        let mut items = Vec::new();
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || !name.to_lowercase().starts_with(&partial.to_lowercase()) {
+                continue;
+            }
+            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            if !is_dir && !extension_allowed(&name, exts) {
+                continue;
+            }
+            items.push(CompletionItem {
+                label: if is_dir { format!("{name}/") } else { name },
+                kind: Some(if is_dir {
+                    CompletionItemKind::FOLDER
+                } else {
+                    CompletionItemKind::FILE
+                }),
+                ..CompletionItem::default()
+            });
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        Some(items)
     }
 
     /// Inlay hints for `range` in the document at `uri`: the clobber set of each
@@ -1303,6 +1404,186 @@ fn located_lexemes(source: &str) -> Vec<Located<'_>> {
         }
     }
     out
+}
+
+/// Directives whose first string argument names a file, paired with the file
+/// extensions completion offers inside that argument. `None` means every file:
+/// a binary blob has no conventional suffix, and guessing one would hide the
+/// author's own naming.
+const FILE_DIRECTIVES: &[(&str, Option<&[&str]>)] = &[
+    ("include", Some(&["asm", "inc", "s"])),
+    ("inestrn", None),
+    ("incbin", None),
+    ("incpng", Some(&["png"])),
+    ("incpal", Some(&["png"])),
+    ("incrle", None),
+    ("incwav", Some(&["wav"])),
+];
+
+/// Whether `directive`'s first string argument is a filename, so it is a path
+/// without needing a `file://` declaration.
+fn is_file_directive(directive: &str) -> bool {
+    FILE_DIRECTIVES.iter().any(|(name, _)| *name == directive)
+}
+
+/// The extensions completion should offer inside `directive`'s filename argument.
+/// `None` offers every file — either because the directive takes any blob, or
+/// because it is a custom pseudo-op, whose script may read any format at all.
+fn file_directive_exts(directive: &str) -> Option<&'static [&'static str]> {
+    FILE_DIRECTIVES
+        .iter()
+        .find(|(name, _)| *name == directive)
+        .and_then(|(_, exts)| *exts)
+}
+
+/// A filename argument found in a buffer.
+///
+/// Two kinds qualify: the first string argument of a [`FILE_DIRECTIVES`]
+/// directive, whose argument is unambiguously a path, and *any* string argument
+/// carrying the `file://` declaration — which is what makes a custom pseudo-op's
+/// path visible to tooling without running its script.
+struct PathArg<'a> {
+    /// Lower-cased directive name, without its leading dot.
+    directive: String,
+    /// The path as written, with any `file://` prefix removed.
+    path: &'a str,
+    /// Range of the path text: inside the quotes, after the prefix. This is what
+    /// a document link underlines, so the marker and quotes stay unadorned.
+    range: Range,
+    /// Range of the whole string token, used to match a hover position.
+    token_range: Range,
+}
+
+/// Every filename argument in `source`, in source order.
+///
+/// An argument with an *empty* path is reported too — that is what a half-typed
+/// `"` is, and completion needs it. Consumers that need a real file (links,
+/// hover) reject it when the resolved path turns out not to be one.
+///
+/// A directive's arguments end at the line break, except that a line ending in a
+/// comma continues onto the next — the same rule the parser applies to a custom
+/// pseudo-op's argument list.
+fn path_args(source: &str) -> Vec<PathArg<'_>> {
+    let mut out = Vec::new();
+    let mut directive: Option<String> = None;
+    let mut first_string_seen = false;
+    let mut line: Option<u32> = None;
+    let mut continues = false;
+
+    for tok in located_lexemes(source) {
+        if line != Some(tok.range.start.line) {
+            line = Some(tok.range.start.line);
+            if !continues {
+                directive = None;
+                first_string_seen = false;
+            }
+        }
+        continues = tok.kind == LexKind::Punct && tok.text == ",";
+
+        match tok.kind {
+            LexKind::Directive => {
+                directive = Some(tok.text.trim_start_matches('.').to_ascii_lowercase());
+                first_string_seen = false;
+            }
+            LexKind::String => {
+                let Some(name) = directive.clone() else {
+                    continue;
+                };
+                let is_importer_filename = is_file_directive(&name) && !first_string_seen;
+                first_string_seen = true;
+
+                let raw = tok.text;
+                let opened = raw.starts_with('"');
+                let inner_start = usize::from(opened);
+                // An unterminated string runs to the end of the line, so only
+                // trim a closing quote that is actually there.
+                let inner_end = if opened && raw.len() > 1 && raw.ends_with('"') {
+                    raw.len() - 1
+                } else {
+                    raw.len()
+                };
+                let inner = &raw[inner_start..inner_end];
+                let (path, declared) = nessemble_core::strip_file_url(inner);
+                if !declared && !is_importer_filename {
+                    continue;
+                }
+
+                let lead = utf16_len(&raw[..inner_start])
+                    + if declared {
+                        utf16_len(nessemble_core::FILE_URL_PREFIX)
+                    } else {
+                        0
+                    };
+                let trail = utf16_len(&raw[inner_end..]);
+                out.push(PathArg {
+                    directive: name,
+                    path,
+                    range: Range::new(
+                        Position::new(tok.range.start.line, tok.range.start.character + lead),
+                        Position::new(tok.range.end.line, tok.range.end.character - trail),
+                    ),
+                    token_range: tok.range,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Resolve a filename argument against `base` — the directory of the file that
+/// contains the directive, matching how the assembler resolves it. An absolute
+/// path is used as written.
+fn resolve_path_arg(base: &Path, path: &str) -> PathBuf {
+    base.join(path)
+}
+
+/// Whether `name`'s extension is one a directive accepts. `None` accepts every
+/// file (see [`FILE_DIRECTIVES`]).
+fn extension_allowed(name: &str, exts: Option<&[&str]>) -> bool {
+    let Some(exts) = exts else {
+        return true;
+    };
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| exts.iter().any(|want| ext.eq_ignore_ascii_case(want)))
+}
+
+/// Hover markdown for a filename argument: where the path resolved to, and what
+/// is there. Answers "is it finding the file I think it is?" without a build.
+fn path_arg_hover(base: &Path, arg: &PathArg<'_>) -> String {
+    let target = resolve_path_arg(base, arg.path);
+    let detail = match std::fs::metadata(&target) {
+        Ok(meta) if meta.is_dir() => "directory".to_string(),
+        Ok(meta) => match png_dimensions(&target) {
+            Some((w, h)) => format!("{} bytes · {w}×{h} PNG", meta.len()),
+            None => format!("{} bytes", meta.len()),
+        },
+        Err(_) => "**not found**".to_string(),
+    };
+    format!("`{}`\n\n{detail}", target.display())
+}
+
+/// The pixel dimensions of a PNG, read from its IHDR header.
+///
+/// Only the first 24 bytes are read: hover fires on every mouse pause, and
+/// decoding a full-resolution image to learn two numbers would be wasteful.
+fn png_dimensions(path: &Path) -> Option<(u32, u32)> {
+    use std::io::Read as _;
+
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    let mut header = [0u8; 24];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    if &header[..8] != SIGNATURE || &header[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(header[20..24].try_into().ok()?);
+    Some((width, height))
 }
 
 /// The kind of a symbol definition found by scanning a buffer.
@@ -2692,10 +2973,16 @@ fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![".".to_string()]),
+            // `/` re-triggers inside a filename argument, so completion keeps
+            // offering entries as the author walks into a subdirectory.
+            trigger_characters: Some(vec![".".to_string(), "/".to_string()]),
             ..Default::default()
         }),
         document_formatting_provider: Some(OneOf::Left(true)),
+        document_link_provider: Some(DocumentLinkOptions {
+            resolve_provider: Some(false),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        }),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 work_done_progress_options: WorkDoneProgressOptions::default(),
@@ -2794,6 +3081,12 @@ fn main_loop(connection: &Connection, workspace_roots: Vec<PathBuf>) -> LspResul
                             })
                             .unwrap_or_default();
                         Response::new_ok(req.id, CompletionResponse::Array(items))
+                    }
+                    DocumentLinkRequest::METHOD => {
+                        let links = serde_json::from_value::<DocumentLinkParams>(req.params)
+                            .ok()
+                            .and_then(|p| server.document_links(&p.text_document.uri));
+                        Response::new_ok(req.id, links)
                     }
                     Formatting::METHOD => {
                         let edits = serde_json::from_value::<DocumentFormattingParams>(req.params)
@@ -4365,5 +4658,265 @@ mod tests {
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::INFORMATION));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- filename arguments: links, hover, completion ----------------------
+
+    /// A throwaway directory tree for the filesystem-touching surfaces, plus the
+    /// `file:` URI of a document written into it.
+    struct PathTree {
+        root: PathBuf,
+    }
+
+    impl PathTree {
+        fn new(tag: &str) -> PathTree {
+            static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "nessemble-lsp-paths-{tag}-{}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).expect("create root");
+            PathTree { root }
+        }
+
+        fn write(&self, rel: &str, bytes: &[u8]) {
+            let path = self.root.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create parent");
+            }
+            std::fs::write(path, bytes).expect("write file");
+        }
+
+        /// A 24-byte PNG header declaring `w`×`h`. Hover reads only the IHDR, so
+        /// this is all the surface under test ever looks at.
+        fn write_png_header(&self, rel: &str, w: u32, h: u32) {
+            let mut bytes = Vec::from(*b"\x89PNG\r\n\x1a\n");
+            bytes.extend_from_slice(&13u32.to_be_bytes());
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&w.to_be_bytes());
+            bytes.extend_from_slice(&h.to_be_bytes());
+            self.write(rel, &bytes);
+        }
+
+        /// Open `text` as `main.asm` in this tree and return the server and URI.
+        fn open_main(&self, text: &str) -> (Server, Url) {
+            self.write("main.asm", text.as_bytes());
+            let uri = Url::from_file_path(self.root.join("main.asm")).expect("file uri");
+            let mut server = Server::default();
+            open(&mut server, uri.as_str(), text);
+            (server, uri)
+        }
+    }
+
+    impl Drop for PathTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The source text a link's range covers, for asserting what got underlined.
+    fn slice_range(text: &str, range: Range) -> String {
+        let line = text.lines().nth(range.start.line as usize).unwrap_or("");
+        line.chars()
+            .skip(range.start.character as usize)
+            .take((range.end.character - range.start.character) as usize)
+            .collect()
+    }
+
+    #[test]
+    fn document_links_cover_declared_and_importer_paths() {
+        let tree = PathTree::new("links");
+        tree.write("map.png", b"x");
+        tree.write("logo.chr", b"x");
+        tree.write("defs.asm", b"\n");
+        let text = ".tilemap \"file://map.png\"\n.incbin \"logo.chr\"\n.include \"defs.asm\"\n";
+        let (server, uri) = tree.open_main(text);
+
+        let links = server.document_links(&uri).expect("known document");
+        let covered: Vec<String> = links.iter().map(|l| slice_range(text, l.range)).collect();
+        // The path only: not the quotes, and not the `file://` marker.
+        assert_eq!(covered, ["map.png", "logo.chr", "defs.asm"]);
+        assert!(links.iter().all(|l| l.target.is_some()));
+        assert!(links[0]
+            .target
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .ends_with("map.png"));
+    }
+
+    #[test]
+    fn a_missing_path_gets_no_link() {
+        let tree = PathTree::new("missing");
+        let (server, uri) = tree.open_main(".incbin \"gone.chr\"\n.tilemap \"file://gone.png\"\n");
+
+        assert!(server.document_links(&uri).expect("known").is_empty());
+    }
+
+    #[test]
+    fn an_undeclared_custom_argument_is_not_a_path() {
+        // Without the declaration the assembler cannot know the string is a path,
+        // and neither can the editor — even when a file of that name is right there.
+        let tree = PathTree::new("undeclared");
+        tree.write("map.png", b"x");
+        let (server, uri) = tree.open_main(".tilemap \"map.png\"\n");
+
+        assert!(server.document_links(&uri).expect("known").is_empty());
+    }
+
+    #[test]
+    fn a_data_string_is_not_a_path() {
+        let tree = PathTree::new("data");
+        tree.write("hi", b"x");
+        let (server, uri) = tree.open_main(".db \"hi\"\n.ascii \"hi\"\n");
+
+        assert!(server.document_links(&uri).expect("known").is_empty());
+    }
+
+    #[test]
+    fn only_the_first_string_of_an_importer_is_its_filename() {
+        // `.incbin "logo.chr", 0, 16` takes numbers after the path; a second
+        // string would be a syntax error, but must never be treated as a path.
+        let tree = PathTree::new("firstonly");
+        tree.write("logo.chr", b"x");
+        tree.write("other.chr", b"x");
+        let (server, uri) = tree.open_main(".incbin \"logo.chr\", \"other.chr\"\n");
+
+        let links = server.document_links(&uri).expect("known");
+        assert_eq!(links.len(), 1);
+    }
+
+    #[test]
+    fn a_declared_argument_on_a_continuation_line_still_links() {
+        let tree = PathTree::new("continued");
+        tree.write("b.png", b"x");
+        let text = ".tilemap 1,\n  \"file://b.png\"\n";
+        let (server, uri) = tree.open_main(text);
+
+        let links = server.document_links(&uri).expect("known");
+        assert_eq!(links.len(), 1, "links: {links:?}");
+        assert_eq!(slice_range(text, links[0].range), "b.png");
+    }
+
+    #[test]
+    fn an_untitled_buffer_has_no_links() {
+        let mut server = Server::default();
+        open(&mut server, "untitled:Untitled-1", ".incbin \"logo.chr\"\n");
+        let uri = Url::parse("untitled:Untitled-1").unwrap();
+
+        // No directory to resolve against, so there is nothing to point at.
+        assert!(server.document_links(&uri).is_none());
+    }
+
+    #[test]
+    fn hover_on_a_declared_path_shows_where_it_resolved() {
+        let tree = PathTree::new("hover");
+        tree.write("map.bin", b"12345");
+        let (server, uri) = tree.open_main(".tilemap \"file://map.bin\"\n");
+
+        let hover = server.hover(&uri, Position::new(0, 20)).expect("hover");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(md.value.contains("map.bin"), "hover: {}", md.value);
+        assert!(md.value.contains("5 bytes"), "hover: {}", md.value);
+    }
+
+    #[test]
+    fn hover_on_a_png_argument_shows_its_dimensions() {
+        let tree = PathTree::new("png");
+        tree.write_png_header("sprite.png", 128, 64);
+        let (server, uri) = tree.open_main(".incpng \"sprite.png\"\n");
+
+        let hover = server.hover(&uri, Position::new(0, 12)).expect("hover");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(md.value.contains("128×64 PNG"), "hover: {}", md.value);
+    }
+
+    #[test]
+    fn hover_on_a_missing_path_says_not_found() {
+        let tree = PathTree::new("hovermissing");
+        let (server, uri) = tree.open_main(".incbin \"gone.chr\"\n");
+
+        let hover = server.hover(&uri, Position::new(0, 12)).expect("hover");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(md.value.contains("not found"), "hover: {}", md.value);
+    }
+
+    #[test]
+    fn completion_inside_a_png_argument_offers_only_pngs() {
+        let tree = PathTree::new("completepng");
+        tree.write("sprite.png", b"x");
+        tree.write("tiles.PNG", b"x");
+        tree.write("notes.txt", b"x");
+        tree.write("assets/deep.png", b"x");
+        let (server, uri) = tree.open_main(".incpng \"\"\n");
+
+        let labels: Vec<String> = server
+            .complete(&uri, Position::new(0, 9))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(labels.contains(&"sprite.png".to_string()), "{labels:?}");
+        // Extension matching is case-insensitive, and directories are always
+        // offered because they are on the way to a file.
+        assert!(labels.contains(&"tiles.PNG".to_string()), "{labels:?}");
+        assert!(labels.contains(&"assets/".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"notes.txt".to_string()), "{labels:?}");
+        assert!(
+            !labels.iter().any(|l| l == "lda"),
+            "no code items: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn completion_inside_a_declared_custom_argument_offers_every_file() {
+        // A script may read any format, so nothing is filtered out there.
+        let tree = PathTree::new("completeany");
+        tree.write("curve.json", b"x");
+        tree.write("sprite.png", b"x");
+        let (server, uri) = tree.open_main(".ease \"file://\"\n");
+
+        let labels: Vec<String> = server
+            .complete(&uri, Position::new(0, 14))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(labels.contains(&"curve.json".to_string()), "{labels:?}");
+        assert!(labels.contains(&"sprite.png".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn completion_walks_into_a_subdirectory_and_filters_by_prefix() {
+        let tree = PathTree::new("completedeep");
+        tree.write("assets/hero.png", b"x");
+        tree.write("assets/house.png", b"x");
+        tree.write("assets/villain.png", b"x");
+        let (server, uri) = tree.open_main(".incpng \"assets/ho\"\n");
+
+        let labels: Vec<String> = server
+            .complete(&uri, Position::new(0, 19))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(labels, ["house.png"], "{labels:?}");
+    }
+
+    #[test]
+    fn completion_outside_a_filename_argument_is_unaffected() {
+        let tree = PathTree::new("completecode");
+        let (server, uri) = tree.open_main("  ld\n");
+
+        let labels: Vec<String> = server
+            .complete(&uri, Position::new(0, 4))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(labels.iter().any(|l| l == "lda"), "{labels:?}");
     }
 }
