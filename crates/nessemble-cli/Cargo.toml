@@ -32,6 +32,8 @@ nessemble-core.workspace = true
 nessemble-isa.workspace = true
 nessemble-i18n.workspace = true
 nessemble-rc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 nessemble-script = { workspace = true, optional = true }
 nessemble-lsp = { workspace = true, optional = true }
 

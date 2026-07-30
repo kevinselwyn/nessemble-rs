@@ -10,7 +10,8 @@ authors.workspace = true
 
 [dependencies]
 nessemble-media.workspace = true
-rhai = { version = "1", default-features = false, features = ["std"] }
+# `internals` exposes the AST types the purity scan walks (see `purity`).
+rhai = { version = "1", default-features = false, features = ["std", "internals"] }
 rhai-fs = { version = "0.1.5", default-features = false, optional = true }
 rhai-rand = { version = "0.1.6", default-features = false, features = ["float", "array"], optional = true }
 
@@ -29,7 +30,7 @@ rand = ["dep:rhai-rand"]
 # walk. Off by default — only the `nessemble coverage --scripts` path needs it,
 # and it is never used unless a debugger is explicitly registered, so ordinary
 # script execution is unaffected.
-coverage = ["rhai/debugging", "rhai/internals"]
+coverage = ["rhai/debugging"]
 
 [dev-dependencies]
 # Encodes small PNGs for the `decode_png` tests.

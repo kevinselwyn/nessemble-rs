@@ -357,12 +357,68 @@ fn custom(ints, texts) {
 > **Random output is not reproducible.** Each assembly draws fresh values, so a
 > script using these functions produces a different ROM every run. Keep them out
 > of builds that must be deterministic (or seed your own generator in the script
-> instead).
+> instead). A script that draws random values is never
+> [cached](#caching) — which is what keeps it working.
 
 The random functions are available on native builds. They are absent from the
 WebAssembly build (which has no system entropy source), where calling one raises
 a "function not found" error — the same way [filesystem
 access](#filesystem-access) is unavailable there.
+
+## Caching
+
+A script that crunches a PNG into CHR data should cost that crunch once per change
+to the PNG, not once per build. `nessemble` therefore remembers what each custom
+directive emitted, in two layers:
+
+- **Within one build**, a directive's script runs **once**, not once per assembler
+  pass. This is unconditional.
+- **Across builds**, the emitted bytes are stored in `~/.nessemble/cache` and
+  reused while nothing the script depended on has changed.
+
+Nothing needs configuring, and scripts need no changes: the host **records every
+file a script opens** — through `open_file`, `read_blob`, or `decode_png_file` —
+and remembers those as the run's inputs. A script that computes a filename, or
+reads a palette nobody passed it, is covered.
+
+An entry is reused only when all of the following still hold:
+
+- the **script** itself is unchanged (a `--pseudo` mapping pointing at a different
+  script is a different entry too),
+- every **file the script read** is unchanged,
+- the directive's **arguments** and the directory it was called from are the same,
+- and the `nessemble` version is the same — the host's helpers define the output,
+  so a new release starts from an empty cache.
+
+"Unchanged" means **the same size and modification time**. That is what a build
+tool can check in microseconds, and it catches every ordinary edit; a `git
+checkout` that rewrites timestamps costs a needless re-run rather than a wrong
+result. The one gap: an edit that keeps a file's exact byte size *and* lands inside
+the same timestamp tick as the previous one can go unnoticed. If a build ever looks
+stale, [`--no-cache`](usage.md#no-cache) bypasses the cache entirely and
+[`nessemble cache clear`](usage.md#cache-info--cache-clear) empties it.
+
+### What is never cached
+
+Some scripts must really run every time, and are detected and excluded
+automatically:
+
+- **Random output** — `rand`, `rand_float`, `rand_bool`, `shuffle`, `sample`. The
+  point of these is to differ per build.
+- **Writing a file** — the write *is* the effect, and replaying stored bytes would
+  skip it.
+- **Listing a directory** (`open_dir`) — a listing's contents are not described by
+  any per-file check.
+- **`import`ing a module** — a module's source is invisible to the recorder, so
+  such a script is refused rather than tracked incompletely.
+
+The check is deliberately cautious: it looks at what a script *could* do, so a
+`rand()` in a branch that never runs is enough to keep the script out of the
+cache. Being wrong that way costs one script execution; being wrong the other way
+would emit a stale ROM.
+
+`nessemble coverage --scripts` also bypasses the cache, since a cached result
+executes no lines and would report a covered script as uncovered.
 
 ## Bundled scripts
 

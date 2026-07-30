@@ -591,6 +591,8 @@ dependencies = [
  "nessemble-lsp",
  "nessemble-rc",
  "nessemble-script",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

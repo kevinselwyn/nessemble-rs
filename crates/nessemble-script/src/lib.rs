@@ -43,9 +43,14 @@
 //!   tables. Compiled out on targets without a system entropy source (e.g.
 //!   `wasm32-unknown-unknown`), where the functions are absent.
 
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::path::Path;
 #[cfg(feature = "fs")]
 use std::path::PathBuf;
+#[cfg(not(feature = "fs"))]
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[cfg(any(feature = "fs", feature = "rand"))]
@@ -58,6 +63,7 @@ use rhai_rand::RandomPackage;
 
 #[cfg(feature = "coverage")]
 pub mod coverage;
+pub mod purity;
 
 /// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
 /// or a human-readable error message (a thrown string, or an engine error).
@@ -72,8 +78,63 @@ pub fn run(
     texts: &[String],
     base_dir: &Path,
 ) -> Result<Vec<u8>, String> {
-    let engine = engine(base_dir);
+    run_impl(source, ints, texts, base_dir, None, false).map(|(bytes, _)| bytes)
+}
+
+/// The paths a script resolved through the host's file API, in sorted order.
+type Recorder = Rc<RefCell<BTreeSet<PathBuf>>>;
+
+/// What one `custom()` invocation produced, and what it touched.
+///
+/// `inputs` is what makes caching this run sound: it is every path the script
+/// actually resolved through the host's file API on *this* invocation, so a cache
+/// can check those files for changes rather than guessing at a dependency set.
+/// `cacheable` is `false` when the script did something whose result must not be
+/// reused — see [`purity`].
+#[derive(Debug, Clone)]
+pub struct RunOutcome {
+    /// The bytes the directive emits.
+    pub bytes: Vec<u8>,
+    /// Absolute paths the script resolved through the host's file API.
+    pub inputs: Vec<PathBuf>,
+    /// Whether these bytes may be reused on a later build.
+    pub cacheable: bool,
+    /// Why the run is not cacheable, when it is not.
+    pub impurity: Option<purity::Impurity>,
+}
+
+/// Like [`run`], but also reporting every file the script read and whether the
+/// result may be cached ([`RunOutcome`]).
+pub fn run_with_inputs(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+) -> Result<RunOutcome, String> {
+    let recorder = Recorder::default();
+    let (bytes, impurity) = run_impl(source, ints, texts, base_dir, Some(&recorder), true)?;
+    let inputs: Vec<PathBuf> = recorder.borrow().iter().cloned().collect();
+    Ok(RunOutcome {
+        bytes,
+        inputs,
+        cacheable: impurity.is_none(),
+        impurity,
+    })
+}
+
+/// Compile and call `custom()`, optionally recording the paths it opens and
+/// scanning it for the things that make a result unsafe to reuse.
+fn run_impl(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    recorder: Option<&Recorder>,
+    scan: bool,
+) -> Result<(Vec<u8>, Option<purity::Impurity>), String> {
+    let engine = engine_recording(base_dir, recorder);
     let ast = engine.compile(source).map_err(|e| e.to_string())?;
+    let impurity = if scan { purity::impurity(&ast) } else { None };
 
     let int_arr: Array = ints.iter().map(|&i| Dynamic::from(i)).collect();
     let text_arr: Array = texts.iter().map(|t| Dynamic::from(t.clone())).collect();
@@ -83,7 +144,7 @@ pub fn run(
         .call_fn(&mut scope, &ast, "custom", (int_arr, text_arr))
         .map_err(|e| error_message(&e))?;
 
-    dynamic_to_bytes(result)
+    Ok((dynamic_to_bytes(result)?, impurity))
 }
 
 /// A resource-guarded engine with filesystem access.
@@ -97,6 +158,18 @@ pub fn run(
 /// touch any path the assembler process can. Only run pseudo-op scripts you
 /// trust, the same as any build tooling.
 fn engine(base_dir: &Path) -> Engine {
+    engine_recording(base_dir, None)
+}
+
+/// [`engine`], optionally recording every path the script resolves through the
+/// host's file API into `recorder` (see [`RunOutcome::inputs`]).
+///
+/// The three registrations below are the *only* routes from a path string to a
+/// file: rhai-fs turns every path into a `PathBuf` through `path`, and the two
+/// shorthands resolve their own. Recording there therefore sees whatever the
+/// script opened, including a filename it computed itself — which is why a cache
+/// keyed on the result does not need the source to declare its inputs.
+fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(10_000_000);
     engine.set_max_call_levels(64);
@@ -120,17 +193,20 @@ fn engine(base_dir: &Path) -> Engine {
         // rhai-fs turns a path string into a `PathBuf` via this `path` function,
         // so redefining it reroutes every relative `open_file`/`open_dir`.
         let base = base_dir.to_path_buf();
+        let rec = recorder.cloned();
         engine.register_fn("path", {
             let base = base.clone();
-            move |p: &str| -> PathBuf { resolve(&base, p) }
+            let rec = rec.clone();
+            move |p: &str| -> PathBuf { record(rec.as_ref(), resolve(&base, p)) }
         });
         // `read_blob(path)` — read a whole file as a blob, resolving relative
         // paths against the source directory (same rooting as `open_file`). Saves
         // the `open_file(path, "r").read_blob()` handle/mode ceremony.
         engine.register_fn("read_blob", {
             let base = base.clone();
+            let rec = rec.clone();
             move |p: &str| -> Result<Blob, Box<EvalAltResult>> {
-                let full = resolve(&base, p);
+                let full = record(rec.as_ref(), resolve(&base, p));
                 std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("read_blob: cannot read {}: {e}", full.display()).into()
                 })
@@ -141,7 +217,7 @@ fn engine(base_dir: &Path) -> Engine {
         engine.register_fn("decode_png_file", {
             let base = base.clone();
             move |p: &str| -> Result<Image, Box<EvalAltResult>> {
-                let full = resolve(&base, p);
+                let full = record(rec.as_ref(), resolve(&base, p));
                 let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("decode_png_file: cannot read {}: {e}", full.display()).into()
                 })?;
@@ -150,7 +226,10 @@ fn engine(base_dir: &Path) -> Engine {
         });
     }
     #[cfg(not(feature = "fs"))]
-    let _ = base_dir;
+    {
+        let _ = base_dir;
+        let _ = recorder;
+    }
 
     // Random-number functions (`rand`, `rand(min, max)`, `rand_float`,
     // `rand_bool`, and array `shuffle`/`sample`) for scripts that need
@@ -630,6 +709,15 @@ fn error_message(err: &EvalAltResult) -> String {
         EvalAltResult::ErrorRuntime(value, _) => value.to_string(),
         other => other.to_string(),
     }
+}
+
+/// Note `path` in `recorder` (when there is one) and hand it back, so a
+/// registration can record and resolve in one expression.
+fn record(recorder: Option<&Recorder>, path: PathBuf) -> PathBuf {
+    if let Some(rec) = recorder {
+        rec.borrow_mut().insert(path.clone());
+    }
+    path
 }
 
 #[cfg(test)]
@@ -1127,5 +1215,170 @@ mod tests {
             run(src, &[], &[], cwd()).unwrap(),
             vec![1, 2, 3, 8, 7, 4, 66]
         );
+    }
+
+    // ---- input recording and purity (plan 011, Phase 3) --------------------
+
+    #[test]
+    fn records_every_route_from_a_path_to_a_file() {
+        // The three registrations that turn a path string into a file: rhai-fs's
+        // `open_file` (via the `path` hook), and the two shorthands.
+        let dir = TempDir::new("record-all");
+        std::fs::write(dir.0.join("a.bin"), b"a").unwrap();
+        std::fs::write(dir.0.join("b.bin"), b"b").unwrap();
+        write_png_1x1(&dir.0.join("c.png"));
+        let src = r#"
+            fn custom(ints, texts) {
+                let x = open_file("a.bin", "r").read_blob();
+                let y = read_blob("b.bin");
+                let img = decode_png_file("c.png");
+                x + y
+            }
+        "#;
+
+        let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
+        let names: Vec<String> = out
+            .inputs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, ["a.bin", "b.bin", "c.png"]);
+        // Absolute, so a recorded path means the same thing from anywhere.
+        assert!(out.inputs.iter().all(|p| p.is_absolute()));
+        assert_eq!(out.bytes, b"ab");
+        assert!(out.cacheable);
+    }
+
+    #[test]
+    fn a_script_that_reads_nothing_records_nothing() {
+        let src = "fn custom(ints, texts) { [1, 2, 3] }";
+        let out = run_with_inputs(src, &[], &[], cwd()).unwrap();
+        assert!(out.inputs.is_empty());
+        assert!(out.cacheable);
+    }
+
+    #[test]
+    fn only_the_files_this_invocation_read_are_recorded() {
+        // The recorded set is what the script did with *these* arguments, not
+        // every path in its source — which is why the arguments are part of any
+        // cache key built on top of it.
+        let dir = TempDir::new("record-branch");
+        std::fs::write(dir.0.join("even.bin"), b"e").unwrap();
+        std::fs::write(dir.0.join("odd.bin"), b"o").unwrap();
+        let src = r#"
+            fn custom(ints, texts) {
+                if ints[0] % 2 == 0 { read_blob("even.bin") } else { read_blob("odd.bin") }
+            }
+        "#;
+
+        let even = run_with_inputs(src, &[0], &[], &dir.0).unwrap();
+        let odd = run_with_inputs(src, &[1], &[], &dir.0).unwrap();
+        assert_eq!(even.inputs.len(), 1);
+        assert!(even.inputs[0].ends_with("even.bin"));
+        assert_eq!(odd.inputs.len(), 1);
+        assert!(odd.inputs[0].ends_with("odd.bin"));
+    }
+
+    #[test]
+    fn randomness_makes_a_run_uncacheable() {
+        let src = "fn custom(ints, texts) { [rand(0, 255)] }";
+        let out = run_with_inputs(src, &[], &[], cwd()).unwrap();
+        assert!(!out.cacheable);
+        assert_eq!(
+            out.impurity,
+            Some(purity::Impurity::Calls("rand".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_array_shuffle_makes_a_run_uncacheable() {
+        let src = "fn custom(ints, texts) { let a = [1, 2, 3]; a.shuffle(); a }";
+        assert!(!run_with_inputs(src, &[], &[], cwd()).unwrap().cacheable);
+    }
+
+    #[test]
+    fn a_file_write_makes_a_run_uncacheable() {
+        // The write is the observable effect; a cache hit would skip it.
+        let dir = TempDir::new("purity-write");
+        let src = r#"fn custom(ints, texts) { open_file("out.bin").write("ok"); () }"#;
+        let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
+        assert!(!out.cacheable);
+        assert_eq!(out.impurity, Some(purity::Impurity::WritesAFile));
+    }
+
+    #[test]
+    fn a_read_mode_open_stays_cacheable() {
+        let dir = TempDir::new("purity-read");
+        std::fs::write(dir.0.join("a.bin"), b"a").unwrap();
+        let src = r#"fn custom(ints, texts) { open_file("a.bin", "r").read_blob() }"#;
+        assert!(run_with_inputs(src, &[], &[], &dir.0).unwrap().cacheable);
+    }
+
+    #[test]
+    fn a_computed_open_mode_is_assumed_to_write() {
+        // The mode is not a literal, so it cannot be ruled a read.
+        let dir = TempDir::new("purity-dyn");
+        std::fs::write(dir.0.join("a.bin"), b"a").unwrap();
+        let src = r#"
+            fn custom(ints, texts) {
+                let mode = if ints[0] == 0 { "r" } else { "w" };
+                open_file("a.bin", mode).read_blob()
+            }
+        "#;
+        assert!(!run_with_inputs(src, &[0], &[], &dir.0).unwrap().cacheable);
+    }
+
+    #[test]
+    fn a_directory_listing_makes_a_run_uncacheable() {
+        // A listing's contents are not described by any per-file freshness record.
+        let dir = TempDir::new("purity-dir");
+        let src = r#"fn custom(ints, texts) { let d = open_dir("."); [] }"#;
+        let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
+        assert!(!out.cacheable);
+        assert_eq!(
+            out.impurity,
+            Some(purity::Impurity::Calls("open_dir".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_import_makes_a_script_uncacheable() {
+        // A module's source is invisible to both the script's identity and the
+        // recorder, so such a script is refused rather than recorded partially.
+        // Scanned rather than run: rhai resolves modules against the process
+        // directory, which is exactly why the recorder cannot see them.
+        let src = r#"import "helper" as h; fn custom(ints, texts) { [1] }"#;
+        let ast = Engine::new().compile(src).expect("compiles");
+        assert_eq!(purity::impurity(&ast), Some(purity::Impurity::Imports));
+    }
+
+    #[test]
+    fn impurity_is_found_in_a_branch_this_call_does_not_take() {
+        // Conservative on purpose: a wrong "uncacheable" costs one execution, a
+        // wrong "cacheable" serves stale bytes. (A branch guarded by a *constant*
+        // is a different case — rhai's optimizer folds it away before the scan
+        // sees it, and code that cannot run cannot make the result vary.)
+        let src = "fn custom(ints, texts) { if ints[0] == 0 { [7] } else { [rand(0, 9)] } }";
+        let out = run_with_inputs(src, &[0], &[], cwd()).unwrap();
+        assert_eq!(out.bytes, vec![7]);
+        assert!(!out.cacheable);
+    }
+
+    #[test]
+    fn run_still_returns_only_bytes() {
+        // The original entry point is unchanged, so `nessemble-wasm` and every
+        // existing caller keep working.
+        let src = "fn custom(ints, texts) { [1, 2] }";
+        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![1, 2]);
+    }
+
+    /// Write a minimal 1×1 grayscale PNG that `decode_png` accepts.
+    fn write_png_1x1(path: &Path) {
+        use image::ImageEncoder as _;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&[0u8], 1, 1, image::ExtendedColorType::L8)
+            .unwrap();
+        std::fs::write(path, bytes).unwrap();
     }
 }

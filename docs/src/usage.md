@@ -103,6 +103,12 @@ labels.
 Points to a mapping file that enables custom pseudo-instructions. See
 [Extending](extending.md).
 
+### --no-cache
+
+Neither reads nor writes the [custom pseudo-instruction
+cache](extending.md#caching): every directive's script runs. Reach for this when a
+build looks stale, or to confirm that a suspected caching problem is one.
+
 ### -c, --check
 
 Checks the input for syntax errors only; produces no output.
@@ -129,6 +135,19 @@ nessemble init [filename] [prg] [chr] [mapper] [mirroring]
 
 Installs the bundled custom-pseudo-instruction scripts into
 `~/.nessemble/scripts`. See [Extending](extending.md).
+
+### cache info | cache clear
+
+Inspects or empties the [custom pseudo-instruction
+cache](extending.md#caching) in `~/.nessemble/cache`.
+
+```text
+nessemble cache info     # where the cache is, how many entries, how many bytes
+nessemble cache clear    # delete every entry
+```
+
+Clearing is always safe: an entry is a saved result, never the only copy of
+anything, so the next build recomputes what it needs.
 
 ### reference [&lt;category&gt;] [&lt;term&gt;]
 

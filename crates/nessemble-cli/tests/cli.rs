@@ -1094,3 +1094,192 @@ fn lint_help_lists_options() {
     assert!(text.contains("--quiet"));
     assert!(text.contains("--no-config"));
 }
+
+// ---- the custom pseudo-op cache (plan 011, Phases 4–5) --------------------
+
+/// A project tree with its own `HOME` (so the cache lands inside it), holding a
+/// source file, a `--pseudo` mapping, and the script the mapping names.
+struct CacheProject {
+    root: std::path::PathBuf,
+}
+
+impl CacheProject {
+    /// Build a project whose `.gen` directive runs `script`.
+    fn new(tag: &str, source: &str, script: &str) -> CacheProject {
+        let root = std::env::temp_dir().join(format!(
+            "nessemble-cache-cli-{tag}-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::write(root.join("main.asm"), source).unwrap();
+        std::fs::write(root.join("pseudo.txt"), b".gen = gen.rhai\n").unwrap();
+        std::fs::write(root.join("gen.rhai"), script).unwrap();
+        CacheProject { root }
+    }
+
+    /// Assemble to stdout, returning the emitted bytes.
+    fn assemble(&self, extra: &[&str]) -> Vec<u8> {
+        let out = bin()
+            .arg(self.root.join("main.asm"))
+            .arg("--pseudo")
+            .arg(self.root.join("pseudo.txt"))
+            .args(["--output", "-"])
+            .args(extra)
+            .env("HOME", self.root.join("home"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "assemble failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    /// The number of cached entries `nessemble cache info` reports.
+    fn entry_count(&self) -> usize {
+        let out = bin()
+            .args(["cache", "info"])
+            .env("HOME", self.root.join("home"))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        let entries = text
+            .lines()
+            .find_map(|l| l.split_once(" entries"))
+            .expect("an entries line");
+        entries.0.trim().parse().expect("a count")
+    }
+
+    fn clear_cache(&self) -> String {
+        let out = bin()
+            .args(["cache", "clear"])
+            .env("HOME", self.root.join("home"))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Overwrite the script, preserving its length and modification time — the
+    /// one edit the size+mtime freshness rule cannot see.
+    fn rewrite_script_invisibly(&self, script: &str) {
+        let path = self.root.join("gen.rhai");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let old_len = std::fs::metadata(&path).unwrap().len() as usize;
+        assert_eq!(script.len(), old_len, "test needs an equal-length rewrite");
+        std::fs::write(&path, script).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(before)
+            .unwrap();
+    }
+}
+
+impl Drop for CacheProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn assembling_populates_the_cache_and_clear_empties_it() {
+    let p = CacheProject::new(
+        "populate",
+        ".org $C000\n.gen 3\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+
+    assert_eq!(p.assemble(&[]), vec![3]);
+    assert_eq!(p.entry_count(), 1, "the invocation was cached");
+    // A second build hits, and emits the same bytes.
+    assert_eq!(p.assemble(&[]), vec![3]);
+    assert_eq!(p.entry_count(), 1);
+
+    let cleared = p.clear_cache();
+    assert!(cleared.contains("Cleared 1 entries"), "output: {cleared}");
+    assert_eq!(p.entry_count(), 0);
+}
+
+#[test]
+fn no_cache_neither_reads_nor_writes() {
+    let p = CacheProject::new(
+        "nocache",
+        ".org $C000\n.gen 4\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+
+    assert_eq!(p.assemble(&["--no-cache"]), vec![4]);
+    assert_eq!(p.entry_count(), 0, "nothing was written");
+}
+
+#[test]
+fn a_random_script_is_never_cached() {
+    // Its output is meant to differ per build; freezing it would be wrong.
+    let p = CacheProject::new(
+        "random",
+        ".org $C000\n.gen 1\n",
+        "fn custom(ints, texts) { [rand(0, 255)] }",
+    );
+
+    p.assemble(&[]);
+    assert_eq!(p.entry_count(), 0);
+}
+
+#[test]
+fn a_hit_answers_without_running_the_script() {
+    // The only way to observe "the script did not run" from outside is to change
+    // what it would return while leaving its stamp alone — which is exactly the
+    // blind spot the size+mtime freshness rule documents. A hit therefore serves
+    // the stored bytes, and `--no-cache` (or `cache clear`) is the way out.
+    let p = CacheProject::new(
+        "hit",
+        ".org $C000\n.gen 1\n",
+        "fn custom(ints, texts) { [0x11] }",
+    );
+    assert_eq!(p.assemble(&[]), vec![0x11]);
+
+    p.rewrite_script_invisibly("fn custom(ints, texts) { [0x22] }");
+    assert_eq!(p.assemble(&[]), vec![0x11], "served from the cache");
+    // The escape hatch reaches the edited script.
+    assert_eq!(p.assemble(&["--no-cache"]), vec![0x22]);
+}
+
+#[test]
+fn an_edited_script_is_not_served_from_the_cache() {
+    let p = CacheProject::new(
+        "edited",
+        ".org $C000\n.gen 1\n",
+        "fn custom(ints, texts) { [0x11] }",
+    );
+    assert_eq!(p.assemble(&[]), vec![0x11]);
+
+    // A normal edit moves the mtime (and here the length too).
+    std::fs::write(
+        p.root.join("gen.rhai"),
+        "fn custom(ints, texts) { [0x22] }   // edited",
+    )
+    .unwrap();
+    assert_eq!(p.assemble(&[]), vec![0x22]);
+}
+
+#[test]
+fn a_changed_asset_is_not_served_from_the_cache() {
+    // The script never declares its input: the host records what it opened.
+    let p = CacheProject::new(
+        "asset",
+        ".org $C000\n.gen 1\n",
+        r#"fn custom(ints, texts) { read_blob("asset.bin") }"#,
+    );
+    std::fs::write(p.root.join("asset.bin"), b"\x01\x02").unwrap();
+    assert_eq!(p.assemble(&[]), vec![1, 2]);
+    assert_eq!(p.entry_count(), 1);
+
+    std::fs::write(p.root.join("asset.bin"), b"\x09\x08\x07").unwrap();
+    assert_eq!(p.assemble(&[]), vec![9, 8, 7], "the asset was re-read");
+}
