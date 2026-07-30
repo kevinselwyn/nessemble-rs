@@ -1,7 +1,7 @@
 # nessemble-rs: A Plan for Caching Custom Pseudo-Instructions
 
 > Status: **Proposed — awaiting go-ahead. Decisions settled with the maintainer
-> in [§15](#15-decisions); nothing built yet.** This document designs caching
+> in [§16](#16-decisions); nothing built yet.** This document designs caching
 > for custom pseudo-op scripts, in **three layers**: per-assembly
 > **memoization** so a directive's `custom()` runs once instead of once per
 > assembler pass ([§6.1](#61-layer-1--per-assembly-memoization-core)),
@@ -9,10 +9,16 @@
 > read ([§6.2](#62-layer-2--recorded-inputs-nessemble-script)), and a
 > **persistent on-disk cache** under `~/.nessemble/cache` keyed by the script,
 > its arguments, and the freshness of those recorded inputs
-> ([§6.3](#63-layer-3--the-on-disk-cache-cli)). A `file://` prefix on a text
-> argument ([§4](#4-the-syntax-file)) declares an input at the *source* level:
-> it buys a directive-level diagnostic for a missing asset and a dependency a
-> tool can see without executing anything.
+> ([§6.3](#63-layer-3--the-on-disk-cache-cli)) — including the script's own
+> freshness, so editing a script invalidates every entry that ran it
+> ([§7.3](#73-freshness-size--mtime)).
+>
+> A `file://` prefix on a filename argument ([§4](#4-the-syntax-file)) declares
+> an input at the *source* level. It buys three things: a directive-level
+> diagnostic when the file is missing, a dependency a tool can see without
+> executing anything, and — the reason an author will actually type it — a
+> **cmd-clickable path that opens the file in the editor**
+> ([§9](#9-the-editor-surface)).
 >
 > The through-line: a script that crunches a PNG into CHR data should cost that
 > crunch **once per change to the PNG**, not twice per build.
@@ -37,11 +43,17 @@ After this plan:
 - Two passes cost **one** execution (§6.1). Unconditional, no configuration.
 - A rebuild with unchanged inputs costs **zero** executions — a couple of
   `stat` calls and a file read (§6.3).
-- A rebuild after editing `map.png` costs one execution, because the cache
-  recorded that the run read `map.png` (§6.2).
-- `.tilemap "file://map.png", "file://tiles.png"` additionally reports a missing
-  PNG as an assembler diagnostic on the directive's own line, before the script
-  runs (§4).
+- A rebuild after editing `map.png` — or after editing `tilemap.rhai` itself —
+  costs one execution, because the cache recorded both (§6.2, §7.3).
+- With the paths declared:
+
+  ```nessemble
+  .tilemap "file://map.png", "file://tiles.png"
+  ```
+
+  a missing PNG is an assembler error on the directive's own line before the
+  script runs (§4), the same error appears as a squiggle in the editor with no
+  new editor code (§9.1), and cmd-clicking either path opens the PNG (§9.2).
 
 ## 2. Why this is worth doing now
 
@@ -68,7 +80,7 @@ Three more reasons the timing is right:
   flows through those three registrations. Recording the set costs a `RefCell`,
   not an architecture.
 - **No new dependency is needed.** The workspace has no hashing crate, and the
-  freshness rule chosen in §15.4 (mtime + size) means it never needs one; the
+  freshness rule chosen in §16.4 (mtime + size) means it never needs one; the
   cache *filename* reuses the existing `crc_32`
   (`crates/nessemble-core/src/assemble.rs:1665`) with an exact key comparison
   behind it, so a collision is a miss and never a wrong answer (§7.2).
@@ -84,8 +96,10 @@ What exists today, and what each piece implies for the design:
 | `Resolver::{locate, resolve}` — `--pseudo` mapping first, then `~/.nessemble/scripts` | `nessemble-cli/src/custom.rs:31` | Already reads the script source and knows the script's path; already knows `home::config_dir()`. The natural owner of the on-disk cache. |
 | `engine(base_dir)` shadows rhai-fs's `path`; owns `read_blob` / `decode_png_file` | `nessemble-script/src/lib.rs:98` | The choke point for input recording (§6.2). |
 | `run_with_coverage` on a debugger-instrumented engine | `nessemble-script/src/coverage.rs` | A cache hit executes nothing and records no lines → the on-disk cache must be bypassed under `nessemble coverage` (§8). |
-| `lenient_custom_resolver` returns `Ok(Vec::new())` for known directives | `nessemble-core/src/lib.rs:479` | The **LSP never runs scripts**. This plan speeds up CLI builds; it does not speed up the editor, and cannot until that changes (§12). |
+| `lenient_custom_resolver` returns `Ok(Vec::new())` for known directives | `nessemble-core/src/lib.rs:479` | The LSP stubs the *resolver*, not the assembler — which is why §4's check lands in the editor for free (§9.1), and also why the cache does nothing for editor latency (§13). |
+| `goto_definition` already jumps `.foo` → its script file | `nessemble-lsp/src/lib.rs:463` | Cmd-click-to-a-file has precedent in this server; §9.2's links are the sibling feature, and `LexKind::String` (`tooling.rs:27`) already exists to key off. |
 | `CustomArg::{Int(Expr), Str(String)}` | `nessemble-core/src/ast.rs:201`, parsed at `parse.rs:401` | Core-only — no LSP or formatter fallout. `file://` needs **no AST change** (§4). |
+| File-taking directives: `.include`, `.inestrn` (`preprocess.rs:173`); `.incbin`, `.incpng`, `.incpal`, `.incrle`, `.incwav` (`ast.rs:131`–`139`) | core | The seven places besides a custom directive where a string is a path — all of which accept `file://` (§4) and all of which get links (§9.2). |
 | `crc_32` | `nessemble-core/src/assemble.rs:1665` | Reused as the cache filename, not as a correctness boundary (§7.2). |
 
 Two argument-evaluation facts that constrain the key (§7.1):
@@ -101,38 +115,45 @@ Two argument-evaluation facts that constrain the key (§7.1):
 
 ## 4. The syntax: `file://`
 
-A text argument may carry a `file://` prefix to declare that it names an input
-file:
+A filename argument may carry a `file://` prefix to declare that it names an
+input file:
 
 ```nessemble
-.tilemap "file://map.png", "file://tiles.png"
-.embed   "file://logo.chr"
+.tilemap "file://map.png", "file://tiles.png"   ; custom directive
+.incpng  "file://sprites.png"                   ; built-in importer
+.include "file://defs.asm"
 ```
 
 The rules:
 
-- **The script sees the path with the prefix stripped.** `texts[0]` is
-  `"map.png"`, exactly as today. Every existing script — including the bundled
-  ones — works unchanged, and adopting the declaration is a one-word edit in the
-  `.asm` file rather than a script rewrite (§15.2).
+- **The script (and the importer) sees the path with the prefix stripped.**
+  `texts[0]` is `"map.png"`, exactly as today. Every existing script — including
+  the bundled ones — works unchanged, and adopting the declaration is a one-word
+  edit in the `.asm` file rather than a script rewrite (§16.2).
+- **It is accepted wherever a directive takes a filename** (§16.7): custom
+  directives, `.include`, `.inestrn`, `.incbin`, `.incpng`, `.incpal`, `.incrle`,
+  `.incwav`. On an importer the prefix is redundant — the argument is already
+  known to be a path — but it is harmless, and once every one of those paths is
+  clickable (§9.2) an author will write the prefix on all of them. Failing on
+  exactly the directives whose whole argument *is* a file would read as a bug.
 - **A declared file must exist.** Resolved against the directive's source
   directory (`cur_dir()`, the same base as `.include`, the `.inc*` importers, and
   the script's own relative reads), or used as-is when absolute. If it is not
   there, the assembler reports `could-not-open` (`en-US.ftl:37`, the same
-  diagnostic `.incbin`/`.incpng` produce) on the directive's line and **does not
-  run the script** (§15.3).
+  diagnostic `.incbin` produces) on the directive's line and **does not run the
+  script** (§16.3). On an importer this changes nothing — a missing file was
+  already that error.
 - **It is an argument-level marker, not a URL scheme.** No `http://`, no
   `file://host/`, no percent-decoding. `file://` followed by whatever path the
   filesystem takes; `file:///abs/path` is the absolute spelling that falls out of
   the rule naturally (the third slash starts the path).
-- **The AST does not change.** `parse.rs` keeps producing `CustomArg::Str`; the
-  prefix is recognized in `exec_custom` while it builds `texts`. The formatter
-  and LSP keep seeing the source's string literal verbatim, which is what they
-  want, and a future "complete a path inside a `file://` string" feature needs no
-  parser work.
+- **The AST does not change.** `parse.rs` keeps producing `CustomArg::Str` and
+  the importers keep their `String` fields; the prefix is stripped where the path
+  is consumed. The formatter and LSP keep seeing the source's string literal
+  verbatim, which is what §9 needs.
 - **It does not make the cache correct.** Correctness comes from recorded reads
-  (§6.2). A declaration buys diagnostics and visibility; a script that reads a
-  palette file nobody declared is still cached correctly.
+  (§6.2). A declaration buys diagnostics, links, and visibility; a script that
+  reads a palette file nobody declared is still cached correctly.
 
 ## 5. Semantics: what a cache hit promises
 
@@ -179,7 +200,7 @@ Why core and not the CLI resolver: it is where the duplication is, it is the onl
 place with `&mut self`, and it benefits every embedder — including
 `nessemble-wasm`, which calls `nessemble_script::run` directly
 (`nessemble-wasm/src/lib.rs:229`) and has no filesystem to cache to. This layer
-is unconditional and unconfigurable; `--no-cache` (§9) does not disable it,
+is unconditional and unconfigurable; `--no-cache` (§10) does not disable it,
 because it is not a cache of anything outside the current process and switching
 it off would restore the ROM-sizing bug in §2.
 
@@ -215,18 +236,24 @@ with *these* arguments. A script that reads `palette_a.png` when `ints[0]` is 0
 and `palette_b.png` otherwise records the right file each time, because the
 arguments are part of the key.
 
+The one route it cannot see is `import`, which rhai resolves through its own
+`FileModuleResolver` rather than the host's `path` hook. Scripts that `import`
+are therefore not cached at all (§8, §16.8) — refused rather than recorded
+incompletely.
+
 ### 6.3 Layer 3 — the on-disk cache (CLI)
 
 `Resolver::resolve` (`nessemble-cli/src/custom.rs:49`) becomes:
 
-1. `locate` the script, `stat` it (§7.1 uses its size and mtime as its identity).
+1. `locate` the script and `stat` it — its path, size, and mtime are key material
+   and freshness material both (§7.3).
 2. Build the key material, derive the entry filename (§7.2), and try to load.
 3. **On a hit** — the stored key material matches exactly *and* every recorded
    input still matches on size and mtime — return the stored bytes. No engine, no
    compile.
 4. **On a miss** — read the source, `run_with_inputs`, and, if the outcome is
    cacheable, write the entry (bytes + key material + input records).
-5. Bump the entry's mtime on a hit, so eviction (§15.7) is least-recently-used
+5. Bump the entry's mtime on a hit, so eviction (§16.10) is least-recently-used
    rather than least-recently-written.
 
 Entries live under `~/.nessemble/cache/pseudo/<xx>/<key>.{json,bin}` —
@@ -244,10 +271,11 @@ half-written entry.
   happen in `exec_custom` before the call; input recording and the disk cache
   live inside the CLI closure. Core never learns what a dependency is.
 - **The `.name = path` mapping grammar.** `parse_pseudo_mapping` is shared with
-  the LSP; caching adds no annotation to it (§15.3's rejected alternative).
+  the LSP; caching adds no annotation to it (§16.3's rejected alternative).
 - **The script-facing API.** No new function a script must call, no marker a
   script author must add for the common case. A pure script is cached because it
   is pure, not because it said so.
+- **The AST**, and therefore the formatter's output (§4).
 - **`nessemble-wasm`.** No filesystem, no cache; it gets layer 1 for free.
 
 ## 7. The cache key and invalidation
@@ -263,7 +291,7 @@ Everything that can change the bytes, stored verbatim in the entry:
 | Directive name | `.foo` and `.bar` may map to the same script with different meaning. |
 | `ints`, `texts` (post-strip) | The arguments. `ints` differing across passes is expected (§3). |
 | `base_dir` (absolute) | Relative reads resolve against it. |
-| Script path (absolute), size, mtime | The script's identity, under the same freshness rule as its inputs (§7.3) — editing a script must invalidate. |
+| **Script path (absolute), size, mtime** | The script's identity — see §7.3. |
 
 Absolute paths make entries machine-specific and checkout-specific. That is the
 right trade for a local cache and is what makes one shared
@@ -283,13 +311,27 @@ This is what lets the whole feature ship with **no new dependency**.
 
 ### 7.3 Freshness: size + mtime
 
-An input record is `(absolute path, byte size, mtime as (secs, nanos))`. An entry
-is valid when every record still matches. No content hashing (§15.4).
+Every dependency record — each recorded input **and the script itself** — is
+`(absolute path, byte size, mtime as (secs, nanos))`. An entry is valid when
+every record still matches. No content hashing (§16.4).
 
-- A changed asset changes its mtime → miss → re-run. The normal case.
+Editing a script therefore invalidates every entry that ran it, which is the
+second half of what this plan is for. Four ways a script can change, and how each
+is caught:
+
+| Change | Caught by |
+| --- | --- |
+| The script file is edited | Its size/mtime record (§7.1). |
+| `pseudo.txt` re-points `.foo` at a different script | The script **path** is key material, so the key itself changes. |
+| A bundled script is replaced by `nessemble scripts` | Same as an edit — the installed file's mtime moves. |
+| A helper module the script `import`s is edited | **Not** caught by freshness — such scripts are never cached at all (§8), so there is nothing to invalidate. |
+
+The general behavior of the rule:
+
+- A changed asset or script changes its mtime → miss → re-run. The normal case.
 - A `git checkout` or `touch` rewrites mtimes without changing content → miss →
   a needless re-run. Costs time, never correctness.
-- A deleted or unreadable input → miss.
+- A deleted or unreadable dependency → miss.
 
 ### 7.4 The blind spot, named
 
@@ -300,12 +342,14 @@ the ROM is silently wrong. Three things keep this narrow:
 - Nanosecond mtimes on every filesystem nessemble realistically runs on (ext4,
   APFS, NTFS, btrfs) make same-tick collisions require sub-microsecond timing.
 - Editors and asset pipelines write whole files, which bumps mtime.
-- `--no-cache` (§9) and `nessemble cache clear` are the documented escape hatch,
+- `--no-cache` (§10) and `nessemble cache clear` are the documented escape hatch,
   and the docs will say plainly what the rule is rather than implying the cache
   is content-addressed.
 
-It is recorded here as a **known, accepted limitation** (§15.4), so that a future
-"why did my ROM not change" report is diagnosed in minutes instead of days.
+It is recorded here as a **known, accepted limitation** (§16.4), so that a future
+"why did my ROM not change" report is diagnosed in minutes instead of days. Note
+that it applies to scripts as well as assets (§16.9): the one dependency a
+developer edits ten times an hour is under the same rule as a PNG.
 
 ## 8. Uncacheable runs
 
@@ -319,7 +363,7 @@ feature on the coverage path):
 | `rand`, `rand_float`, `rand_bool`, array `shuffle` / `sample` | Output is supposed to differ per build. Caching would silently freeze a script the docs describe as non-reproducible. |
 | A write-mode `open_file` (one-arg form, or a mode containing `w`, `a`, or `+`), and `File#write` | The file write is the observable effect; a hit would skip it. |
 | `open_dir` and directory iteration | Output depends on a directory's *listing*, which the record-a-file freshness model does not describe. |
-| `import` | A module's source is not covered by the script's own identity. Cacheable once modules are recorded as inputs; out of scope for v1. |
+| `import` | A module's source is invisible to both the script's own identity and the recorder (§6.2). Refused in v1 (§16.8). |
 
 The scan is deliberately **conservative**: a `rand()` in a branch that never runs
 still marks the script uncacheable. Being wrong in this direction costs a script
@@ -331,9 +375,61 @@ Two more bypasses, both structural rather than detected:
   actually execute (§3); a hit records nothing. Layer 1 memoization stays on —
   coverage records line *sets*, not hit counts, so one execution per distinct
   invocation is exactly as informative as two.
-- **`--no-cache`** (§9) skips read and write.
+- **`--no-cache`** (§10) skips read and write.
 
-## 9. CLI surface
+## 9. The editor surface
+
+Declaring a path should pay off while you are typing, not only at build time.
+Three surfaces, all keyed off `LexKind::String` tokens in a file-taking
+directive's argument list, all sharing one resolver helper (`base dir + path →
+absolute path`) with the assembler's rule from §4.
+
+### 9.1 The missing-file diagnostic comes free
+
+Because the existence check lives in `exec_custom` **before** the resolver is
+called (§4), and the LSP's `diagnose_*` path runs the real assembler in collect
+mode with only the *resolver* stubbed (`lenient_custom_resolver`), the squiggle
+appears in the editor with **no new LSP code, no filesystem access in the LSP,
+and no second implementation of the check**. It is automatically consistent with
+`.incbin "missing.chr"`, which the LSP already reports the same way.
+
+Severity is **error**, matching the assembler exactly (§16.6) — one behavior, one
+code path.
+
+### 9.2 Document links
+
+A `textDocument/documentLink` provider (a new capability; the server has none
+today) returns a link for every resolvable path argument:
+
+- **What is linked:** the path text *inside* the quotes and *after* any `file://`
+  prefix, so the underline covers the path and not the marker or the quotes.
+- **Where:** `file://` arguments of custom directives, and the filename arguments
+  of `.include`, `.inestrn`, `.incbin`, `.incpng`, `.incpal`, `.incrle`,
+  `.incwav` — the seven directives whose argument is unambiguously a path (§16.7).
+  Cmd-clicking `.include "defs.asm"` is arguably the bigger day-to-day win than
+  the feature that motivated it.
+- **When not:** an unresolvable path gets no link (§16.6) — it gets the §9.1
+  error instead. Non-`file:` document URIs (untitled buffers) get no links, since
+  there is no directory to resolve against.
+
+Links rather than `goto_definition`: the path renders **underlined**, so it is
+discoverably clickable instead of something the user has to guess at, and it is
+the request LSP defines for exactly this. The existing `.foo` → script jump at
+`lib.rs:463` stays as it is.
+
+### 9.3 Hover and completion
+
+- **Hover** over a path argument shows the **resolved absolute path** — the
+  answer to "is it finding the file I think it is?" — plus the file's size, and
+  for a PNG its pixel dimensions, which `nessemble-media` can already decode.
+- **Completion** inside a string argument offers filenames from the resolved
+  directory, **filtered by what the directive can use** (§16.11): `.incpng` →
+  `*.png`, `.incwav` → `*.wav`, `.include`/`.inestrn` → `*.asm` / `*.inc`, a
+  `file://` argument on a custom directive → everything, since a script may read
+  any format. A per-directive extension table, plus `/` added to the completion
+  trigger characters (today only `.`, `lib.rs:2695`).
+
+## 10. CLI surface
 
 - **`--no-cache`** on the assemble path: no reads, no writes, no entry mtime
   bumps. The escape hatch §7.4 promises, and the flag a bug report gets asked to
@@ -347,66 +443,86 @@ Both subcommands sit alongside `Scripts`, `Reference`, `Lsp`, `Format`, `Lint`,
 cache messages go in `en-US.ftl`; the missing-declared-file diagnostic reuses the
 existing `could-not-open` (§4).
 
-## 10. Docs
+## 11. Docs
 
 - **`docs/src/extending.md`** — a `## Caching` section after "Random numbers":
   what is cached, the `file://` declaration, the size+mtime freshness rule stated
-  outright (including §7.4's limitation), what makes a script uncacheable and why,
-  and `--no-cache`. The existing "Random output is not reproducible" note gains a
-  sentence saying such scripts are never cached, which is why they keep working.
+  outright for assets *and* scripts (including §7.4's limitation), what makes a
+  script uncacheable and why, and `--no-cache`. The existing "Random output is
+  not reproducible" note gains a sentence saying such scripts are never cached,
+  which is why they keep working.
+- **`docs/src/syntax.md`** — `file://` on a filename argument, in the directive
+  reference rather than only in the scripting page, since it is accepted by the
+  built-in importers too (§4).
+- **`docs/src/editor.md`** — the three new surfaces in the `## Features` list
+  (clickable paths, path hover, path completion).
 - **`docs/src/usage.md`** — `--no-cache`, and `cache info` / `cache clear`
   alongside the other subcommands.
 - **A changeset per shipped phase**, per `CLAUDE.md` — the changeset body is the
   changelog line, and `CHANGELOG.md` is never touched by hand.
 
-## 11. Phased plan
+## 12. Phased plan
 
 Each phase is independently shippable, independently revertible, and useful on
-its own.
+its own. The editor work comes **before** the cache (§16.12): the clickable path
+is the visible reward for writing `file://`, so authors have a reason to adopt
+the prefix before the payoff it was invented for exists.
 
 - **Phase 0 — memoization (core).** `custom_memo` in `Assembler`, consulted by
   `exec_custom`. No new syntax, no disk, no configuration. Halves script work in
   every build and fixes the `rand` pass-skew in §2. *Ship this first: it is the
   largest win per line of code in the whole plan.*
-- **Phase 1 — `file://` (core).** Prefix stripping in `exec_custom`, the
-  existence check, the `could-not-open` diagnostic, parser-level tests that the
-  AST is unchanged. Useful with no cache at all — it turns a script's confusing
-  throw into a diagnostic on the right line.
-- **Phase 2 — input recording (`nessemble-script`).** The recorder in `engine`,
+- **Phase 1 — `file://` (core).** Prefix stripping for custom directives and the
+  seven file-taking directives, the existence check, the `could-not-open`
+  diagnostic, parser-level tests that the AST is unchanged. Useful with no cache
+  and no editor at all — it turns a script's confusing throw into a diagnostic on
+  the right line, and (§9.1) lights up in the editor for free.
+- **Phase 2 — the editor surface (LSP).** Document links, path hover, filtered
+  path completion (§9.2–9.3). Depends on Phase 1's syntax and nothing else.
+- **Phase 3 — input recording (`nessemble-script`).** The recorder in `engine`,
   `RunOutcome`, `run_with_inputs`, the §8 static impurity scan. No behavior
   change yet — this phase only *reports*. *Review this hardest: everything in
-  Phase 3 trusts that the recorded set is complete.*
-- **Phase 3 — the on-disk cache (CLI).** Key material, `crc_32` filenames with
-  exact comparison, entry read/write with atomic rename, freshness checks, the
-  coverage bypass, `--no-cache`.
-- **Phase 4 — cache management and docs.** `nessemble cache info` / `clear`,
-  eviction (§15.7), and the docs in §10.
+  Phase 4 trusts that the recorded set is complete.*
+- **Phase 4 — the on-disk cache (CLI).** Key material, `crc_32` filenames with
+  exact comparison, entry read/write with atomic rename, freshness checks for
+  inputs and the script (§7.3), the coverage bypass, `--no-cache`.
+- **Phase 5 — cache management and docs.** `nessemble cache info` / `clear`,
+  eviction (§16.10), and the docs in §11.
 
-Phases 0–1 are small and land immediately. Phase 2 is the careful one. Phase 3 is
+Phases 0–1 are small and land immediately. Phase 3 is the careful one. Phase 4 is
 the payoff.
 
-## 12. Explicitly not in v1
+## 13. Explicitly not in v1
 
 Boundaries as decisions, not oversights:
 
-- **Content hashing.** Settled against in §15.4. If §7.4's blind spot ever bites
+- **Content hashing.** Settled against in §16.4. If §7.4's blind spot ever bites
   in practice, adding a digest is a change to one freshness function plus a cache
   format version bump — the design is deliberately shaped so that swap is cheap.
-- **Caching anything but custom pseudo-ops.** `.incbin`, `.incpng`, `.incwav` are
-  a `read` and a decode, not a scripting engine; they are not the bottleneck.
+- **Caching the built-in importers' work.** `.incbin`, `.incpng`, `.incwav` are a
+  `read` and a decode, not a scripting engine; they are not the bottleneck. (They
+  do get `file://` and links, which is a separate matter.)
+- **Making `import`-using scripts cacheable** by installing a recording module
+  resolver (§6.2, §16.8).
 - **An LSP that runs scripts.** The editor uses `lenient_custom_resolver` and
-  sees zero bytes from every custom directive. Making it run them for real is a
-  genuinely interesting change — the cache is what would make it affordable — but
-  it is its own plan, with its own answers about trust and timeouts.
+  sees zero bytes from every custom directive, so a custom directive's *emitted
+  bytes* are invisible in the editor no matter how fast they get. Making it run
+  them for real is a genuinely interesting change — the cache is what would make
+  it affordable — but it is its own plan, with its own answers about trust and
+  timeouts.
+- **Links in `pseudo.txt`.** Making `.foo = foo.rhai` clickable means teaching
+  the LSP to lex a second document type, which is a new surface rather than a
+  wider scan. (`goto_definition` on `.foo` already reaches the script from the
+  `.asm` side.)
+- **A "create the missing file" quick fix** on the §9.1 diagnostic.
 - **A project-level dependency graph / watch mode.** `file://` declarations are
   the raw material for "rebuild when this asset changes", and deliberately so;
   the scheduler that would consume them is a separate feature.
 - **Caching across machines** (a shared or CI-uploaded cache). Absolute paths in
   the key (§7.1) rule it out by construction. `--cache-dir` pointed at a mounted
   volume would be the first step, and is easy to add later.
-- **Making `import`-using scripts cacheable** by recording module sources (§8).
 
-## 13. Testing strategy
+## 14. Testing strategy
 
 - **Memoization (Phase 0).** A resolver that counts invocations: a directive
   called once in the source runs its script exactly once across both passes; two
@@ -414,22 +530,28 @@ Boundaries as decisions, not oversights:
   symbol arg runs twice (different `ints`, §3) and both runs are correct. A
   script returning `rand`-derived bytes now emits the *same* bytes on both
   passes — a regression test for the sizing bug.
-- **`file://` (Phase 1).** Prefix stripped in `texts`; absolute
-  `file:///…` form; missing declared file yields `could-not-open` on the right
-  line *and* the script never runs (counting resolver again); a text arg that
-  merely *contains* `file://` mid-string is untouched; the AST is byte-identical
-  to the unprefixed parse.
-- **Recording (Phase 2).** A script reading via `open_file`, `read_blob`, and
+- **`file://` (Phase 1).** Prefix stripped in `texts`; stripped for each of the
+  seven file-taking directives; absolute `file:///…` form; missing declared file
+  yields `could-not-open` on the right line *and* the script never runs (counting
+  resolver again); a text arg that merely *contains* `file://` mid-string is
+  untouched; the AST is byte-identical to the unprefixed parse; a `diagnose_*`
+  call reports the missing file with no resolver of its own (§9.1).
+- **Editor (Phase 2).** A link per resolvable path, with the range covering the
+  path and not the `file://` prefix or the quotes; no link for a missing file; no
+  link in an untitled buffer; links for each of the seven importers; hover shows
+  the resolved absolute path (and a PNG's dimensions); completion inside
+  `.incpng "` offers only `*.png` while a `file://` custom arg offers everything.
+- **Recording (Phase 3).** A script reading via `open_file`, `read_blob`, and
   `decode_png_file` records all three absolute paths; a script reading nothing
   records nothing; each §8 deny-list trigger flips `cacheable` to false.
-- **The cache (Phase 3).** In a `TempDir` with `HOME` pointed at it: cold run
+- **The cache (Phase 4).** In a `TempDir` with `HOME` pointed at it: cold run
   executes and writes an entry; second run hits and does not execute; touching an
-  input misses; rewriting the *script* misses; a different `base_dir` with
-  identical args misses; a corrupted/truncated entry misses rather than panics; a
-  forged entry whose stored key material disagrees misses (§7.2); `--no-cache`
-  neither reads nor writes; `nessemble coverage` still reports script lines with
-  a warm cache.
-- **CLI (Phase 4).** `cache info` on an empty and a populated cache; `cache
+  input misses; **rewriting the script misses**; **re-pointing the mapping at a
+  different script misses**; a different `base_dir` with identical args misses; a
+  corrupted/truncated entry misses rather than panics; a forged entry whose
+  stored key material disagrees misses (§7.2); `--no-cache` neither reads nor
+  writes; `nessemble coverage` still reports script lines with a warm cache.
+- **CLI (Phase 5).** `cache info` on an empty and a populated cache; `cache
   clear` empties it; both are covered in `crates/nessemble-cli/tests/cli.rs`
   beside the existing `custom_pseudo_*` tests.
 
@@ -437,31 +559,34 @@ Every phase must leave `cargo fmt --all --check`, `cargo clippy --all-targets
 --all-features -- -D warnings`, and `cargo test --all-features` green — the CI
 gate in `.claude/README.md` runs exactly those.
 
-## 14. Risks & mitigations
+## 15. Risks & mitigations
 
 | Risk | Mitigation |
 | --- | --- |
-| **Stale bytes from the mtime blind spot (§7.4).** | Nanosecond mtimes; `--no-cache` and `cache clear` documented as the first thing to try; the freshness rule stated plainly in the docs rather than implied to be stronger. |
-| **An unrecorded input** — a script reaching the filesystem by a route that does not pass through the host's three registrations. | The §8 deny-list covers the known routes (`open_dir`, `import`) by refusing to cache. A new host function that takes a path must record it; the recorder lives beside the registrations so the omission is visible in review, and Phase 2's tests assert coverage of each existing route. |
+| **Stale bytes from the mtime blind spot (§7.4)**, for a script as much as an asset. | Nanosecond mtimes; `--no-cache` and `cache clear` documented as the first thing to try; the freshness rule stated plainly in the docs rather than implied to be stronger. |
+| **An unrecorded input** — a script reaching the filesystem by a route that does not pass through the host's three registrations. | The §8 deny-list covers the known routes (`open_dir`, `import`) by refusing to cache. A new host function that takes a path must record it; the recorder lives beside the registrations so the omission is visible in review, and Phase 3's tests assert coverage of each existing route. |
 | **A cached side effect.** | Scripts that write are never cached (§8), detected statically and conservatively. |
-| **Cache growth.** | Size cap plus LRU eviction (§15.7) and `cache clear`. Entries are ROM-fragment sized — kilobytes, not megabytes. |
+| **Cache growth.** | Size cap plus LRU eviction (§16.10) and `cache clear`. Entries are ROM-fragment sized — kilobytes, not megabytes. |
 | **Concurrent builds.** | Temp file + atomic `rename`; a partially-written entry is never visible, and a losing writer simply replaces an equivalent entry. |
+| **A red editor for generated assets** — a `file://` path produced by a build step that runs before assembly but after editing is a hard error (§16.6) and squiggles all day. | The declaration is opt-in per argument: a path that may legitimately not exist yet is simply written without the prefix, and the script keeps its own fallback. Called out in the docs beside the syntax. |
+| **Link/hover cost on large files.** | Both are computed from the existing lexer token stream on request, not on every keystroke, and touch the filesystem only to `stat` a candidate path. |
 | **Debuggability** — "is this a cache bug?" | JSON metadata is human-readable; `cache info` reports state; `--no-cache` isolates the cache from the question in one flag. |
 | **Behavior change from memoization** (a script with side effects runs once per build instead of twice). | Such scripts were already broken across passes; running once is the correct semantics, and it is called out in the Phase 0 changeset. |
 
-## 15. Decisions
+## 16. Decisions
 
 ### Settled with the maintainer
 
 1. **Dependencies are both recorded and declarable.** The cache's correctness
    rests on *recording* the paths a script actually opened, through the host
    registrations that already exist (§6.2); `file://` (§4) is a complementary
-   *declaration* that buys a directive-level diagnostic for a missing asset and a
-   dependency visible without executing anything. *Rejected:* declarations alone,
-   which is silently wrong for any script that opens a file it was not handed —
-   a script given a tilemap that also reads a palette by convention would cache
-   against a partial input set; and recording alone, which leaves the assembler
-   unable to say anything about a directive's inputs without running it.
+   *declaration* that buys a directive-level diagnostic, a dependency visible
+   without executing anything, and the editor surfaces in §9. *Rejected:*
+   declarations alone, which is silently wrong for any script that opens a file
+   it was not handed — a script given a tilemap that also reads a palette by
+   convention would cache against a partial input set; and recording alone, which
+   leaves the assembler unable to say anything about a directive's inputs without
+   running it.
 2. **Caching is layered: memoization within a build, plus a persistent cache
    across builds.** Layer 1 is unconditional and fixes the pass-skew bug; layer 3
    is what makes an unchanged rebuild free. *Rejected:* memoization only, which
@@ -494,38 +619,72 @@ gate in `.claude/README.md` runs exactly those.
    base directory the assembler has no concept of and a gitignore entry in every
    project; and shipping `--cache-dir` in v1 before anyone has asked for a
    mounted CI cache.
-6. **A `file://` argument reaches the script with the prefix stripped, and a
-   missing one is a directive-level error.** *Rejected:* passing the prefix
-   through verbatim, which breaks every script the moment a caller adds a
-   declaration; and warning-then-running, which needs a new warning category and
-   an ambiguous answer about whether such a run is cacheable. Note the accepted
-   consequence: a script that treats a missing file as *optional* cannot use the
-   declaration for it — it keeps its own `open_file` and its own fallback, and
-   still caches correctly via recording.
+6. **A `file://` argument reaches the consumer with the prefix stripped, and a
+   missing one is a hard error in the assembler and the editor alike.** One
+   behavior, one code path, matching `.incbin "missing.chr"`; the editor's copy
+   is free (§9.1). An unresolvable path also gets no document link — the error is
+   the feedback. *Rejected:* passing the prefix through verbatim, which breaks
+   every script the moment a caller adds a declaration; warning-then-running,
+   which needs a new warning category and an ambiguous answer about whether such
+   a run is cacheable; and a configurable lint rule in the editor only, which
+   means a second implementation of the check and a squiggle whose severity
+   disagrees with the build's.
+7. **`file://` is accepted wherever a directive takes a filename**, not only on
+   custom directives: `.include`, `.inestrn`, `.incbin`, `.incpng`, `.incpal`,
+   `.incrle`, `.incwav`. Redundant there, harmless, and the alternative is that
+   the prefix fails on exactly the arguments that most obviously *are* files —
+   which, once all of them are clickable, is what an author will try first.
+   *Rejected:* custom directives only, which keeps the marker's meaning tighter
+   ("this string is a path" is news only for a custom directive) at the cost of a
+   confusing error; and accept-but-warn.
+8. **A script that `import`s a module is not cached, in v1.** Rhai resolves
+   modules through its own `FileModuleResolver`, not the host's `path` hook, so
+   the recorder cannot see them and freshness cannot cover them. Refusing is
+   correct by construction and costs nothing. *Rejected:* installing a recording
+   module resolver, which makes the shared-helper pattern cacheable but is a real
+   component with its own base-path decision (rhai's differs from our source-dir
+   rooting) — the natural v2 (§13); and recording one level deep, which is a
+   partially-recorded dependency set, the exact shape of bug that makes people
+   distrust a cache.
+9. **The script itself is checked by size + mtime, like every other
+   dependency.** One freshness rule to document and reason about. *Rejected:*
+   storing the script's source in the entry and comparing it byte-for-byte —
+   exact, zero-dependency, and cheap at script sizes, and it would close §7.4
+   precisely where edits are most frequent — and hashing the script alone. The
+   accepted cost is that a same-length script edit inside one mtime tick is
+   missed; the mitigation is `--no-cache`.
 
 ### Still the author's call
 
 Reversible, recorded so they are decisions rather than defaults. Say the word on
 any of them.
 
-7. **Eviction is a total-size cap with LRU by entry mtime, enforced
-   opportunistically on write; default 256 MB.** *Alternative:* an entry-count
-   cap, or no eviction at all with `cache clear` as the only reclaim — defensible
-   given how small entries are, but a cache with no bound is a support burden.
-8. **A declared `file://` file that the script never reads does not invalidate
-   the entry.** Recorded reads are the truth; a declaration the run did not use
-   is not a dependency. *Alternative:* treat declarations as dependencies too,
-   which is more intuitive ("I said it was an input") but requires widening
-   `CustomResolver` to carry declarations into the resolver — the one signature
-   this plan otherwise leaves alone (§6.4).
-9. **Impurity is detected statically from the compiled AST, conservatively.**
-   *Alternative:* runtime detection through rhai's debugger hook, which is exact
-   (a `rand()` in a dead branch would not disqualify the script) but means
-   enabling the `debugging` feature for ordinary runs, paying its cost on every
-   execution to slightly widen what is cacheable.
-10. **Errors are never persisted** (§5) — only memoized within a build.
+10. **Eviction is a total-size cap with LRU by entry mtime, enforced
+    opportunistically on write; default 256 MB.** *Alternative:* an entry-count
+    cap, or no eviction at all with `cache clear` as the only reclaim —
+    defensible given how small entries are, but a cache with no bound is a
+    support burden.
+11. **Completion filters by directive** (`.incpng` → `*.png`, and so on, §9.3).
+    *Alternative:* offering every file, which is never wrong about a `.PNG` or a
+    `.s` include but is noisy in an assets directory; or filtering with all files
+    as a second tier, which is the same table plus sort-order care.
+12. **The editor surface ships as Phase 2, before the cache.** *Alternative:*
+    last, which gets the performance win — the actual motivation — reviewed and
+    merged soonest and leaves the LSP crate untouched meanwhile.
+13. **A declared `file://` file that the script never reads does not invalidate
+    the entry.** Recorded reads are the truth; a declaration the run did not use
+    is not a dependency. *Alternative:* treat declarations as dependencies too,
+    which is more intuitive ("I said it was an input") but requires widening
+    `CustomResolver` to carry declarations into the resolver — the one signature
+    this plan otherwise leaves alone (§6.4).
+14. **Impurity is detected statically from the compiled AST, conservatively.**
+    *Alternative:* runtime detection through rhai's debugger hook, which is exact
+    (a `rand()` in a dead branch would not disqualify the script) but means
+    enabling the `debugging` feature for ordinary runs, paying its cost on every
+    execution to slightly widen what is cacheable.
+15. **Errors are never persisted** (§5) — only memoized within a build.
     *Alternative:* caching failures too, which would make a broken build's second
     run marginally faster and its recovery confusing.
-11. **`--no-cache` does not disable layer 1 memoization.** *Alternative:* a flag
+16. **`--no-cache` does not disable layer 1 memoization.** *Alternative:* a flag
     that forces every invocation to execute, useful for diagnosing a script whose
     output legitimately varies — but that is the behavior §2 identifies as a bug.
