@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.22.0 - 2026-07-30
+
+### Minor changes
+
+- The language server makes filename arguments clickable: cmd/ctrl-click a path to open the file, hover it to see where it resolved to and what is there, and complete filenames inside the quotes, filtered to what the directive can use.
+- Filename arguments can be declared with a `file://` prefix — `.tilemap "file://map.png"` — which reports a missing file against the directive before a custom pseudo-instruction's script runs, and is accepted (harmlessly) on `.include`, `.incbin`, `.incpng`, `.incpal`, `.incrle`, `.incwav`, and `.inestrn` too.
+- Custom pseudo-instruction results are cached in `~/.nessemble/cache`: a script re-runs only when it, one of the files it read, or the directive's arguments change, so an unchanged rebuild skips the work entirely. Scripts that draw random values, write files, list directories, or `import` modules are never cached, and `--no-cache`, `nessemble cache info` and `nessemble cache clear` control it.
+
+### Patch changes
+
+- Custom pseudo-instruction scripts now run once per directive instead of once per assembler pass, halving script work in every build that uses them — and fixing a mis-sized ROM when a script returned a different number of bytes on each pass (as one using `rand` does).
+
 ## 2.21.1 - 2026-07-29
 
 ### Patch changes
