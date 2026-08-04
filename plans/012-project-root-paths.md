@@ -1,6 +1,8 @@
 # nessemble-rs: A Plan for Project-Root-Relative Paths
 
-> Status: **Designed, not yet built.** This document adds a `@/` prefix to
+> Status: **Phase 0 shipped; Phases 1–6 designed, not yet built.** The
+> deviations found by building Phase 0 are recorded in
+> [§13](#13-as-built). This document adds a `@/` prefix to
 > filename arguments meaning "from the root of this project", so a path stops
 > depending on where the file that spells it happens to live
 > ([§3](#3-the-syntax-)). The root is discovered by walking up for the config
@@ -282,7 +284,7 @@ failure mode this plan exists to remove.
 
 Each phase compiles, tests, and ships on its own.
 
-### Phase 0 — Root resolution in core, wired to nothing
+### Phase 0 — Root resolution in core, wired to nothing ✅
 
 - `pub const PROJECT_ROOT_PREFIX: &str = "@/";` beside `FILE_URL_PREFIX` in
   `lib.rs`.
@@ -469,3 +471,73 @@ root-relative path there at all.
 Undeclared arguments stay out regardless, for the `.ease "linear"` reason in §5 —
 and that boundary is now the same boundary `file://` already draws, rather than a
 second one to remember.
+
+## 13. As-built
+
+Deviations found by building each phase, recorded as they ship.
+
+### 13.1 The helpers live in `paths.rs`, not `lib.rs` (Phase 0)
+
+Phase 0 said "beside `FILE_URL_PREFIX` in `lib.rs`". `lib.rs` is already ~950
+lines of crate-level API, and the resolution rules want room for the reasoning
+that justifies them — why the escape check is lexical, why it iterates
+`Component`s. They went into a private `paths` module re-exported from the crate
+root, matching how `assemble`/`preprocess` are already structured. The public API
+is exactly what §8 specified: `nessemble_core::{PROJECT_ROOT_PREFIX,
+PROJECT_MARKERS, find_project_root, project_root, resolve_path_arg, PathArgError}`.
+
+The module is named `paths` rather than `project` because clippy's pedantic
+`module_name_repetitions` — on for this workspace — objects to `project::project_root`.
+
+### 13.2 The ladder became a function, and it canonicalizes (Phase 0)
+
+§4 described the three-step ladder in prose, leaving Phase 1 to assemble it at
+the three entry points. Writing the tests made it obvious that "explicit, else
+marker, else base" is itself the thing worth testing once rather than three
+times, so it shipped as `project_root(explicit, base)`, with `find_project_root`
+underneath as the marker walk-up alone.
+
+It **canonicalizes `base` before walking**, which §4 did not mention and which
+matters more than it looks: `Path::new("src").parent()` is `""`, and *its* parent
+is `None`, so an uncanonicalized walk from a relative base gives up after one
+step and finds nothing. `nessemble-rc` canonicalizes for the same reason
+(`lib.rs:386`). The consequence is that a discovered root is absolute, so `@/`
+paths resolve to absolute paths — which is what the LSP hover in Phase 5 wants to
+show anyway.
+
+### 13.3 The escape check iterates components rather than splitting on `/` (Phase 0)
+
+The obvious implementation splits the remainder on `/` and counts `..` segments.
+That is wrong on Windows: `"@/..\\..\\secret"` contains no `/`-delimited `..`
+segment, so it would pass the check and *then* be traversed by `PathBuf::push`,
+which treats a backslash as a separator there. Iterating `Path::components()`
+delegates the separator rules to the platform, so the same string is a real
+traversal on Windows (caught) and an ordinary filename on Unix (left alone).
+
+Two smaller rules fell out of using components, both tested: a `Prefix` component
+(`C:`) after `@/` names a different volume and is an escape, and `RootDir` is
+skipped so `@//x` is simply `@/x`.
+
+### 13.4 The i18n messages landed a phase early (Phase 0)
+
+§8 put them in Phase 1. But `PathArgError` without messages is half a type — the
+caller would have to know which Fluent key each variant maps to — so
+`PathArgError::message(arg)` and the two `en-US.ftl` keys shipped together in
+Phase 0. Fluent does not warn about unused keys, so they are inert until Phase 1
+calls them. Phase 1 is now pure wiring.
+
+### 13.5 `PROJECT_MARKERS` is not yet consumed by `nessemble-rc` (Phase 0)
+
+§4 promised a shared constant "exported from core and consumed by
+`nessemble-rc`, keeps the two lists from drifting". Only the export shipped.
+`nessemble-rc` discovers `.nessemblerc`/`.nessemblerc.json` and
+`.nessembleignore` as **two independent walks** (`lib.rs:392`, `lib.rs:402`) —
+they mean different things there, and the second deliberately runs even when the
+first found nothing. `PROJECT_MARKERS` is their union, which is right for "where
+is the project rooted" and wrong as a drop-in for either walk.
+
+Closing the drift properly means extracting rc's two lists into named constants
+and asserting their union equals `PROJECT_MARKERS` — a genuine test, but rc-side
+work that Phase 0 has no reason to carry. The constant documents the relationship
+in the meantime. Worth doing alongside Phase 4, which is the next time the CLI's
+config handling is open.
