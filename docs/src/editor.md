@@ -37,7 +37,12 @@ Once connected, the server provides:
   `.include`d into a larger program is analyzed *in the context of that program*,
   so symbols defined in sibling or parent files are not reported as undefined.
   The server discovers entry points from the workspace's `.include` graph (no
-  configuration needed) and reflects unsaved edits across files.
+  configuration needed) and reflects unsaved edits across files. The open
+  workspace folder also doubles as the
+  [project root](syntax.md#project-root-relative-paths) for `@/` paths,
+  overriding the usual `.nessemblerc` walk-up the same way the CLI's
+  [`--root`](usage.md#root-dir) does — so a file opened directly, with no
+  workspace folder, falls back to that walk-up instead.
 - **Completion** — instruction mnemonics, assembler directives, and the
   labels, constants, and macros defined in the current buffer. Typing `.`
   triggers directive completion. Inside a comment, the
@@ -53,6 +58,9 @@ Once connected, the server provides:
   (`.incpng` offers PNGs, `.include` offers assembly sources, a custom
   pseudo-instruction offers everything, since its script may read any format).
   Directories are always offered, and typing `/` walks into one.
+  [`@/`](syntax.md#project-root-relative-paths) is offered at the start of an
+  empty argument, and typing it in switches completion to list the project
+  root instead of the current directory.
 - **Formatting** — “format document” applies the opinionated house style
   (indentation, comma spacing, data-block consolidation, routine spacing) while
   preserving comments. It runs the **same engine** as the
@@ -75,9 +83,10 @@ Once connected, the server provides:
   it is declared with a
   [`file://` prefix](syntax.md#declaring-a-filename-argument), which is how the
   editor knows the string is a path at all. Paths resolve the way the assembler
-  resolves them — relative to the file that contains the directive — and a path
-  that doesn't resolve is deliberately *not* linked: it is reported as an error
-  instead.
+  resolves them — relative to the file that contains the directive, or from the
+  project root for a [`@/`](syntax.md#project-root-relative-paths) path — and a
+  path that doesn't resolve is deliberately *not* linked: it is reported as an
+  error instead.
 - **Hover** — opcode and addressing-mode details for an instruction, the
   description of a directive or [comment directive](usage.md#comment-directives),
   and the resolved value of a constant or label.
@@ -99,7 +108,10 @@ Once connected, the server provides:
   render inline; a terminal editor shows the same values as text.
   Hovering a **filename argument** shows the absolute path it resolved to and what
   is there — the file's size, a PNG's pixel dimensions, or **not found** — which
-  answers "is it picking up the file I think it is?" without assembling.
+  answers "is it picking up the file I think it is?" without assembling. For a
+  [`@/`](syntax.md#project-root-relative-paths) path this doubles as "what root
+  did it pick?": a `.nessemblerc` added anywhere above the file changes the
+  answer, and this is where that becomes visible without a build.
 - **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)
   blocks, and runs of consecutive comments, can be collapsed.
 - **Rename** — renaming a symbol updates its definition and every use across the

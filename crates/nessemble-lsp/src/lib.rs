@@ -67,6 +67,7 @@ use nessemble_core::tooling::{self, LexKind, RuleSeverity};
 use nessemble_core::{
     diagnose_project_with, diagnose_source_with, lenient_custom_resolver, match_nes_color,
     parse_pseudo_mapping, Diag, ListSymbol, Options, ProjectDiagnostics, NES_PALETTE,
+    PROJECT_ROOT_PREFIX,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
@@ -571,10 +572,11 @@ impl Server {
             // A filename argument reports where it resolved to and what is there.
             LexKind::String => {
                 let base = Self::base_dir(uri)?;
+                let root = self.root_dir(uri);
                 let arg = path_args(&doc.text)
                     .into_iter()
                     .find(|arg| arg.token_range == token.range && !arg.path.is_empty())?;
-                path_arg_hover(&base, &arg)
+                path_arg_hover(root.as_deref(), &base, &arg)
             }
             LexKind::Ident => ident_hover(
                 token.text,
@@ -604,6 +606,27 @@ impl Server {
         uri_to_path(uri).parent().map(Path::to_path_buf)
     }
 
+    /// The project root a `@/` path in this document resolves against, mirroring
+    /// the assembler's ladder (`plans/012-project-root-paths.md` §4): the
+    /// containing workspace folder wins when the document sits under one — a
+    /// multi-root workspace's folder is the editor's equivalent of `--root`, an
+    /// explicit override — else the nearest `.nessemblerc`/`.nessembleignore`
+    /// marker walking up from the document, else the document's own directory.
+    ///
+    /// `None` only for a document with no [`base_dir`](Self::base_dir) at all
+    /// (an untitled buffer).
+    fn root_dir(&self, uri: &Url) -> Option<PathBuf> {
+        let base = Self::base_dir(uri)?;
+        let explicit = self
+            .workspace_roots
+            .iter()
+            .find(|root| base.starts_with(root));
+        Some(nessemble_core::project_root(
+            explicit.map(PathBuf::as_path),
+            &base,
+        ))
+    }
+
     /// Clickable links for every filename argument in the document at `uri`
     /// ([`path_args`]), so cmd/ctrl-clicking a path opens the file.
     ///
@@ -613,10 +636,12 @@ impl Server {
     fn document_links(&self, uri: &Url) -> Option<Vec<DocumentLink>> {
         let doc = self.documents.get(uri)?;
         let base = Self::base_dir(uri)?;
+        let root = self.root_dir(uri);
         let links = path_args(&doc.text)
             .into_iter()
             .filter_map(|arg| {
-                let target = resolve_path_arg(&base, arg.path);
+                let target =
+                    nessemble_core::resolve_path_arg(root.as_deref(), &base, arg.path).ok()?;
                 if !target.is_file() {
                     return None;
                 }
@@ -641,6 +666,7 @@ impl Server {
     fn path_completions(&self, uri: &Url, pos: Position) -> Option<Vec<CompletionItem>> {
         let doc = self.documents.get(uri)?;
         let base = Self::base_dir(uri)?;
+        let root = self.root_dir(uri);
         let arg = path_args(&doc.text).into_iter().find(|arg| {
             arg.token_range.start.line == pos.line
                 && pos.character > arg.token_range.start.character
@@ -649,18 +675,47 @@ impl Server {
 
         // Complete against the part of the path before the cursor: everything up
         // to the last separator is the directory to list, the rest is the prefix
-        // being typed.
+        // being typed. A leading `@/` is peeled off first and reattached to
+        // `dir_part` afterwards — it is the project-root marker, not a directory
+        // segment of its own, so `"@/ass` must split to `dir_part = "@/"` (the
+        // root) rather than losing the slash to the generic split.
         let typed_len = pos.character.saturating_sub(arg.range.start.character) as usize;
         let typed: String = arg.path.chars().take(typed_len).collect();
-        let (dir_part, partial) = match typed.rsplit_once('/') {
-            Some((dir, rest)) => (dir.to_string(), rest.to_string()),
-            None => (String::new(), typed),
+        let (marker, rest) = match typed.strip_prefix(PROJECT_ROOT_PREFIX) {
+            Some(rest) => (PROJECT_ROOT_PREFIX, rest),
+            None => ("", typed.as_str()),
         };
-        let dir = resolve_path_arg(&base, &dir_part);
-        let exts = file_directive_exts(&arg.directive);
+        let (dir_part, partial) = match rest.rsplit_once('/') {
+            Some((dir, rest)) => (format!("{marker}{dir}/"), rest.to_string()),
+            None => (marker.to_string(), rest.to_string()),
+        };
 
         let mut items = Vec::new();
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+
+        // Offer `@/` itself at the start of an empty argument (or after typing
+        // just `@`), so the project-root escape is discoverable without knowing
+        // it exists.
+        if dir_part.is_empty()
+            && PROJECT_ROOT_PREFIX
+                .to_lowercase()
+                .starts_with(&partial.to_lowercase())
+        {
+            items.push(CompletionItem {
+                label: PROJECT_ROOT_PREFIX.to_string(),
+                kind: Some(CompletionItemKind::FOLDER),
+                ..CompletionItem::default()
+            });
+        }
+
+        let Ok(dir) = nessemble_core::resolve_path_arg(root.as_deref(), &base, &dir_part) else {
+            return Some(items);
+        };
+        let exts = file_directive_exts(&arg.directive);
+
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return Some(items);
+        };
+        for entry in read_dir.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with('.') || !name.to_lowercase().starts_with(&partial.to_lowercase()) {
                 continue;
@@ -1531,13 +1586,6 @@ fn path_args(source: &str) -> Vec<PathArg<'_>> {
     out
 }
 
-/// Resolve a filename argument against `base` — the directory of the file that
-/// contains the directive, matching how the assembler resolves it. An absolute
-/// path is used as written.
-fn resolve_path_arg(base: &Path, path: &str) -> PathBuf {
-    base.join(path)
-}
-
 /// Whether `name`'s extension is one a directive accepts. `None` accepts every
 /// file (see [`FILE_DIRECTIVES`]).
 fn extension_allowed(name: &str, exts: Option<&[&str]>) -> bool {
@@ -1551,9 +1599,14 @@ fn extension_allowed(name: &str, exts: Option<&[&str]>) -> bool {
 }
 
 /// Hover markdown for a filename argument: where the path resolved to, and what
-/// is there. Answers "is it finding the file I think it is?" without a build.
-fn path_arg_hover(base: &Path, arg: &PathArg<'_>) -> String {
-    let target = resolve_path_arg(base, arg.path);
+/// is there. Answers "is it finding the file I think it is?" without a build —
+/// including, for a `@/` path, *what root it picked* (plan 012 §9's mitigation
+/// for a `.nessemblerc` elsewhere silently moving the root).
+fn path_arg_hover(root: Option<&Path>, base: &Path, arg: &PathArg<'_>) -> String {
+    let target = match nessemble_core::resolve_path_arg(root, base, arg.path) {
+        Ok(target) => target,
+        Err(e) => return format!("**{}**", e.message(arg.path)),
+    };
     let detail = match std::fs::metadata(&target) {
         Ok(meta) if meta.is_dir() => "directory".to_string(),
         Ok(meta) => match png_dimensions(&target) {
@@ -4707,6 +4760,21 @@ mod tests {
             open(&mut server, uri.as_str(), text);
             (server, uri)
         }
+
+        /// Open `text` as `<rel_dir>/main.asm` in this tree, with `workspace_roots`
+        /// set to this tree's root — the multi-root-workspace case Phase 5's `@/`
+        /// support has to mirror.
+        fn open_nested(&self, rel_dir: &str, text: &str) -> (Server, Url) {
+            let rel = format!("{rel_dir}/main.asm");
+            self.write(&rel, text.as_bytes());
+            let uri = Url::from_file_path(self.root.join(&rel)).expect("file uri");
+            let mut server = Server {
+                workspace_roots: vec![self.root.clone()],
+                ..Server::default()
+            };
+            open(&mut server, uri.as_str(), text);
+            (server, uri)
+        }
     }
 
     impl Drop for PathTree {
@@ -4918,5 +4986,93 @@ mod tests {
             .map(|i| i.label)
             .collect();
         assert!(labels.iter().any(|l| l == "lda"), "{labels:?}");
+    }
+
+    // ---- `@/` project-root paths (plan 012, Phase 5) ------------------------
+
+    #[test]
+    fn document_links_resolve_a_project_root_path_via_the_workspace_folder() {
+        let tree = PathTree::new("rootlinks");
+        tree.write("assets/logo.chr", b"x");
+        let text = ".incbin \"@/assets/logo.chr\"\n";
+        // The entry file sits under a nested subdirectory; only the workspace
+        // folder (the tree's root) makes `@/` resolve to the sibling `assets/`.
+        let (server, uri) = tree.open_nested("src", text);
+
+        let links = server.document_links(&uri).expect("known document");
+        assert_eq!(links.len(), 1, "links: {links:?}");
+        assert!(
+            links[0]
+                .target
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .ends_with("assets/logo.chr"),
+            "{:?}",
+            links[0].target
+        );
+    }
+
+    #[test]
+    fn hover_on_a_project_root_path_names_where_it_landed() {
+        let tree = PathTree::new("roothover");
+        tree.write("assets/logo.chr", b"12345");
+        let text = ".incbin \"@/assets/logo.chr\"\n";
+        let (server, uri) = tree.open_nested("src/deep", text);
+
+        let hover = server.hover(&uri, Position::new(0, 15)).expect("hover");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup");
+        };
+        // Landed at the workspace root's `assets/`, not `src/deep/assets/`.
+        assert!(md.value.contains("assets/logo.chr"), "hover: {}", md.value);
+        assert!(!md.value.contains("src/deep"), "hover: {}", md.value);
+        assert!(md.value.contains("5 bytes"), "hover: {}", md.value);
+    }
+
+    #[test]
+    fn hover_on_a_project_root_escape_names_the_problem() {
+        let tree = PathTree::new("rootescape");
+        let (server, uri) = tree.open_main(".incbin \"@/../outside.bin\"\n");
+
+        let hover = server.hover(&uri, Position::new(0, 15)).expect("hover");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(
+            md.value.contains("resolves outside the project root"),
+            "hover: {}",
+            md.value
+        );
+    }
+
+    #[test]
+    fn completion_offers_at_slash_at_the_start_of_an_empty_argument() {
+        let tree = PathTree::new("completeatslash");
+        let (server, uri) = tree.open_main(".incbin \"\"\n");
+
+        let labels: Vec<String> = server
+            .complete(&uri, Position::new(0, 9))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(labels.contains(&"@/".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn completion_inside_a_project_root_path_completes_against_the_root() {
+        let tree = PathTree::new("completerootpath");
+        tree.write("assets/logo.chr", b"x");
+        tree.write("assets/sprite.chr", b"x");
+        // Completion is happening from `src/`, well away from `assets/` — only
+        // the `@/` resolution makes the sibling directory visible here.
+        let (server, uri) = tree.open_nested("src", ".incbin \"@/assets/lo\"\n");
+
+        let labels: Vec<String> = server
+            .complete(&uri, Position::new(0, 21))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(labels, ["logo.chr"], "{labels:?}");
     }
 }

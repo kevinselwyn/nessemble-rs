@@ -28,6 +28,7 @@ Options:
   -l, --list <listfile.txt>   generate list of labels and constants
       --mlist                 include labels created by macros in the list file
   -p, --pseudo <pseudo.txt>   use custom pseudo-instruction functions
+      --root <dir>            project root for `@/`-relative paths
   -c, --check                 check syntax only
   -v, --version               display program version
   -L, --license               display program license
@@ -102,6 +103,19 @@ labels.
 
 Points to a mapping file that enables custom pseudo-instructions. See
 [Extending](extending.md).
+
+### --root &lt;dir&gt;
+
+Sets the [project root](syntax.md#project-root-relative-paths) that `@/`-prefixed
+filename arguments resolve against, overriding the usual walk-up for the nearest
+`.nessemblerc`, `.nessemblerc.json`, or `.nessembleignore`.
+
+```text
+nessemble src/main.asm --root .
+```
+
+`dir` must exist; a missing or non-directory path is rejected before assembly
+starts.
 
 ### --no-cache
 
@@ -334,6 +348,8 @@ section is classified; lines that emit only CHR data are omitted.
 - `--out <path>` — output file for a single format, or a directory for `all`
   (`coverage.json` + `coverage.lcov`); defaults to the current directory.
 - `-p`, `--pseudo <pseudo.txt>` — custom pseudo-op mapping, as in assemble mode.
+- `--root <dir>` — [project root](syntax.md#project-root-relative-paths) for
+  `@/`-relative paths, as in assemble mode.
 - `--scripts` — also report **line coverage for the `-p` Rhai scripts**, so you
   can see which parts of a custom pseudo-op never ran during assembly. Each
   project script appears as its own file (each line executed or not); bundled

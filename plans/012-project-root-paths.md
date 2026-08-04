@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for Project-Root-Relative Paths
 
-> Status: **Phases 0–3 shipped; Phases 4–6 designed, not yet built.** The
+> Status: **Shipped, all phases (0–6).** The
 > deviations found by building each phase are recorded in
 > [§13](#13-as-built). This document adds a `@/` prefix to
 > filename arguments meaning "from the root of this project", so a path stops
@@ -349,7 +349,7 @@ handed — so these assert on the exact strings:
 - Two directives in different directories naming the same file, one via `@/` and
   one via `../`, key the memo on the same resolved `texts` (§5.1).
 
-### Phase 4 — CLI `--root`
+### Phase 4 — CLI `--root` ✅
 
 - `--root <dir>` on `assemble` (and `coverage`, which assembles too), plumbed to
   `Options::project_root`.
@@ -357,7 +357,7 @@ handed — so these assert on the exact strings:
 - A CLI test in `crates/nessemble-cli/tests/cli.rs`.
 - `docs/src/usage.md` entry.
 
-### Phase 5 — the editor surface
+### Phase 5 — the editor surface ✅
 
 `nessemble-lsp` mirrors the assembler's resolution in four features, all
 currently routed through its own `resolve_path_arg` (`lib.rs`, ~line 1535):
@@ -374,7 +374,7 @@ currently routed through its own `resolve_path_arg` (`lib.rs`, ~line 1535):
   override, falling back to the marker walk-up so a single-file editor session
   behaves like the CLI.
 
-### Phase 6 — docs and changeset
+### Phase 6 — docs and changeset ✅
 
 - `docs/src/syntax.md`: a "Project-root-relative paths" section next to
   "Declaring a filename argument" (~line 993), and an update to the existing
@@ -583,3 +583,65 @@ regardless of whether `base` is known (it doesn't touch the filesystem), and
 otherwise the root is `Some(paths::project_root(None, base))` if `base` is
 `Some`, or `None` if it isn't. Only `assemble_with` can pass `None` for `base`
 (when `current_dir()` errors); every other caller always has one.
+
+### 13.8 `--root` is validated and canonicalized in the CLI, not left to core (Phase 4)
+
+§8 said `--root <dir>` "plumbed to `Options::project_root`" and rejected "if the
+directory does not exist", without saying where the check lives. `nessemble-core`
+never validates `Options::project_root` — `paths::project_root` treats an
+explicit root as a plain override and joins it as given, whether or not it exists
+— so a bad `--root` would otherwise surface later as a confusing `@/` resolution
+failure on whatever line first used the prefix, rather than as a flag error up
+front. `resolve_root_flag` in `main.rs` (shared by `assemble_mode` and
+`coverage::run`, since both take `--root`) checks `Path::canonicalize` and
+`is_dir` before assembly starts, and returns the *canonical* path — matching
+§13.2's observation that a discovered root is always absolute, so an explicit
+one should be too, rather than mixing relative and absolute roots depending on
+whether `--root` or the marker walk-up supplied it.
+
+### 13.9 The LSP's root ladder omits the wasm-only "no root" case, and needed its own `resolve_path_arg` rename (Phase 5)
+
+§8's four bullets map onto one new method, `Server::root_dir`, called by
+`hover`, `document_links`, and `path_completions` alongside the existing
+`base_dir`. It mirrors `lib.rs`'s `resolve_root` (§13.7) with one simplification:
+the LSP only ever runs where a real filesystem exists, so there is no
+`current_dir()`-failure path to reproduce, and `root_dir` returns `None` only
+when `base_dir` itself does (an untitled buffer) — never `PathArgError::NoProjectRoot`
+in practice.
+
+The workspace-folder override is *containment*-based rather than "the first
+workspace folder": `root_dir` picks the workspace root the document's `base_dir`
+is actually `starts_with`, so a multi-root workspace does not root every open
+file at whichever folder happens to be first in `workspace_roots`.
+
+The module already had a private `resolve_path_arg(base, path) -> PathBuf`
+(plain `base.join`, no `@/` handling) backing all four features listed in §8.
+Rather than teach it `@/` under the same name — which would have shadowed
+`nessemble_core::resolve_path_arg` at every call site — it was deleted in favor
+of calling the core function directly, so the LSP's resolution is *the same
+code* as the assembler's rather than a parallel reimplementation of it.
+
+Completion's directory-splitting needed one adjustment §8 didn't anticipate:
+splitting the typed text on its last `/` (to separate "directory so far" from
+"prefix being completed") loses the `@/` marker when there is exactly one path
+segment after it — `"@/ass"` naively splits to a bare `"@"`, which is not
+`PROJECT_ROOT_PREFIX` and so falls through to ordinary (wrong) relative
+resolution. The split now peels a leading `@/` off first and reattaches it to
+whatever directory portion the generic split produces, so `"@/ass"` completes
+against the root and `"@/foo/ba"` completes against `<root>/foo/`.
+
+### 13.10 The Phase 1 changeset already covered the user-facing `@/` behavior (Phase 6)
+
+§8 filed the changeset under Phase 6, but Phase 1's own commit already added a
+`minor` changeset for the `@/` prefix and declared-argument resolution the
+moment those became real (rather than leaving the user-facing entry to wait
+for the docs phase). Phase 6 therefore added a second, separate changeset for
+what *it* shipped — the CLI's `--root` flag and the language-server support —
+rather than editing the first one, since a changeset is consumed and rendered
+once and editing an already-accurate entry to describe unrelated work would
+misattribute it.
+
+The `editors/` bullet turned out to be moot: the VS Code extension carries no
+TextMate grammar at all (highlighting comes entirely from the LSP's semantic
+tokens), so there was no one-line grammar change available to make — the
+"low value, do it only if" clause resolved to "don't."

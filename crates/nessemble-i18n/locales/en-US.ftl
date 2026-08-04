@@ -93,3 +93,4 @@ cache-cleared = Cleared { $count } entries, { $bytes } bytes
 
 no-home = Could not find home directory
 reference-not-found = Could not find info for `{ $term }`
+root-not-found = `--root { $dir }` does not exist or is not a directory
