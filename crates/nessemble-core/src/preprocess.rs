@@ -54,15 +54,27 @@ pub struct Preprocessed {
     /// top-level file (`base_dir` joined with `top_name`); each include is the
     /// path it resolved to. Lets tooling map a diagnostic's file back to a URI.
     pub paths: Vec<PathBuf>,
+    /// The project root a `@/`-prefixed filename argument resolves against
+    /// (see [`crate::PROJECT_ROOT_PREFIX`]), or `None` where no root could be
+    /// determined at all (only reachable with no filesystem — see
+    /// [`crate::PathArgError::NoProjectRoot`]).
+    pub root: Option<PathBuf>,
 }
 
 /// Preprocess `source` (already read from `top_name`), resolving includes and
 /// expanding macros. Each `.include`/`.inestrn` is resolved relative to the
 /// directory of the file that contains it (seeded from `base_dir` for the
 /// top-level file), so the assembler can resolve filename-based directives
-/// against the file that contains them.
-pub fn preprocess(source: &str, base_dir: PathBuf, top_name: &str) -> Result<Preprocessed, Diag> {
-    preprocess_with(source, base_dir, top_name, None)
+/// against the file that contains them. `root` is the project root for `@/`
+/// arguments, computed once by the caller (see `plans/012-project-root-paths.md`
+/// §4.1).
+pub fn preprocess(
+    source: &str,
+    base_dir: PathBuf,
+    top_name: &str,
+    root: Option<PathBuf>,
+) -> Result<Preprocessed, Diag> {
+    preprocess_with(source, base_dir, top_name, root, None)
 }
 
 /// Like [`preprocess`], but consulting `overlay` before disk for each included
@@ -71,6 +83,7 @@ pub fn preprocess_with(
     source: &str,
     base_dir: PathBuf,
     top_name: &str,
+    root: Option<PathBuf>,
     overlay: Option<&FileOverlay>,
 ) -> Result<Preprocessed, Diag> {
     let top_path = base_dir.join(top_name);
@@ -78,6 +91,7 @@ pub fn preprocess_with(
         files: vec![top_name.to_string()],
         dirs: vec![base_dir],
         paths: vec![top_path],
+        root,
         macros: HashMap::new(),
         out: Vec::new(),
         unique: 0,
@@ -89,6 +103,7 @@ pub fn preprocess_with(
         files: pre.files,
         dirs: pre.dirs,
         paths: pre.paths,
+        root: pre.root,
     })
 }
 
@@ -99,6 +114,8 @@ struct Pre<'a> {
     dirs: Vec<PathBuf>,
     /// Resolved path of each file, parallel to `files` (see `Preprocessed`).
     paths: Vec<PathBuf>,
+    /// The project root `@/` arguments resolve against (see `Preprocessed::root`).
+    root: Option<PathBuf>,
     macros: HashMap<String, Vec<Token>>,
     out: Vec<Token>,
     unique: u32,
@@ -244,9 +261,11 @@ impl Pre<'_> {
             .to_string();
         // Resolve relative to the directory of the file that contains the
         // directive, so a nested include (or an include in a subdirectory) is
-        // resolved from *its* location rather than the top-level file's.
+        // resolved from *its* location rather than the top-level file's — unless
+        // `name` starts with `@/`, which resolves from the project root instead.
         let dir = self.dirs[file_id].clone();
-        let path = dir.join(&name);
+        let path = crate::resolve_path_arg(self.root.as_deref(), &dir, &name)
+            .map_err(|e| self.diag(file_id, line, e.message(&name)))?;
         // Prefer an overlay entry (an unsaved editor buffer) when present; a
         // buffer can even resolve a file that isn't on disk yet. Otherwise read
         // from disk, as the CLI/assembler path always does.

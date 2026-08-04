@@ -149,8 +149,10 @@ pub fn assemble_with(
     options: &Options,
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
-    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    assemble_impl(source, options, base, "stdin", custom)
+    let cwd = std::env::current_dir().ok();
+    let base = cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+    let root = resolve_root(options, cwd.as_deref());
+    assemble_impl(source, options, base, "stdin", root, custom)
 }
 
 /// Assemble the file at `path`, resolving includes and filename-based
@@ -178,7 +180,8 @@ pub fn assemble_file_with(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    assemble_impl(&source, options, base, &display_name(path), custom)
+    let root = resolve_root(options, Some(&base));
+    assemble_impl(&source, options, base, &display_name(path), root, custom)
 }
 
 /// Assemble in-memory `source` as though it were the file at `path`: includes
@@ -197,11 +200,13 @@ pub fn assemble_source_as(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let root = resolve_root(options, Some(&base));
     assemble_impl(
         source,
         options,
         base,
         &display_name(path),
+        root,
         default_custom_resolver(),
     )
 }
@@ -275,9 +280,10 @@ fn diagnose_impl(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let root = resolve_root(options, Some(&base));
     let top_name = display_name(path);
 
-    let pre = match preprocess::preprocess_with(source, base, &top_name, overlay) {
+    let pre = match preprocess::preprocess_with(source, base, &top_name, root, overlay) {
         Ok(pre) => pre,
         Err(diag) => {
             return Diagnostics {
@@ -311,9 +317,12 @@ fn diagnose_impl(
         options.nes,
         options.undocumented,
         options.empty_byte,
-        pre.files,
-        pre.dirs,
-        pre.paths,
+        assemble::SourceTables {
+            files: pre.files,
+            dirs: pre.dirs,
+            paths: pre.paths,
+            root: pre.root,
+        },
         custom,
     );
     let (errors, warnings) = asm.diagnostics(&lines);
@@ -371,9 +380,10 @@ pub fn diagnose_project_with(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let root = resolve_root(options, Some(&base));
     let top_name = display_name(path);
 
-    let pre = match preprocess::preprocess_with(source, base, &top_name, Some(overlay)) {
+    let pre = match preprocess::preprocess_with(source, base, &top_name, root, Some(overlay)) {
         Ok(pre) => pre,
         Err(diag) => {
             // Preprocessing failed (e.g. a missing include); report the single
@@ -413,9 +423,12 @@ pub fn diagnose_project_with(
         options.nes,
         options.undocumented,
         options.empty_byte,
-        pre.files,
-        pre.dirs,
-        pre.paths,
+        assemble::SourceTables {
+            files: pre.files,
+            dirs: pre.dirs,
+            paths: pre.paths,
+            root: pre.root,
+        },
         custom,
     );
     let (errors, warnings) = asm.diagnostics(&lines);
@@ -426,6 +439,21 @@ pub fn diagnose_project_with(
         files,
         paths,
     }
+}
+
+/// The project root a `@/`-prefixed filename argument resolves against, for an
+/// assembly whose entry file's directory is `base` — or `None` if there is no
+/// `base` (only [`assemble_with`], whose in-memory source has no on-disk entry
+/// file, can reach this: under wasm `std::env::current_dir` fails outright, and
+/// there is no filesystem to walk up anyway).
+///
+/// An explicit [`Options::project_root`] wins regardless of whether `base` is
+/// known, since it doesn't depend on the filesystem at all.
+fn resolve_root(options: &Options, base: Option<&Path>) -> Option<PathBuf> {
+    if let Some(explicit) = &options.project_root {
+        return Some(explicit.clone());
+    }
+    base.map(|base| paths::project_root(None, base))
 }
 
 /// The basename used to refer to `path` in diagnostics.
@@ -526,9 +554,10 @@ fn assemble_impl(
     options: &Options,
     base_dir: PathBuf,
     top_name: &str,
+    root: Option<PathBuf>,
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
-    let pre = preprocess::preprocess(source, base_dir, top_name).map_err(AssembleError)?;
+    let pre = preprocess::preprocess(source, base_dir, top_name, root).map_err(AssembleError)?;
     let lines = parse::parse(pre.tokens).map_err(|e| {
         AssembleError(Diag {
             file: pre.files.get(e.file as usize).cloned().unwrap_or_default(),
@@ -540,9 +569,12 @@ fn assemble_impl(
         options.nes,
         options.undocumented,
         options.empty_byte,
-        pre.files,
-        pre.dirs,
-        pre.paths,
+        assemble::SourceTables {
+            files: pre.files,
+            dirs: pre.dirs,
+            paths: pre.paths,
+            root: pre.root,
+        },
         custom,
     );
     asm.set_record_source_map(options.source_map);
