@@ -273,6 +273,9 @@ pub struct Assembler {
     /// to give the source map real, uniformly-rooted paths (the `files` display
     /// names are per-file-relative and lose the top-level directory).
     paths: Vec<PathBuf>,
+    /// The project root a `@/`-prefixed filename argument resolves against. See
+    /// [`crate::PROJECT_ROOT_PREFIX`] and `plans/012-project-root-paths.md`.
+    root: Option<PathBuf>,
     /// Resolver for custom pseudo-ops (`.foo`): given the directive name, its
     /// numeric and string arguments, and the base directory, it returns the
     /// bytes to emit (or an error message).
@@ -307,16 +310,45 @@ pub type CustomResolver =
 /// separately. See [`Assembler::custom_memo`].
 type CustomKey = (String, Vec<i64>, Vec<String>, u32, u32);
 
+/// Per-file resolution tables threaded from preprocessing into the assembler:
+/// display names, resolution directories, resolved paths, and the project root
+/// `@/` arguments resolve against (see [`crate::PROJECT_ROOT_PREFIX`]). These
+/// travel together — they come from [`crate::preprocess::Preprocessed`] as a
+/// unit and are consumed together here — so they're a struct rather than four
+/// positional [`Assembler::new`] parameters (`plans/012-project-root-paths.md`
+/// §4.2).
+pub(crate) struct SourceTables {
+    pub files: Vec<String>,
+    pub dirs: Vec<PathBuf>,
+    pub paths: Vec<PathBuf>,
+    pub root: Option<PathBuf>,
+}
+
+/// Why a media importer (`.incbin`/`.incpng`/…) could not produce bytes: either
+/// the filename argument could not be resolved at all (a `@/` name with no
+/// project root, or one that escapes it — [`crate::PathArgError`]) or it
+/// resolved fine but the file at that path could not be read. The two are
+/// reported with different diagnostics — see
+/// `plans/012-project-root-paths.md` §6.
+enum MediaError {
+    Path(crate::PathArgError),
+    NotFound,
+}
+
 impl Assembler {
     pub fn new(
         nes: bool,
         undocumented: bool,
         empty_byte: u8,
-        files: Vec<String>,
-        dirs: Vec<PathBuf>,
-        paths: Vec<PathBuf>,
+        tables: SourceTables,
         custom: CustomResolver,
     ) -> Self {
+        let SourceTables {
+            files,
+            dirs,
+            paths,
+            root,
+        } = tables;
         Assembler {
             nes,
             undocumented,
@@ -352,6 +384,7 @@ impl Assembler {
             files,
             dirs,
             paths,
+            root,
             custom,
             custom_memo: HashMap::new(),
         }
@@ -1185,11 +1218,14 @@ impl Assembler {
                 let off = offset.as_ref().map_or(0, |e| self.eval(e)).max(0) as usize;
                 let lim = limit.as_ref().map(|e| self.eval(e).max(0) as usize);
                 match self.read_media_file(file) {
-                    Some(bytes) => {
+                    Ok(bytes) => {
                         let out = nessemble_media::incbin_slice(&bytes, off, lim);
                         self.write_all(&out);
                     }
-                    None => {
+                    Err(MediaError::Path(e)) => {
+                        self.hard_error(e.message(crate::strip_file_url(file).0));
+                    }
+                    Err(MediaError::NotFound) => {
                         self.hard_error(t!("could-not-read", file = crate::strip_file_url(file).0));
                     }
                 }
@@ -1198,26 +1234,35 @@ impl Assembler {
                 let off = offset.as_ref().map_or(0, |e| self.eval(e)) as i32;
                 let lim = limit.as_ref().map(|e| self.eval(e) as i32);
                 match self.decode_media_png(file) {
-                    Some(png) => {
+                    Ok(png) => {
                         let out = nessemble_media::png_to_tiles(&png, off, lim);
                         self.write_all(&out);
                     }
-                    None => self.hard_error(t!("could-not-load-png")),
+                    Err(MediaError::Path(e)) => {
+                        self.hard_error(e.message(crate::strip_file_url(file).0));
+                    }
+                    Err(MediaError::NotFound) => self.hard_error(t!("could-not-load-png")),
                 }
             }
             Pseudo::Incpal(file) => match self.decode_media_png(file) {
-                Some(png) => {
+                Ok(png) => {
                     let out = nessemble_media::png_to_palette(&png);
                     self.write_all(&out);
                 }
-                None => self.hard_error(t!("could-not-load-png")),
+                Err(MediaError::Path(e)) => {
+                    self.hard_error(e.message(crate::strip_file_url(file).0));
+                }
+                Err(MediaError::NotFound) => self.hard_error(t!("could-not-load-png")),
             },
             Pseudo::Incrle(file) => match self.read_media_file(file) {
-                Some(bytes) => {
+                Ok(bytes) => {
                     let out = nessemble_media::rle_encode(&bytes);
                     self.write_all(&out);
                 }
-                None => {
+                Err(MediaError::Path(e)) => {
+                    self.hard_error(e.message(crate::strip_file_url(file).0));
+                }
+                Err(MediaError::NotFound) => {
                     self.hard_error(t!("could-not-read", file = crate::strip_file_url(file).0));
                 }
             },
@@ -1290,27 +1335,56 @@ impl Assembler {
     /// ([`crate::strip_file_url`]) reaches the resolver as the bare path, and is
     /// checked for existence *first*: a missing declared file is reported against
     /// this directive and the script is not run at all.
+    ///
+    /// A declared argument that is also `@/`-prefixed resolves from the project
+    /// root *before* both the existence check and the resolver call, so `texts`
+    /// carries the resolved path rather than the literal `@/…` spelling — this is
+    /// what lets a `.tilemap "file://@/art/map.png"` reach the script the same
+    /// way `.include "file://@/lib/defs.asm"` does. An *undeclared* argument that
+    /// happens to start with `@/` is untouched: without `file://` the assembler
+    /// can't tell it's a path at all (`plans/012-project-root-paths.md` §5.1).
     fn exec_custom(&mut self, name: &str, args: &[CustomArg]) {
         let mut ints = Vec::new();
         let mut texts = Vec::new();
-        let mut declared = Vec::new();
+        // (path as named in the source, resolved path to existence-check) for
+        // each declared argument, in order.
+        let mut declared: Vec<(String, PathBuf)> = Vec::new();
         for arg in args {
             match arg {
                 CustomArg::Int(e) => ints.push(self.eval(e)),
                 CustomArg::Str(s) => {
                     let (path, is_declared) = crate::strip_file_url(s);
                     if is_declared {
-                        declared.push(path.to_string());
+                        let resolved = match crate::resolve_path_arg(
+                            self.root.as_deref(),
+                            self.cur_dir(),
+                            path,
+                        ) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                self.hard_error(e.message(path));
+                                return;
+                            }
+                        };
+                        let is_root_relative = path.starts_with(crate::PROJECT_ROOT_PREFIX);
+                        texts.push(if is_root_relative {
+                            resolved.to_string_lossy().into_owned()
+                        } else {
+                            path.to_string()
+                        });
+                        declared.push((path.to_string(), resolved));
+                    } else {
+                        texts.push(path.to_string());
                     }
-                    texts.push(path.to_string());
                 }
             }
         }
         // A declared input that is not there is this directive's error, reported
-        // before the script gets a chance to fail on its own terms.
-        for path in &declared {
-            if !self.cur_dir().join(path).exists() {
-                self.hard_error(t!("could-not-open", file = path));
+        // before the script gets a chance to fail on its own terms. Named by what
+        // the source wrote, not the resolved path.
+        for (arg, resolved) in &declared {
+            if !resolved.exists() {
+                self.hard_error(t!("could-not-open", file = arg));
                 return;
             }
         }
@@ -1353,26 +1427,36 @@ impl Assembler {
     }
 
     /// Read a media file resolved against the directory of the file that
-    /// contains the directive (see [`Self::cur_dir`]).
+    /// contains the directive (see [`Self::cur_dir`]), or from the project root
+    /// for a `@/`-prefixed name.
     ///
     /// A `file://` declaration is stripped first ([`crate::strip_file_url`]), so
     /// `.incbin "file://logo.chr"` reads the same file `.incbin "logo.chr"` does.
-    fn read_media_file(&self, name: &str) -> Option<Vec<u8>> {
+    fn read_media_file(&self, name: &str) -> Result<Vec<u8>, MediaError> {
         let (path, _declared) = crate::strip_file_url(name);
-        std::fs::read(self.cur_dir().join(path)).ok()
+        let resolved = crate::resolve_path_arg(self.root.as_deref(), self.cur_dir(), path)
+            .map_err(MediaError::Path)?;
+        std::fs::read(resolved).map_err(|_| MediaError::NotFound)
     }
 
     /// Read and decode a media PNG (open failure and decode failure are
     /// indistinguishable, matching the reference's `stbi_load`).
-    fn decode_media_png(&self, name: &str) -> Option<nessemble_media::Png> {
+    fn decode_media_png(&self, name: &str) -> Result<nessemble_media::Png, MediaError> {
         let bytes = self.read_media_file(name)?;
-        nessemble_media::decode_png(&bytes).ok()
+        nessemble_media::decode_png(&bytes).map_err(|_| MediaError::NotFound)
     }
 
     fn exec_incwav(&mut self, file: &str, amplitude: i32) {
-        let Some(bytes) = self.read_media_file(file) else {
-            self.hard_error(t!("could-not-open", file = crate::strip_file_url(file).0));
-            return;
+        let bytes = match self.read_media_file(file) {
+            Ok(bytes) => bytes,
+            Err(MediaError::Path(e)) => {
+                self.hard_error(e.message(crate::strip_file_url(file).0));
+                return;
+            }
+            Err(MediaError::NotFound) => {
+                self.hard_error(t!("could-not-open", file = crate::strip_file_url(file).0));
+                return;
+            }
         };
         match nessemble_media::wav_to_dpcm(&bytes, amplitude) {
             Ok(out) => self.write_all(&out),

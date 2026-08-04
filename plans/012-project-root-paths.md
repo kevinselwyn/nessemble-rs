@@ -1,7 +1,7 @@
 # nessemble-rs: A Plan for Project-Root-Relative Paths
 
-> Status: **Phase 0 shipped; Phases 1–6 designed, not yet built.** The
-> deviations found by building Phase 0 are recorded in
+> Status: **Phases 0–3 shipped; Phases 4–6 designed, not yet built.** The
+> deviations found by building each phase are recorded in
 > [§13](#13-as-built). This document adds a `@/` prefix to
 > filename arguments meaning "from the root of this project", so a path stops
 > depending on where the file that spells it happens to live
@@ -298,7 +298,7 @@ Each phase compiles, tests, and ships on its own.
 
 No directive uses any of it yet; behavior is unchanged and provably so.
 
-### Phase 1 — `.include` and `.inestrn`
+### Phase 1 — `.include` and `.inestrn` ✅
 
 - Bundle `files`/`dirs`/`paths`/`root` per §4.2; compute the root at the three
   entry points in `lib.rs`.
@@ -307,7 +307,7 @@ No directive uses any of it yet; behavior is unchanged and provably so.
 - The *included file's* recorded directory (`dirs`) stays its real on-disk parent,
   so a root-included file's own relative paths still work file-relatively.
 
-### Phase 2 — the media importers and declared arguments
+### Phase 2 — the media importers and declared arguments ✅
 
 - `Assembler` carries the root; `read_media_file` and `exec_incwav` call
   `resolve_path_arg`.
@@ -319,7 +319,7 @@ No directive uses any of it yet; behavior is unchanged and provably so.
   before the script runs — the same ordering plan 011 established for a missing
   declared file, and for the same reason.
 
-### Phase 3 — integration tests
+### Phase 3 — integration tests ✅
 
 `crates/nessemble-core/tests/project_root.rs`, modeled on the existing
 `file_url.rs` (same `TempTree` helper, same shape):
@@ -541,3 +541,45 @@ and asserting their union equals `PROJECT_MARKERS` — a genuine test, but rc-si
 work that Phase 0 has no reason to carry. The constant documents the relationship
 in the meantime. Worth doing alongside Phase 4, which is the next time the CLI's
 config handling is open.
+
+### 13.6 The bundle is `SourceTables`, five arguments rather than four (Phase 1)
+
+§4.2 estimated that bundling `files`/`dirs`/`paths`/`root` would drop
+`Assembler::new` "to four arguments". It bundles the four into a
+`pub(crate) SourceTables { files, dirs, paths, root }` next to `Assembler`
+in `assemble.rs`, but the count that falls out is five: `nes`, `undocumented`,
+`empty_byte`, `tables`, `custom`. The estimate undercounted by one — `nes`,
+`undocumented`, and `empty_byte` were never candidates for bundling, since
+they're independent scalars an `Options` reference could carry but the
+existing call sites already destructure by hand. Five is well under clippy's
+`too_many_arguments` threshold (8) either way, so the eighth-argument problem
+§4.2 raised is resolved regardless of the exact count.
+
+`root` also had to reach `Preprocessed` itself, not just `Assembler::new`'s
+bundle: `Pre::do_include` needs it mid-preprocessing, before an `Assembler`
+exists. `preprocess`/`preprocess_with` now take `root: Option<PathBuf>` as a
+parameter (computed once by the caller, per §4.1) and `Preprocessed` carries
+it back out alongside `files`/`dirs`/`paths`, so the one value flows through
+both bundles instead of being computed twice.
+
+### 13.7 Only `assemble_with` (in-memory source) can produce a `None` root (Phase 1)
+
+§4.1 says the wasm build reaches `PathArgError::NoProjectRoot` because there
+is no filesystem at all — but `paths::project_root` never actually returns
+`None`; on a canonicalize failure it falls back to the (uncanonicalized) `base`
+itself, so a `base` of any kind always yields *some* root. The `None` case
+therefore has to be manufactured at the call site, and only one of the four
+public entry points has a `base` that can genuinely fail to exist:
+`assemble_with`, whose base is `std::env::current_dir()` — the one path with no
+on-disk entry file to derive a directory from, and the one `std::env::current_dir`
+can fail on under wasm. `assemble_file_with`/`assemble_source_as`/the two
+`diagnose_*` entry points all derive `base` from a caller-supplied `Path` via
+`Path::parent()`, a text-only operation that never fails, so their root is
+always `Some`.
+
+`lib.rs` gained one small helper, `resolve_root(options, base: Option<&Path>)`,
+used by all five entry points: an explicit `Options::project_root` wins
+regardless of whether `base` is known (it doesn't touch the filesystem), and
+otherwise the root is `Some(paths::project_root(None, base))` if `base` is
+`Some`, or `None` if it isn't. Only `assemble_with` can pass `None` for `base`
+(when `current_dir()` errors); every other caller always has one.
