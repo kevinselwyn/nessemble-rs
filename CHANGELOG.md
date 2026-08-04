@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.23.0 - 2026-08-04
+
+### Minor changes
+
+- Filename arguments can now use a `@/` prefix to resolve from the project root instead of the containing file's directory — honoured by `.include`/`.inestrn`, the media importers, and any `file://`-declared custom pseudo-op argument. A declared `@/` argument reaches its script already resolved to an absolute path.
+- The `nessemble` CLI and `coverage` subcommand gain a `--root <dir>` flag to override the project root that `@/` paths resolve against, and the language server now resolves, links, hovers, and completes `@/` paths — preferring an open workspace folder as the root.
+
 ## 2.22.0 - 2026-07-30
 
 ### Minor changes
