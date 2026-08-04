@@ -5,11 +5,13 @@
 > depending on where the file that spells it happens to live
 > ([§3](#3-the-syntax-)). The root is discovered by walking up for the config
 > marker the project already has ([§4](#4-what-the-root-is)), the prefix is
-> honoured by the built-in filename directives
-> ([§5](#5-where--resolves)), and a `@/` that cannot be resolved is an error
+> honoured everywhere a string is known to be a path — the built-in filename
+> directives and any argument declared with `file://`
+> ([§5](#5-where--resolves)) — and a `@/` that cannot be resolved is an error
 > naming the sigil rather than a silent fallback ([§6](#6-when--cannot-resolve)).
-> The four design forks were settled with the maintainer and are recorded in
-> [§11](#11-decisions); one open fork is flagged in [§12](#12-open-decision-the-file-custom-arg-asymmetry).
+> Every design fork was settled with the maintainer and is recorded in
+> [§11](#11-decisions), with the reasoning for the `file://` one in
+> [§12](#12-why--resolves-in-file-declared-arguments).
 >
 > The through-line: **moving a file should not break the paths inside it.**
 
@@ -17,12 +19,13 @@
 
 ## 1. Goal
 
-Let any built-in filename argument name a path from the project root:
+Let a filename argument name a path from the project root:
 
 ```nessemble
 .include "@/lib/macros.asm"
 .incbin  "@/assets/logo.chr"
 .incpng  "@/art/tiles.png"
+.tilemap "file://@/art/map.png"    ; custom pseudo-op, path declared
 ```
 
 `@/` resolves against the project root regardless of which file the directive
@@ -112,8 +115,8 @@ Root resolution is a **three-step ladder**, evaluated once per assembly at the
 entry point — not per file, not per directive:
 
 1. **`Options::project_root`**, if set. This is the explicit override, populated
-   by the CLI's new `--root <dir>` flag (§8.4) and by the language server's
-   workspace folder (§8.5).
+   by the CLI's new `--root <dir>` flag (Phase 4) and by the language server's
+   workspace folder (Phase 5).
 2. **The nearest config marker**, found by walking up from the entry file's
    directory for `.nessemblerc`, `.nessemblerc.json`, or `.nessembleignore`. The
    root is the directory *containing* the first marker found.
@@ -158,7 +161,10 @@ relationship explicit instead of positional.
 
 ## 5. Where `@/` resolves
 
-**In scope — the built-in filename directives**, and nothing else:
+The governing rule: **`@/` resolves exactly where the assembler already knows a
+string is a path.** That is two places.
+
+**The built-in filename directives:**
 
 | Directive   | Resolved in |
 | ----------- | ----------- |
@@ -173,21 +179,65 @@ relationship explicit instead of positional.
 Because five of the seven funnel through `read_media_file`, the assembler side is
 essentially one function's worth of change.
 
+**Any argument declared with `file://`**, including on a custom pseudo-op:
+
+```nessemble
+.tilemap "file://@/art/map.png", "file://@/art/tiles.png"
+```
+
+The declaration's entire content is "this string names an input file", so a
+declared string is a path by construction and `@/` resolves in it. See §12 for
+the reasoning and §5.1 for what the script receives.
+
 **Explicitly out of scope**, each for a reason:
 
-- **Custom pseudo-op string arguments**, declared or not. An undeclared string
-  argument may be an easing name, a label, or arbitrary text — `.ease "linear"` —
-  and the assembler cannot tell which. Rewriting one that merely happens to start
-  with `@/` would corrupt data. The *declared* (`file://`) case is a genuine
-  candidate and is flagged as an open decision in §12.
-- **The script-side file API** (`nessemble-script`'s `resolve`). A script
-  receives `base` and resolves against it; teaching it about the root means
-  passing the root through the `CustomResolver` signature, which is a public API
-  break for a case no one has asked for yet.
+- **Undeclared custom pseudo-op arguments.** An undeclared string may be an
+  easing name, a label, or arbitrary text — `.ease "linear"` — and the assembler
+  cannot tell which. Rewriting one that merely happens to start with `@/` would
+  corrupt data. `file://` is precisely the marker that lifts a string out of this
+  category, which is why the declared case is in scope and this one is not.
+- **The script-side file API** (`nessemble-script`'s `resolve`). A path a script
+  *constructs itself* and passes to `read_file` still resolves against `base`.
+  Teaching that layer about the root means threading the root through the
+  `CustomResolver` signature — a public API break for a case no one has asked
+  for. Declared arguments reach the script already resolved (§5.1), which covers
+  the common need without it.
 - **`.nessemblerc` paths, `--pseudo` mapping paths, and CLI output paths**
   (`-o`, `-l`). These are configuration and command-line arguments, not source;
   a shell already expands paths there, and the root is not yet known when they
   are read.
+
+### 5.1 What a declared `@/` argument hands to the script
+
+`exec_custom` (`assemble.rs:1293`) strips `file://`, existence-checks the result
+against `cur_dir()`, and passes the bare string to the resolver in `texts`. With
+`@/` in scope, the resolution happens **once, before both**, and the resolved
+path is what flows onward:
+
+```
+"file://@/art/map.png"
+  → strip file://        →  "@/art/map.png"
+  → resolve_path_arg     →  "<root>/art/map.png"   (absolute)
+  → existence check, and texts[i] handed to the script
+```
+
+Four consequences, all of which the existing machinery already handles:
+
+- **Scripts need no changes.** `nessemble-script`'s `resolve`
+  (`lib.rs:287`) passes an absolute path through untouched, joining `base` only
+  for relative ones. A script that does `read_file(texts[0])` works unmodified.
+- **The existence check tests the right file**, so the directive-level "missing
+  declared input" diagnostic keeps working for `@/` paths — the property that
+  made `file://` worth having in plan 011 (§4 there).
+- **Memoization stays correct.** The `CustomKey` includes `texts`
+  (`assemble.rs:1317`), which now holds the resolved path. Two directives naming
+  the same file by different spellings — `"file://@/art/map.png"` from one
+  directory and `"file://../art/map.png"` from another — no longer collide or
+  diverge by accident; they key on what they actually read.
+- **Undeclared arguments are untouched**, so a `.tilemap "@/x.png"` without the
+  declaration reaches the script literally. That asymmetry is the point of the
+  declaration rather than a wart: `file://` is how an author says "this is a
+  path", and `@/` resolution is one of the things saying so now buys.
 
 ## 6. When `@/` cannot resolve
 
@@ -222,8 +272,10 @@ failure mode this plan exists to remove.
   the containing file's directory. `Preprocessed::dirs` and
   `Assembler::cur_dir()` keep their current meaning and their current tests.
 - ROM output for any existing project is byte-identical.
-- `file://` semantics are untouched: still stripped before use, still the thing
-  that makes a path clickable and a missing file a directive-level error.
+- `file://` keeps every property it has: still stripped before use, still what
+  makes a path clickable and a missing file a directive-level error. It gains
+  one — `@/` resolution (§12) — and gains it only for arguments that already
+  start with `@/`, so no existing declared path changes.
 - The corpus tests in `tests/corpus/` need no updates.
 
 ## 8. Phased plan
@@ -253,12 +305,17 @@ No directive uses any of it yet; behavior is unchanged and provably so.
 - The *included file's* recorded directory (`dirs`) stays its real on-disk parent,
   so a root-included file's own relative paths still work file-relatively.
 
-### Phase 2 — the media importers
+### Phase 2 — the media importers and declared arguments
 
 - `Assembler` carries the root; `read_media_file` and `exec_incwav` call
   `resolve_path_arg`.
-- The `file://` existence check in `exec_custom` (`assemble.rs:1312`) keeps using
-  `cur_dir()` — see §12.
+- `exec_custom` (`assemble.rs:1293`) resolves each `file://`-declared argument
+  once, per §5.1: resolve after stripping, then existence-check and populate
+  `texts` from the resolved path. Undeclared arguments keep flowing through
+  verbatim.
+- A resolution failure here is the directive's own error, reported on its line
+  before the script runs — the same ordering plan 011 established for a missing
+  declared file, and for the same reason.
 
 ### Phase 3 — integration tests
 
@@ -271,10 +328,24 @@ No directive uses any of it yet; behavior is unchanged and provably so.
   resolves to it.
 - No marker anywhere → the entry file's directory is the root.
 - `Options::project_root` overrides a marker that would otherwise win.
-- `"file://@/lib/defs.asm"` works and is still existence-checked.
+- `"file://@/lib/defs.asm"` on `.include` works and is still existence-checked.
 - `"@weird/x.chr"` and `"./@x/y.chr"` are untouched.
 - `"@/../outside.bin"` errors, naming the root.
 - A byte-identical ROM for a project that uses no `@/`.
+
+Declared custom-pseudo-op arguments (§5.1) extend `file_url.rs`'s
+`recording_resolver` pattern, which already captures the `texts` a resolver was
+handed — so these assert on the exact strings:
+
+- `.tilemap "file://@/art/map.png"` from a nested include hands the script the
+  **resolved** path, and the recorded `texts` prove it.
+- The same directive with a *missing* `@/` target errors on its own line, names
+  the bare path, and the script never runs.
+- An **undeclared** `.tilemap "@/art/map.png"` hands the script `@/art/map.png`
+  verbatim — the asymmetry in §5.1 is deliberate, so it gets a test rather than
+  being left to chance.
+- Two directives in different directories naming the same file, one via `@/` and
+  one via `../`, key the memo on the same resolved `texts` (§5.1).
 
 ### Phase 4 — CLI `--root`
 
@@ -289,7 +360,10 @@ No directive uses any of it yet; behavior is unchanged and provably so.
 `nessemble-lsp` mirrors the assembler's resolution in four features, all
 currently routed through its own `resolve_path_arg` (`lib.rs`, ~line 1535):
 
-- **Document links** — cmd-click a `@/` path and open the right file.
+- **Document links** — cmd-click a `@/` path and open the right file. `path_args`
+  (`lib.rs:1466`) already yields declared arguments alongside built-in filename
+  ones and already carries the `declared` flag, so custom pseudo-op paths become
+  clickable through the same change rather than a second one.
 - **Hover** — `path_arg_hover` shows where a `@/` path landed, which answers
   "what root did it pick?" without a build.
 - **Completion** — offer `@/` as a completion at the start of an empty filename
@@ -303,23 +377,32 @@ currently routed through its own `resolve_path_arg` (`lib.rs`, ~line 1535):
 - `docs/src/syntax.md`: a "Project-root-relative paths" section next to
   "Declaring a filename argument" (~line 993), and an update to the existing
   block quote about relative resolution so it names the new escape from it.
+- `docs/src/extending.md`: the "Declaring file arguments" section (~line 127)
+  gains the `@/` case — including that a declared `@/` argument reaches the
+  script already resolved (§5.1), which is the part a script author needs.
 - `docs/src/editor.md`: mention `@/` alongside the `file://` clickable-path note.
 - `editors/` syntax highlighting: check whether the `@/` prefix should be
   distinguished inside a string; low value, do it only if it is a one-line grammar
   change.
-- `cargo run -p xtask -- changeset add minor "…"` — a new syntax, so `minor`.
+- `cargo run -p xtask -- changeset add minor "…"` — a new syntax, so `minor`. The
+  body should name both halves: the `@/` prefix, and that a declared argument now
+  reaches a script resolved (§9).
 
 ## 9. Risks
 
 - **Silent root drift.** Adding a `.nessemblerc` to a parent directory moves the
   root for every `@/` path below it. That is the intended mechanism, but it means
   an unrelated formatting-config file can change what a source file reads. The
-  LSP hover (§8.5) is the mitigation: the root is always inspectable.
+  LSP hover (Phase 5) is the mitigation: the root is always inspectable.
 - **A `@`-prefixed filename.** A real file named `@something` is unaffected
   (§3), but a directory literally named `@` is only addressable as `./@`. This is
   acceptable and documented.
-- **Scope creep toward custom pseudo-ops.** §5 draws the line deliberately; §12
-  is where it gets revisited, not the implementation.
+- **A declared argument's meaning shifts slightly.** A script that previously
+  received a relative path and did something other than open it — parsing it,
+  echoing it into a log — now receives an absolute one. Any script doing that
+  with a *declared* argument was already relying on something `file://` does not
+  promise, but it is a real behavior change and belongs in the changeset text
+  (Phase 6).
 
 ## 10. Estimated shape
 
@@ -327,7 +410,7 @@ currently routed through its own `resolve_path_arg` (`lib.rs`, ~line 1535):
 | ----- | -------------- | ---------- |
 | 0     | `nessemble-core` | small, self-contained |
 | 1     | `nessemble-core`, `nessemble-i18n` | medium (the plumbing refactor) |
-| 2     | `nessemble-core` | small |
+| 2     | `nessemble-core` | small (two call sites plus `exec_custom`) |
 | 3     | `nessemble-core` (tests) | medium |
 | 4     | `nessemble-cli`, docs | small |
 | 5     | `nessemble-lsp` | medium |
@@ -343,36 +426,46 @@ Settled with the maintainer before implementation:
    `.nessemblerc`/`.nessembleignore` discovery the project already has, so
    existing projects need no new file, with an explicit `--root` override on top
    (§4).
-3. **Built-in filename directives only** — the seven in §5. Custom pseudo-op
-   arguments, the script file API, and configuration paths are out (§5).
+3. **Wherever a string is known to be a path** — the seven built-in filename
+   directives, plus any argument declared with `file://` (§5, §12). Undeclared
+   custom pseudo-op arguments, the script file API, and configuration paths are
+   out (§5).
 4. **A hard error naming the sigil** when `@/` cannot resolve — no silent
    fallback to the entry directory or the containing directory (§6).
 
-## 12. Open decision: the `file://` custom-arg asymmetry
+## 12. Why `@/` resolves in `file://`-declared arguments
 
-Decision 3 leaves one rough edge that should be closed one way or the other
-before Phase 2 ships.
+Decision 3's second half was settled after the rest, and the reasoning is worth
+keeping because it is what makes the scope rule a rule rather than a list.
 
-After this plan, `.include "file://@/lib/defs.asm"` works — `.include` is a
-built-in directive — but `.tilemap "file://@/art/map.png"` does **not**. The
-declaration says "this string is an input file", the assembler existence-checks
-it against `cur_dir()` (`assemble.rs:1312`), and the check fails on the literal
-`@/art/map.png`. The author gets `Could not open \`@/art/map.png\`` from a
-spelling that works one line above, which is worse than either consistent
-outcome.
+Scoping to built-in directives alone would have left this:
 
-Three ways to close it:
+```nessemble
+.include "file://@/lib/defs.asm"    ; works — .include is a built-in
+.tilemap "file://@/art/map.png"     ; fails — .tilemap is a custom pseudo-op
+```
 
-- **(a) Resolve `@/` in declared arguments.** A `file://`-declared string is
-  already, by definition, a path — that is the whole content of the declaration —
-  so resolving `@/` in it is consistent rather than a scope expansion. The
-  resolver receives the resolved absolute path, which it can already handle
-  (absolute paths pass through `nessemble-script`'s `resolve` untouched). This is
-  the recommendation.
-- **(b) Reject it explicitly.** A dedicated diagnostic: "`@/` is not supported in
-  custom pseudo-op arguments". Honest, cheap, and no behavior change — but it
-  documents an inconsistency instead of removing one.
-- **(c) Leave it.** Status quo: the confusing `Could not open` above.
+The second line strips to the literal `@/art/map.png`, fails its existence check
+against `cur_dir()` (`assemble.rs:1312`), and reports
+`` Could not open `@/art/map.png` `` — sending the author to look for a missing
+file when the spelling one line above works fine. Two identical-looking paths
+behaving differently because of which *directive* they sit on is exactly the kind
+of positional surprise this plan set out to remove.
 
-Undeclared custom arguments stay out under all three options, for the
-`.ease "linear"` reason in §5.
+The fix is not an exception carved out for `.tilemap`; it is noticing that
+"built-in filename directive" was the wrong rule. The right one is **"the
+assembler knows this string is a path"** — which is true of the built-ins by
+their signature, and true of a declared argument by the declaration. `file://`
+exists to say precisely that; plan 011 (§4) introduced it so the assembler could
+know a custom pseudo-op's string was a file without executing the script. Having
+been told, honouring `@/` in it follows.
+
+This also costs almost nothing. The resolver already receives absolute paths
+without trouble, so no script changes (§5.1), and the existence check gains
+rather than loses precision. What it *adds* is a reason to type `file://` on a
+custom pseudo-op beyond diagnostics and clickability: it is now how you get a
+root-relative path there at all.
+
+Undeclared arguments stay out regardless, for the `.ease "linear"` reason in §5 —
+and that boundary is now the same boundary `file://` already draws, rather than a
+second one to remember.
