@@ -48,6 +48,61 @@ fn unknown_option_is_a_usage_error() {
 }
 
 #[test]
+fn root_flag_resolves_a_project_root_relative_include() {
+    let dir = std::env::temp_dir().join(format!("nessemble-root-{}", std::process::id()));
+    let root = dir.join("proj");
+    let assets = root.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("data.bin"), [1u8, 2, 3]).unwrap();
+
+    // The entry file lives outside the root entirely, so only `--root` makes
+    // `@/` resolvable.
+    let entry_dir = dir.join("elsewhere");
+    std::fs::create_dir_all(&entry_dir).unwrap();
+    let entry = entry_dir.join("main.asm");
+    std::fs::write(&entry, ".incbin \"@/assets/data.bin\"\n").unwrap();
+
+    let out = dir.join("out.rom");
+    let status = bin()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            entry.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(&out).unwrap(), vec![1u8, 2, 3]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn root_flag_rejects_a_nonexistent_directory() {
+    let dir = std::env::temp_dir().join(format!("nessemble-root-missing-{}", std::process::id()));
+    let entry = dir.join("main.asm");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&entry, "    NOP\n").unwrap();
+
+    let out = bin()
+        .args([
+            "--root",
+            dir.join("does-not-exist").to_str().unwrap(),
+            entry.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("does not exist"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn init_scaffolds_expected_project() {
     let dir = std::env::temp_dir().join(format!("nessemble-init-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

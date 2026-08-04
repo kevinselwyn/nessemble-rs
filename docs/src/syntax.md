@@ -994,7 +994,9 @@ Example:
 > (`.incbin`, `.incpng`, `.incpal`, `.incrle`, `.incwav`, `.inestrn`) — are
 > resolved relative to the directory of the file that contains the directive.
 > A file included from a subdirectory therefore resolves its own includes and
-> assets from that subdirectory, not from the top-level project directory.
+> assets from that subdirectory, not from the top-level project directory. A
+> path prefixed `@/` is the escape from this: see
+> [Project-root-relative paths](#project-root-relative-paths) below.
 
 ### Declaring a filename argument
 
@@ -1018,6 +1020,49 @@ directives above it is accepted, harmless, and redundant — their arguments are
 already known to be filenames — but it lets you write every path in a project the
 same way. Editors make a declared path
 [clickable](editor.md#features) either way.
+
+### Project-root-relative paths
+
+A filename argument beginning `@/` resolves from the **project root** instead
+of the containing file's directory:
+
+```nessemble
+.include "@/lib/macros.asm"
+.incbin  "@/assets/logo.chr"
+.incpng  "@/art/tiles.png"
+```
+
+`@/lib/macros.asm` names the same file no matter which directory the `.include`
+sits in — copying that line into a file three levels deeper still finds it,
+where a relative path would need `../../../lib/macros.asm` at that depth and
+break the moment the file moves again. Everything after the `@/` is a path
+relative to the root:
+
+| Argument              | Resolves to               |
+| ---------------------- | -------------------------- |
+| `"@/assets/logo.chr"` | `<root>/assets/logo.chr`  |
+| `"@weird/logo.chr"`   | `<containing dir>/@weird/logo.chr` (unchanged — `@` not followed by `/` is an ordinary path character) |
+| `"./@x/logo.chr"`     | `<containing dir>/@x/logo.chr` (the escape hatch for a directory literally named `@`) |
+
+The **project root** is found by walking up from the entry file for the
+nearest `.nessemblerc`, `.nessemblerc.json`, or `.nessembleignore` — the root
+is the directory *containing* that marker. A project that already has one of
+these files gets `@/` for free. With no marker anywhere above it, the entry
+file's own directory is the root, which makes `@/foo` mean `./foo` for a lone
+source file. The [`--root`](usage.md#root-dir) CLI flag, and an open editor's
+workspace folder, both override the walk-up explicitly.
+
+`@/` composes with `file://`: the declaration is stripped first, so
+`"file://@/lib/defs.asm"` is a declared, root-relative path — see
+[Declaring a filename argument](#declaring-a-filename-argument) above and
+[Declaring file arguments](extending.md#declaring-file-arguments) for what a
+custom pseudo-op's script receives.
+
+A `@/` path that cannot be resolved is a hard error rather than a silent
+fallback to file-relative resolution: this happens when no project root can be
+determined at all (only reachable from the browser playground, which has no
+filesystem), or when the path climbs back out of the root, e.g.
+`"@/../secret.bin"`.
 
 ### .incpal
 

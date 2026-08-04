@@ -76,6 +76,11 @@ pub struct CoverageArgs {
     #[arg(short = 'p', long, value_name = "pseudo.txt")]
     pseudo: Option<String>,
 
+    /// project root for `@/`-relative paths (default: nearest `.nessemblerc`, or
+    /// the input file's directory)
+    #[arg(long, value_name = "dir")]
+    root: Option<String>,
+
     /// also report line coverage for the `-p` Rhai scripts
     #[arg(long)]
     scripts: bool,
@@ -89,9 +94,14 @@ pub struct CoverageArgs {
 pub fn run(args: &CoverageArgs) -> u8 {
     // Assemble in NES mode with source-map recording. Coverage is defined over
     // PRG/CHR banks, so a non-NES assembly has nothing to report.
+    let project_root = match crate::resolve_root_flag(args.root.as_deref()) {
+        Ok(root) => root,
+        Err(code) => return code,
+    };
     let options = Options {
         nes: true,
         source_map: true,
+        project_root,
         ..Options::default()
     };
     // When `--scripts` is requested (and supported), the resolver also records

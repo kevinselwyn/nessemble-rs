@@ -81,6 +81,11 @@ struct Cli {
     #[arg(short = 'p', long, value_name = "pseudo.txt")]
     pseudo: Option<String>,
 
+    /// project root for `@/`-relative paths (default: nearest `.nessemblerc`, or
+    /// the input file's directory)
+    #[arg(long, value_name = "dir")]
+    root: Option<String>,
+
     /// check syntax only
     #[arg(short = 'c', long)]
     check: bool,
@@ -244,6 +249,11 @@ fn assemble_mode(cli: &Cli) -> u8 {
         options.empty_byte = parse_hex_byte(empty);
     }
 
+    match resolve_root_flag(cli.root.as_deref()) {
+        Ok(root) => options.project_root = root,
+        Err(code) => return code,
+    }
+
     let input: Option<PathBuf> = cli.infile.as_deref().map(PathBuf::from);
     let result = match &input {
         Some(path) => assemble_file_with(
@@ -306,6 +316,24 @@ fn assemble_mode(cli: &Cli) -> u8 {
                 )
             );
             RETURN_EPERM
+        }
+    }
+}
+
+/// Resolve `--root <dir>` to an `Options::project_root`: `None` if the flag was
+/// omitted (the usual marker walk-up applies), `Some(canonical dir)` otherwise.
+/// Rejected up front, rather than left to surface later as a confusing `@/`
+/// resolution error, if `dir` does not exist or is not a directory.
+pub(crate) fn resolve_root_flag(root: Option<&str>) -> Result<Option<PathBuf>, u8> {
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(root);
+    match path.canonicalize() {
+        Ok(canonical) if canonical.is_dir() => Ok(Some(canonical)),
+        _ => {
+            eprintln!("nessemble: {}", t!("root-not-found", dir = root));
+            Err(RETURN_EPERM)
         }
     }
 }

@@ -146,7 +146,22 @@ is a one-word edit. What it buys:
 
 Relative paths resolve against the **source file's directory** — the same base as
 the script's own [file reads](#filesystem-access) — and an absolute path
-(`file:///home/me/assets/map.png`) is used as-is.
+(`file:///home/me/assets/map.png`) is used as-is. A declared argument prefixed
+`@/` instead resolves from the
+[project root](syntax.md#project-root-relative-paths):
+
+```nessemble
+.tilemap "file://@/art/map.png"
+```
+
+The script still sees a plain path in `texts[0]`, just an absolute one this
+time — `@/` resolution happens once, before the file-existence check, so
+`texts[0]` is already `"/path/to/project/art/map.png"` by the time `custom`
+runs. Nothing about the script changes; `read_blob(texts[0])` works exactly as
+it does for a source-relative path. This is also the only way to write a
+project-root-relative path in a custom pseudo-op's argument: `@/` resolves
+solely where the assembler already knows a string is a path, and `file://` is
+what says so for an argument that has no built-in directive to say it for.
 
 Declaring is optional and per-argument. A script that treats a missing file as
 *optional* — falling back to a default when it isn't there — should leave the
