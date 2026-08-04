@@ -15,10 +15,15 @@ pub mod ast;
 pub mod coverage;
 mod lexer;
 mod parse;
+mod paths;
 mod preprocess;
 pub mod tooling;
 
 pub use assemble::{crc_32, CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
+pub use paths::{
+    find_project_root, project_root, resolve_path_arg, PathArgError, PROJECT_MARKERS,
+    PROJECT_ROOT_PREFIX,
+};
 pub use preprocess::FileOverlay;
 
 /// The NES palette mapping `.color` performs, re-exported so tooling (the
@@ -38,6 +43,10 @@ pub struct Options {
     /// tooling path). Off by default; enabling it does not change the assembled
     /// bytes, only whether the map is collected and exposed on [`Assembly`].
     pub source_map: bool,
+    /// Explicit project root for [`PROJECT_ROOT_PREFIX`] (`@/`) arguments,
+    /// overriding discovery. `None` (the default) walks up from the entry file
+    /// looking for a [`PROJECT_MARKERS`] file — see [`project_root`].
+    pub project_root: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -47,6 +56,7 @@ impl Default for Options {
             undocumented: false,
             empty_byte: 0xFF,
             source_map: false,
+            project_root: None,
         }
     }
 }
