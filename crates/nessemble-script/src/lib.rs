@@ -37,6 +37,24 @@
 //! - `quantize(value, thresholds)` (also over an array of values) and
 //!   `nes_shade(value)` (the NES 4-shade case; also over an array) to snap a
 //!   grayscale value to a palette index.
+//! - `parse_xml(source)` / `parse_xml_file(path)` (feature `fs` for the file
+//!   form) — a dependency-free XML parser ([`xml`]) returning a root `xml_node`
+//!   handle with `.name`, `.attrs`, `.attr(name)`, `.children`, `.text`,
+//!   `.find(name)` and `.find_all(name)`. No namespaces, no DTDs (a `<!DOCTYPE`
+//!   is a parse error), entities limited to the five predefined ones plus
+//!   numeric character references. See `plans/013-structured-data-parsing.md`.
+//! - `parse_json(source)` / `parse_json_file(path)` (feature `fs` for the file
+//!   form) — parses JSON into native Rhai values (map/array/string/int/float/
+//!   bool/`()`) via [`json`].
+//! - `parse_int_list(text, delim)` / `parse_int_list(text, delim, radix)` — bulk
+//!   numeric decoding: split on a literal delimiter, trim, skip empty fields,
+//!   parse each remaining one.
+//! - `to_char(value)`, `trimmed()` (a non-mutating `trim()` — the stock one
+//!   mutates in place and returns `()`), and `format_hex(value, width)`
+//!   (assembly-style `$`-prefixed, zero-padded hex). `parse_int(str, radix)` and
+//!   `blob.as_string()` cover the same-named gaps reported against an older Rhai
+//!   release — both already exist in the version this crate depends on and need
+//!   no host code.
 //! - The [`rhai-rand`](https://docs.rs/rhai-rand) package (feature `rand`):
 //!   `rand()`, `rand(min, max)`, `rand_float()`, `rand_bool()`, and the array
 //!   `shuffle()` / `sample()` helpers, for procedural noise and randomized data
@@ -55,7 +73,7 @@ use std::sync::Arc;
 
 #[cfg(any(feature = "fs", feature = "rand"))]
 use rhai::packages::Package;
-use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult};
+use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
 #[cfg(feature = "fs")]
 use rhai_fs::FilesystemPackage;
 #[cfg(feature = "rand")]
@@ -63,7 +81,11 @@ use rhai_rand::RandomPackage;
 
 #[cfg(feature = "coverage")]
 pub mod coverage;
+mod json;
 pub mod purity;
+mod xml;
+
+use xml::XmlNode;
 
 /// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
 /// or a human-readable error message (a thrown string, or an engine error).
@@ -164,11 +186,16 @@ fn engine(base_dir: &Path) -> Engine {
 /// [`engine`], optionally recording every path the script resolves through the
 /// host's file API into `recorder` (see [`RunOutcome::inputs`]).
 ///
-/// The three registrations below are the *only* routes from a path string to a
-/// file: rhai-fs turns every path into a `PathBuf` through `path`, and the two
-/// shorthands resolve their own. Recording there therefore sees whatever the
-/// script opened, including a filename it computed itself — which is why a cache
-/// keyed on the result does not need the source to declare its inputs.
+/// The registrations below are the *only* routes from a path string to a file:
+/// rhai-fs turns every path into a `PathBuf` through `path`, and the shorthands
+/// (`read_blob`, `decode_png_file`, `parse_xml_file`, `parse_json_file`) resolve
+/// their own. Recording there therefore sees whatever the script opened,
+/// including a filename it computed itself — which is why a cache keyed on the
+/// result does not need the source to declare its inputs. **Any new host
+/// function that opens a file must call `record`/`resolve` here too** — that is
+/// the entire correctness argument for the on-disk cache
+/// (`plans/011-pseudo-op-caching.md`, `plans/013-structured-data-parsing.md`
+/// §3), and there is no separate check that catches an omission.
 fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(10_000_000);
@@ -216,6 +243,7 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // (`decode_png(read_blob(path))`).
         engine.register_fn("decode_png_file", {
             let base = base.clone();
+            let rec = rec.clone();
             move |p: &str| -> Result<Image, Box<EvalAltResult>> {
                 let full = record(rec.as_ref(), resolve(&base, p));
                 let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
@@ -224,12 +252,110 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
                 decode_png(bytes)
             }
         });
+        // `parse_xml_file(path)` — read and parse an XML document in one call
+        // (`parse_xml(read_blob(path).as_string())`, roughly).
+        engine.register_fn("parse_xml_file", {
+            let base = base.clone();
+            let rec = rec.clone();
+            move |p: &str| -> Result<XmlNode, Box<EvalAltResult>> {
+                let full = record(rec.as_ref(), resolve(&base, p));
+                let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
+                    format!("parse_xml_file: cannot read {}: {e}", full.display()).into()
+                })?;
+                let text = String::from_utf8(bytes).map_err(|e| -> Box<EvalAltResult> {
+                    format!("parse_xml_file: {} is not valid UTF-8: {e}", full.display()).into()
+                })?;
+                xml::parse(&text).map_err(|e| -> Box<EvalAltResult> {
+                    format!("parse_xml_file: {}:{e}", full.display()).into()
+                })
+            }
+        });
+        // `parse_json_file(path)` — read and parse a JSON document in one call.
+        engine.register_fn("parse_json_file", {
+            let base = base.clone();
+            move |p: &str| -> Result<Dynamic, Box<EvalAltResult>> {
+                let full = record(rec.as_ref(), resolve(&base, p));
+                let text = std::fs::read_to_string(&full).map_err(|e| -> Box<EvalAltResult> {
+                    format!("parse_json_file: cannot read {}: {e}", full.display()).into()
+                })?;
+                json::parse(&text).map_err(|e| -> Box<EvalAltResult> {
+                    format!("parse_json_file: {}: {e}", full.display()).into()
+                })
+            }
+        });
     }
     #[cfg(not(feature = "fs"))]
     {
         let _ = base_dir;
         let _ = recorder;
     }
+
+    // `parse_xml(source)` / `parse_json(source)` — parse a document already in
+    // hand (e.g. read via `open_file`/`read_blob` on a target with `fs` but no
+    // one-call shorthand wanted, or a string built some other way). No file
+    // access, so these are registered regardless of the `fs` feature.
+    engine.register_type_with_name::<XmlNode>("xml_node");
+    engine.register_fn(
+        "parse_xml",
+        |source: &str| -> Result<XmlNode, Box<EvalAltResult>> {
+            xml::parse(source)
+                .map_err(|e| -> Box<EvalAltResult> { format!("parse_xml: {e}").into() })
+        },
+    );
+    engine.register_fn(
+        "parse_json",
+        |source: &str| -> Result<Dynamic, Box<EvalAltResult>> {
+            json::parse(source)
+                .map_err(|e| -> Box<EvalAltResult> { format!("parse_json: {e}").into() })
+        },
+    );
+
+    // `xml_node` accessors: `.name`, `.attrs` (a map, sorted by key — see
+    // `plans/013-structured-data-parsing.md` §2.5 for why this is not
+    // insertion-ordered), `.attr(name)`, `.children`, `.text`, `.find(name)`,
+    // `.find_all(name)`.
+    engine.register_get("name", |n: &mut XmlNode| n.name().to_string());
+    engine.register_get("attrs", |n: &mut XmlNode| -> Map {
+        n.attrs()
+            .iter()
+            .map(|(k, v)| (k.as_str().into(), Dynamic::from(v.clone())))
+            .collect()
+    });
+    engine.register_fn("attr", |n: &mut XmlNode, name: &str| -> Dynamic {
+        n.attr(name)
+            .map_or(Dynamic::UNIT, |v| Dynamic::from(v.to_string()))
+    });
+    engine.register_get("children", |n: &mut XmlNode| -> Array {
+        n.children().iter().cloned().map(Dynamic::from).collect()
+    });
+    engine.register_get("text", |n: &mut XmlNode| -> Dynamic {
+        n.text()
+            .map_or(Dynamic::UNIT, |t| Dynamic::from(t.to_string()))
+    });
+    engine.register_fn("find", |n: &mut XmlNode, name: &str| -> Dynamic {
+        n.find(name).map_or(Dynamic::UNIT, Dynamic::from)
+    });
+    engine.register_fn("find_all", |n: &mut XmlNode, name: &str| -> Array {
+        n.find_all(name).into_iter().map(Dynamic::from).collect()
+    });
+
+    // `parse_int_list(text, delim)` / `parse_int_list(text, delim, radix)` —
+    // bulk numeric decoding for the delimited columns structured formats store
+    // grids and arrays as. One native call rather than one interpreter
+    // iteration per element.
+    engine.register_fn("parse_int_list", parse_int_list_dec);
+    engine.register_fn("parse_int_list", parse_int_list_radix);
+
+    // Small string/blob gaps found prototyping against structured text
+    // (`plans/013-structured-data-parsing.md` §4): `trim()` mutates and returns
+    // `()`, so `trimmed()` is the non-mutating form; `to_char` builds a string
+    // from an int the way scripts need when assembling bytes read out of a
+    // blob; `format_hex` is assembly's own `$XX`/`$XXXX` spelling. `to_hex`
+    // (no padding, no `$`), `parse_int(str, radix)`, and `blob.as_string()`
+    // already exist in this crate's Rhai version and need no host code.
+    engine.register_fn("to_char", to_char);
+    engine.register_fn("trimmed", trimmed);
+    engine.register_fn("format_hex", format_hex);
 
     // Random-number functions (`rand`, `rand(min, max)`, `rand_float`,
     // `rand_bool`, and array `shuffle`/`sample`) for scripts that need
@@ -664,6 +790,77 @@ fn nes_shade_arr(values: Array) -> Result<Array, Box<EvalAltResult>> {
         out.push(Dynamic::from(nes_shade_of(vi)));
     }
     Ok(out)
+}
+
+/// `parse_int_list(text, delim)` — split `text` on the literal `delim`, trim
+/// whitespace from each field, skip empty fields, and parse the rest as base-10
+/// integers.
+fn parse_int_list_dec(text: &str, delim: &str) -> Result<Array, Box<EvalAltResult>> {
+    parse_int_list_radix(text, delim, 10)
+}
+
+/// `parse_int_list(text, delim, radix)` — as [`parse_int_list_dec`], parsing
+/// each field in the given `radix` (2..=36, matching Rhai's own `parse_int`).
+fn parse_int_list_radix(text: &str, delim: &str, radix: i64) -> Result<Array, Box<EvalAltResult>> {
+    if !(2..=36).contains(&radix) {
+        return Err(format!("parse_int_list: radix must be between 2 and 36, got {radix}").into());
+    }
+    let radix = radix as u32;
+    let mut out = Array::new();
+    for (i, field) in text.split(delim).enumerate() {
+        let field = field.trim();
+        if field.is_empty() {
+            continue;
+        }
+        let value = i64::from_str_radix(field, radix).map_err(|e| -> Box<EvalAltResult> {
+            format!(
+                "parse_int_list: field {i} (\"{field}\") is not a valid base-{radix} integer: {e}"
+            )
+            .into()
+        })?;
+        out.push(Dynamic::from(value));
+    }
+    Ok(out)
+}
+
+/// `to_char(value)` — a one-character string for the Unicode scalar `value`,
+/// e.g. `to_char(65)` → `"A"`. Lets a script build a string from bytes read out
+/// of a blob, which Rhai's stdlib has no direct route for (`char.to_int()`
+/// exists; nothing goes the other way).
+fn to_char(value: i64) -> Result<String, Box<EvalAltResult>> {
+    u32::try_from(value)
+        .ok()
+        .and_then(char::from_u32)
+        .map(String::from)
+        .ok_or_else(|| format!("to_char: {value} is not a valid Unicode scalar value").into())
+}
+
+/// `trimmed()` — a copy of the string with leading/trailing whitespace removed.
+/// The stock `trim()` mutates in place and returns `()`, so `let t = s.trim();`
+/// binds unit rather than the trimmed text.
+fn trimmed(s: &str) -> String {
+    s.trim().to_string()
+}
+
+/// `format_hex(value, width)` — assembly's own hex spelling: `$`-prefixed,
+/// zero-padded to `width` digits, uppercase. E.g. `format_hex(255, 2)` →
+/// `"$FF"`. `value` is masked to `width` hex digits first, so a negative or
+/// oversized value wraps the way a fixed-width dump would rather than printing
+/// more digits than asked for.
+fn format_hex(value: i64, width: i64) -> Result<String, Box<EvalAltResult>> {
+    let w = usize::try_from(width)
+        .ok()
+        .filter(|&w| (1..=16).contains(&w))
+        .ok_or_else(|| -> Box<EvalAltResult> {
+            format!("format_hex: width must be between 1 and 16, got {width}").into()
+        })?;
+    let bits = w * 4;
+    let mask = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    Ok(format!("${:0w$X}", (value as u64) & mask, w = w))
 }
 
 /// Convert a script's return value into emitted bytes.
@@ -1221,17 +1418,23 @@ mod tests {
 
     #[test]
     fn records_every_route_from_a_path_to_a_file() {
-        // The three registrations that turn a path string into a file: rhai-fs's
-        // `open_file` (via the `path` hook), and the two shorthands.
+        // The registrations that turn a path string into a file: rhai-fs's
+        // `open_file` (via the `path` hook), and the shorthands, including the
+        // two structured-data parsers (plan 013 §3 — they must record exactly
+        // like `read_blob`/`decode_png_file`, with no separate mechanism).
         let dir = TempDir::new("record-all");
         std::fs::write(dir.0.join("a.bin"), b"a").unwrap();
         std::fs::write(dir.0.join("b.bin"), b"b").unwrap();
         write_png_1x1(&dir.0.join("c.png"));
+        std::fs::write(dir.0.join("d.xml"), b"<r/>").unwrap();
+        std::fs::write(dir.0.join("e.json"), b"1").unwrap();
         let src = r#"
             fn custom(ints, texts) {
                 let x = open_file("a.bin", "r").read_blob();
                 let y = read_blob("b.bin");
                 let img = decode_png_file("c.png");
+                let doc = parse_xml_file("d.xml");
+                let j = parse_json_file("e.json");
                 x + y
             }
         "#;
@@ -1242,10 +1445,37 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names, ["a.bin", "b.bin", "c.png"]);
+        assert_eq!(names, ["a.bin", "b.bin", "c.png", "d.xml", "e.json"]);
         // Absolute, so a recorded path means the same thing from anywhere.
         assert!(out.inputs.iter().all(|p| p.is_absolute()));
         assert_eq!(out.bytes, b"ab");
+        assert!(out.cacheable);
+    }
+
+    #[test]
+    fn a_nested_parse_xml_file_call_is_recorded_too() {
+        // A document that references another file, parsed from *inside* the
+        // script rather than passed as a directive argument, is still just
+        // another call through the same choke point (plan 013 §3) — the cache
+        // sees both, not only the one the directive named directly.
+        let dir = TempDir::new("record-nested");
+        std::fs::write(dir.0.join("outer.xml"), br#"<doc ref="inner.xml"/>"#).unwrap();
+        std::fs::write(dir.0.join("inner.xml"), b"<inner/>").unwrap();
+        let src = r#"
+            fn custom(ints, texts) {
+                let outer = parse_xml_file("outer.xml");
+                let inner = parse_xml_file(outer.attr("ref"));
+                inner.name.to_blob()
+            }
+        "#;
+        let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
+        let names: Vec<String> = out
+            .inputs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, ["inner.xml", "outer.xml"]);
+        assert_eq!(out.bytes, b"inner");
         assert!(out.cacheable);
     }
 
@@ -1370,6 +1600,198 @@ mod tests {
         // existing caller keep working.
         let src = "fn custom(ints, texts) { [1, 2] }";
         assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![1, 2]);
+    }
+
+    // ---- structured data parsing (plan 013) --------------------------------
+
+    #[test]
+    fn parse_xml_walks_elements_attrs_and_text() {
+        let src = r#"
+            fn custom(ints, texts) {
+                let doc = parse_xml("<map w=\"2\"><row>1,2</row><row>3,4</row></map>");
+                let out = [parse_int(doc.attr("w"))];
+                for row in doc.find_all("row") {
+                    out += parse_int_list(row.text, ",");
+                }
+                out
+            }
+        "#;
+        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn parse_xml_file_reproduces_a_compiled_conversion_byte_for_byte() {
+        // The acceptance criterion from plan 013 §10: a script driven by
+        // `parse_xml_file` must match what an equivalent compiled conversion of
+        // the same document would produce, not merely "look plausible".
+        let dir = TempDir::new("xml-table");
+        std::fs::write(
+            dir.0.join("tiles.xml"),
+            br#"<tiles>
+                <tile id="0" bytes="10,20,30"/>
+                <tile id="1" bytes="40,50"/>
+                <tile id="2" bytes="60"/>
+            </tiles>"#,
+        )
+        .unwrap();
+
+        // The "compiled implementation" this script's output is checked against.
+        let doc = xml::parse(&std::fs::read_to_string(dir.0.join("tiles.xml")).unwrap()).unwrap();
+        let mut expected = Vec::new();
+        for tile in doc.find_all("tile") {
+            expected.push(tile.attr("id").unwrap().parse::<u8>().unwrap());
+            for field in tile.attr("bytes").unwrap().split(',') {
+                expected.push(field.trim().parse::<u8>().unwrap());
+            }
+        }
+
+        let src = r#"
+            fn custom(ints, texts) {
+                let doc = parse_xml_file("tiles.xml");
+                let out = [];
+                for tile in doc.find_all("tile") {
+                    out.push(parse_int(tile.attr("id")));
+                    out += parse_int_list(tile.attr("bytes"), ",");
+                }
+                out
+            }
+        "#;
+        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), expected);
+    }
+
+    #[test]
+    fn parse_xml_rejects_doctype_and_unknown_entities() {
+        let err = run(
+            r#"fn custom(ints, texts) { parse_xml("<!DOCTYPE x><r/>") }"#,
+            &[],
+            &[],
+            cwd(),
+        )
+        .unwrap_err();
+        assert!(err.contains("DOCTYPE"), "{err}");
+
+        let err = run(
+            r#"fn custom(ints, texts) { parse_xml("<r>&nope;</r>") }"#,
+            &[],
+            &[],
+            cwd(),
+        )
+        .unwrap_err();
+        assert!(err.contains("&nope;"), "{err}");
+    }
+
+    #[test]
+    fn parse_xml_file_error_names_the_file_and_position() {
+        let dir = TempDir::new("xml-err");
+        std::fs::write(dir.0.join("bad.xml"), b"<a><b></a>").unwrap();
+        let src = r#"fn custom(ints, texts) { parse_xml_file("bad.xml") }"#;
+        let err = run(src, &[], &[], &dir.0).unwrap_err();
+        assert!(err.contains("parse_xml_file"), "{err}");
+        assert!(err.contains("bad.xml"), "{err}");
+        // Position of the mismatched `</a>`, 1-indexed.
+        assert!(err.contains("1:7"), "{err}");
+    }
+
+    #[test]
+    fn parse_json_walks_maps_and_arrays() {
+        let src = r#"
+            fn custom(ints, texts) {
+                let doc = parse_json("{\"rows\": [[1, 2], [3, 4]], \"count\": 2}");
+                let out = [doc.count];
+                for row in doc.rows {
+                    out += row;
+                }
+                out
+            }
+        "#;
+        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn parse_json_file_reads_and_records_like_read_blob() {
+        let dir = TempDir::new("json-file");
+        std::fs::write(dir.0.join("d.json"), br#"{"v": 7}"#).unwrap();
+        let src = r#"fn custom(ints, texts) { [parse_json_file("d.json").v] }"#;
+        let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
+        assert_eq!(out.bytes, vec![7]);
+        assert_eq!(out.inputs.len(), 1);
+        assert!(out.inputs[0].ends_with("d.json"));
+    }
+
+    #[test]
+    fn parse_json_reports_a_syntax_error_with_position() {
+        let err = run(
+            r#"fn custom(ints, texts) { parse_json("{\"a\": }") }"#,
+            &[],
+            &[],
+            cwd(),
+        )
+        .unwrap_err();
+        assert!(err.contains("parse_json"), "{err}");
+        assert!(err.contains("line 1"), "{err}");
+    }
+
+    #[test]
+    fn parse_int_list_trims_skips_empties_and_honors_radix() {
+        let src = r#"
+            fn custom(ints, texts) {
+                let out = parse_int_list(" 1, 2,,3 ,", ",");
+                out += parse_int_list("ff,1A", ",", 16);
+                out
+            }
+        "#;
+        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![1, 2, 3, 255, 26]);
+    }
+
+    #[test]
+    fn parse_int_list_errors_name_the_bad_field() {
+        let src = r#"fn custom(ints, texts) { parse_int_list("1,x,3", ",") }"#;
+        let err = run(src, &[], &[], cwd()).unwrap_err();
+        assert!(err.contains("field 1") && err.contains('x'), "{err}");
+    }
+
+    #[test]
+    fn to_char_trimmed_and_format_hex_round_out_the_string_gaps() {
+        let src = r#"
+            fn custom(ints, texts) {
+                let s = to_char(72) + to_char(73);       // "HI"
+                let t = "  padded  ".trimmed();          // non-mutating trim
+                let h = format_hex(255, 2) + format_hex(-1, 2) + format_hex(0x1A, 4);
+                [s.len(), t.len(), h.len()]
+            }
+        "#;
+        // "HI" (2) + "padded" (6) + "$FF$FF$001A" (11)
+        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 6, 11]);
+    }
+
+    #[test]
+    fn trimmed_does_not_mutate_the_original_string() {
+        let src = r#"
+            fn custom(ints, texts) {
+                let s = "  hi  ";
+                let t = s.trimmed();
+                [s.len(), t.len()]
+            }
+        "#;
+        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![6, 2]);
+    }
+
+    #[test]
+    fn stock_parse_int_radix_and_blob_as_string_already_work() {
+        // plan 013 §4: these were reported missing against an older Rhai
+        // release; the version this crate depends on already has them, so this
+        // is a regression test for "still true", not new host code.
+        let src = r#"
+            fn custom(ints, texts) {
+                let n = parse_int("1A", 16);
+                let s = texts[0].to_blob().as_string();
+                [n, s.len()]
+            }
+        "#;
+        assert_eq!(
+            run(src, &[], &["hi".to_string()], cwd()).unwrap(),
+            vec![26, 2]
+        );
     }
 
     /// Write a minimal 1×1 grayscale PNG that `decode_png` accepts.
