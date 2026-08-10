@@ -10,7 +10,7 @@
 // lexer (see plans/003-ui-syntax-highlighting.md).
 
 const { workspace, window, commands, Uri } = require("vscode");
-const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+const { LanguageClient } = require("vscode-languageclient/node");
 
 /** Where users are sent when the executable can't be found. */
 const INSTALL_URL = "https://kevinselwyn.github.io/nessemble-rs/docs/installation/";
@@ -32,9 +32,12 @@ async function start() {
   const command = config().get("serverPath", "nessemble");
   const args = config().get("serverArgs", ["lsp"]);
 
+  // No `transport` field: stdio is already the default for an `Executable`,
+  // and naming it explicitly is *not* a no-op — the client appends `--stdio`
+  // to the arguments, which `nessemble lsp` rejects as an unexpected argument.
   const serverOptions = {
-    run: { command, args, transport: TransportKind.stdio },
-    debug: { command, args, transport: TransportKind.stdio },
+    run: { command, args },
+    debug: { command, args },
   };
 
   const clientOptions = {
