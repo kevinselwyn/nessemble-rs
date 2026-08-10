@@ -28,6 +28,7 @@ mod usage;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use nessemble_core::{
@@ -96,6 +97,15 @@ struct Cli {
     /// do not read or write the custom pseudo-instruction cache
     #[arg(long)]
     no_cache: bool,
+
+    /// cap each pseudo-op script's Rhai operation count (0 = unlimited;
+    /// default 10,000,000)
+    #[arg(long, value_name = "n")]
+    max_operations: Option<u64>,
+
+    /// report each pseudo-op directive's call count, cache hits, and wall time
+    #[arg(long)]
+    time_scripts: bool,
 
     /// display program version
     #[arg(short = 'v', long)]
@@ -257,6 +267,9 @@ fn assemble_mode(cli: &Cli) -> u8 {
         Err(code) => return code,
     }
 
+    let timings: Option<custom::Timings> =
+        cli.time_scripts.then(|| Arc::new(Mutex::new(Vec::new())));
+
     let input: Option<PathBuf> = cli.infile.as_deref().map(PathBuf::from);
     let result = match &input {
         Some(path) => {
@@ -264,7 +277,13 @@ fn assemble_mode(cli: &Cli) -> u8 {
             assemble_file_with(
                 path,
                 &options,
-                custom::build_resolver_prewarmed(cli.pseudo.as_deref(), !cli.no_cache, &candidates),
+                custom::build_resolver_prewarmed(
+                    cli.pseudo.as_deref(),
+                    !cli.no_cache,
+                    cli.max_operations,
+                    &candidates,
+                    timings.clone(),
+                ),
             )
         }
         None => match read_stdin() {
@@ -276,7 +295,9 @@ fn assemble_mode(cli: &Cli) -> u8 {
                     custom::build_resolver_prewarmed(
                         cli.pseudo.as_deref(),
                         !cli.no_cache,
+                        cli.max_operations,
                         &candidates,
+                        timings.clone(),
                     ),
                 )
             }
@@ -299,6 +320,9 @@ fn assemble_mode(cli: &Cli) -> u8 {
                         message = w.message
                     )
                 );
+            }
+            if let Some(timings) = &timings {
+                print_script_timings(timings);
             }
             if cli.check {
                 println!("{}", t!("no-errors"));
@@ -368,5 +392,64 @@ fn write_output(output: &str, bytes: &[u8]) -> std::io::Result<()> {
         std::io::stdout().write_all(bytes)
     } else {
         std::fs::write(output, bytes)
+    }
+}
+
+/// `--time-scripts`: aggregate the per-call entries by directive name and print
+/// call count, cache hits/misses, and total wall time, busiest directive first.
+/// Written to stderr — stdout carries the assembled ROM when `-o` is omitted.
+fn print_script_timings(timings: &custom::Timings) {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    struct Agg {
+        calls: u32,
+        hits: u32,
+        total: Duration,
+    }
+
+    let timings = timings.lock().unwrap();
+    if timings.is_empty() {
+        return;
+    }
+
+    let mut by_name: BTreeMap<&str, Agg> = BTreeMap::new();
+    for entry in timings.iter() {
+        let agg = by_name.entry(&entry.name).or_insert(Agg {
+            calls: 0,
+            hits: 0,
+            total: Duration::ZERO,
+        });
+        agg.calls += 1;
+        agg.hits += u32::from(entry.cache_hit);
+        agg.total += entry.duration;
+    }
+
+    let mut rows: Vec<(&str, &Agg)> = by_name.iter().map(|(n, a)| (*n, a)).collect();
+    rows.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+
+    eprintln!("{}", t!("script-timing-header"));
+    for (name, agg) in rows {
+        eprintln!(
+            "{}",
+            t!(
+                "script-timing-row",
+                name = format!(".{name}"),
+                calls = agg.calls,
+                hits = agg.hits,
+                misses = agg.calls - agg.hits,
+                total = fmt_duration(agg.total)
+            )
+        );
+    }
+}
+
+/// Render a [`std::time::Duration`] as milliseconds, or seconds past 1000ms.
+fn fmt_duration(d: std::time::Duration) -> String {
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms >= 1000.0 {
+        format!("{:.2}s", ms / 1000.0)
+    } else {
+        format!("{ms:.2}ms")
     }
 }

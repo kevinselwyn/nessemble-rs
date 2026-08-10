@@ -1,7 +1,9 @@
 # nessemble-rs: A Plan for Structured Data Parsing in Custom Pseudo-Ops
 
-> Status: **Phases 0–2 shipped ([§12](#12-phased-plan), [§13.2](#132-phase-1),
-> [§13.3](#133-phase-2)); Phases 3–4 designed, not yet built.** This document gives custom pseudo-op scripts native, host-side parsers
+> Status: **All phases shipped** ([§12](#12-phased-plan) — Phase 0
+> [§13.1](#131-phase-0), Phase 1 [§13.2](#132-phase-1), Phase 2
+> [§13.3](#133-phase-2), Phase 3 [§13.4](#134-phase-3), Phase 4
+> [§13.5](#135-phase-4)). This document gives custom pseudo-op scripts native, host-side parsers
 > for structured text — XML first, JSON alongside it ([§2](#2-native-document-parsing))
 > — on the same "host does the byte-level work, the script does the logic"
 > contract [`decode_png_file`](../crates/nessemble-script/src/lib.rs) already
@@ -10,12 +12,11 @@
 > function that opens a file through the existing `path`/`read_blob` registration
 > choke point ([§3](#3-cache-correctness-is-inherited-not-rebuilt)) is a tracked
 > cache dependency for free. It also closes the small set of string/blob gaps
-> found while prototyping ([§4](#4-string-and-blob-helpers)) and scopes the
-> larger, riskier parts of the originating request — assembly-source-returning
-> directives, parallel script execution, a settable operation limit, and a
-> per-directive timing report — as designed-but-deferred phases
-> ([§6](#6-deferred-source-returning-directives), [§7](#7-deferred-parallel-script-execution),
-> [§8](#8-deferred-operation-limits-and-timing)).
+> found while prototyping ([§4](#4-string-and-blob-helpers)) and, across later
+> phases, adds assembly-source-returning directives, parallel script execution,
+> a settable operation limit, and a per-directive timing report
+> ([§6](#6-source-returning-directives-shipped-phase-2-133), [§7](#7-parallel-script-execution-shipped-phase-3-134),
+> [§8](#8-operation-limits-and-timing-shipped-phase-4-135)).
 >
 > The through-line, inherited from the request this plan answers: **the host does
 > byte- and character-level work; the script does the logic.** Rhai is a
@@ -319,7 +320,7 @@ that shipped — a scan-ahead prewarm restricted to statically-safe arguments (t
 first of the two options sketched above), not a general scan-ahead prepass, and
 a purity check the sketch above didn't anticipate needing.
 
-## 8. Deferred: operation limits and timing
+## 8. Operation limits and timing. **Shipped (Phase 4, §13.5).**
 
 Two smaller, independent asks from the request, both left out of Phase 0 for the
 same reason: they are CLI/engine-configuration surface, not parsing, and bundling
@@ -341,8 +342,11 @@ review, not easier.
   motivating example for the feature is this plan's own §2.1 table, which the
   request's author had to reconstruct by hand-timing a shell wrapper.
 
-Both are natural **Phase 4** work (§8 below) once §§2–5 give scripts something
-substantial to time and something worth bounding the operation count of.
+Built as Phase 4, once Phase 3 shipped; see [§13.5](#135-phase-4) for what
+shipped — the operation limit landed close to the sketch above (a `RunOptions`
+struct, since by then it was the *second* knob wanting a `_with_x`-suffixed
+entry point, not the first); `--time-scripts` counts prewarm's concurrent calls
+too, which the sketch above did not anticipate needing to say anything about.
 
 ## 9. Non-goals
 
@@ -487,10 +491,10 @@ A concurrency-safe cache (`nessemble-cli/src/cache.rs`'s `get`/`put`), and a
 prewarm step that runs independent invocations concurrently ahead of the
 sequential emission passes. See [§13.4](#134-phase-3) for what shipped.
 
-### Phase 4 — operation limits and `--time-scripts` (deferred, §8)
+### Phase 4 — operation limits and `--time-scripts` (§8). **Shipped.**
 
 A settable `max_operations`, documented; per-directive timing aggregated and
-reported via a new CLI flag.
+reported via a new CLI flag. See [§13.5](#135-phase-4) for what shipped.
 
 ## 13. As built
 
@@ -793,3 +797,72 @@ reported via a new CLI flag.
   order with every entry cached, a symbol-dependent directive falling back to
   the sequential path untouched, `--no-cache` skipping prewarming cleanly,
   and the impure-script-runs-exactly-once regression above.
+
+### 13.5 Phase 4
+
+- **`RunOptions`, not a second `_with_x`-suffixed pair of entry points.** §8
+  sketched "a new `Options`-shaped parameter threaded through
+  `run`/`run_with_inputs`/the `CustomResolver` chain, mirroring how
+  `Options::project_root` was added in plan 012" — plan 012's own shape was
+  one additional function per knob (`run` → `run_with_root`). `max_operations`
+  would have made that `run_with_root_and_max_operations`, so the second knob
+  is what actually forced the refactor: `run`/`run_with_root` and
+  `run_with_inputs`/`run_with_inputs_and_root` became thin wrappers over a new
+  `run_with_options`/`run_with_inputs_and_options` pair taking a `RunOptions {
+  root, max_operations }` struct, with every existing call site (including
+  `nessemble-wasm`'s, which only ever calls plain `run`) untouched.
+- **`max_operations: Option<u64>` reuses Rhai's own unlimited-at-`0`
+  convention** rather than inventing a second one: `None` keeps the
+  10,000,000-operation built-in default, `Some(0)` is unlimited (passed
+  straight through to `Engine::set_max_operations`, which already treats `0`
+  that way), `Some(n)` caps it. The CLI flag (`--max-operations <n>`) needed no
+  translation layer as a result — `clap`'s `Option<u64>` parse output is the
+  option's value, verbatim.
+- **`coverage::run_with_coverage` also grew a `RunOptions` parameter, not a
+  ninth positional `max_operations` argument** — it was already at seven
+  (`clippy::too_many_arguments`'s default limit) before this phase, and an
+  eighth tripped the lint immediately. Taking `&RunOptions` instead of
+  `root: Option<&Path>` dropped it back to seven while giving the coverage
+  path the same cap every other entry point now has.
+- **Timing lives in `nessemble-cli`, not `nessemble-script`, exactly where §8
+  placed it** (`Resolver::resolve`, which already sees a cache hit/miss and a
+  directive's identity). The collector is `Arc<Mutex<Vec<ScriptTiming>>>`
+  (`custom::Timings`), not the `Rc<RefCell<_>>` the rest of the crate
+  otherwise favors, because `Resolver::prewarm` (Phase 3, §13.4) calls
+  `resolve` from several `rayon` worker threads at once — the same reasoning
+  that kept `SharedCoverage` out of the parallel path entirely now requires
+  the *opposite* choice for timing, since timing this phase deliberately
+  wants those concurrent calls counted, not excluded.
+- **A prewarmed call is a timed call.** `--time-scripts`'s report is meant to
+  answer "where did this build's wall time go", and a prewarm-warmed cache
+  entry is real work the build actually did, just moved earlier — leaving it
+  out of the total would make the report cheaper-looking than the build
+  actually was. The consequence, visible in the CLI regression test: a
+  directive called at three source lines with two distinct argument sets logs
+  five entries, not three — two cache-miss prewarm runs plus three cache-hit
+  calls from the sequential passes (`custom_memo`, Phase 0, still collapses
+  each *call site* to one resolver call per pass-pair; prewarm's calls are
+  additional, not a replacement for any of those three).
+- **`nessemble coverage`'s resolver also takes `--max-operations`, but not
+  `--time-scripts`.** The operation cap is cheap to thread everywhere a
+  `Resolver` is built and there is no reason coverage runs should be exempt
+  from a runaway-script guard the assemble path has; timing was left assemble-only
+  since §8's own motivating example (the §2.1 hand-timed-shell-wrapper table)
+  is about a normal build, and coverage's resolver bypasses the cache
+  entirely already (`build_resolver_with_coverage`'s doc comment), making a
+  hit/miss breakdown less meaningful there.
+- **The report prints to stderr, unconditionally on success, before the
+  `--check` early return** — never stdout, since assemble mode's default
+  output (`-o` omitted) is the assembled ROM on stdout, and a text report
+  interleaved with binary output would corrupt it. It is skipped entirely (no
+  empty header) when `--time-scripts` was not given, so a build that never
+  asks pays not even a locked-mutex check per resolve — the field is `Option`
+  and the `Instant::now()` call is gated on it being `Some`.
+- Tests: `nessemble-script/src/lib.rs` covers `RunOptions.max_operations`
+  directly — a cap low enough to abort a loop, one high enough to let it
+  finish, and `None` still honoring the 10,000,000 default.
+  `nessemble-cli/tests/cli.rs` covers the CLI flag end-to-end (a script that
+  exceeds a small `--max-operations` cap fails the build; a larger cap lets
+  the same script finish) and `--time-scripts`'s report (call/hit/miss counts
+  match the prewarm-plus-sequential arithmetic above; the header is absent
+  without the flag).

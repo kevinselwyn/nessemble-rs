@@ -91,6 +91,8 @@ scripts-installed = Installed scripts to { $path }
 cache-info = Cache: { $path }
 cache-entries = { $count } entries, { $bytes } bytes
 cache-cleared = Cleared { $count } entries, { $bytes } bytes
+script-timing-header = Script timing:
+script-timing-row = { $name }: { $calls } calls, { $hits } hits, { $misses } misses, { $total } total
 
 ## Miscellaneous
 

@@ -651,6 +651,23 @@ would emit a stale ROM.
 `nessemble coverage --scripts` also bypasses the cache, since a cached result
 executes no lines and would report a covered script as uncovered.
 
+## Runaway-script guard and timing
+
+Every script runs on a Rhai engine with an operation-count guard, so a bug
+that loops forever fails the build instead of hanging it. The default is
+10,000,000 operations — generous for real work, small enough to fail fast on
+an accidental infinite loop.
+[`--max-operations`](usage.md#--max-operations-n) overrides it for a build
+that legitimately needs more (or wants a stricter cap of its own); `0` means
+unlimited, matching Rhai's own convention for that value.
+
+[`--time-scripts`](usage.md#--time-scripts) reports, per directive, how many
+times it was called, how many of those were cache hits versus real runs, and
+the total wall time spent in it — printed to stderr after assembly, busiest
+directive first. Prewarmed calls ([above](#prewarming-runs-independent-scripts-concurrently))
+count too, so the total reflects the real cost of a build, not just its
+sequential passes.
+
 ## Bundled scripts
 
 Running `nessemble scripts` installs the bundled scripts. The `ease` script

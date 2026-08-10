@@ -1221,7 +1221,19 @@ impl CacheProject {
 
     /// Assemble to stdout, returning the emitted bytes.
     fn assemble(&self, extra: &[&str]) -> Vec<u8> {
-        let out = bin()
+        let out = self.run(extra);
+        assert!(
+            out.status.success(),
+            "assemble failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    /// Assemble, returning the full process output regardless of exit status —
+    /// for tests that need to inspect stderr or a deliberate failure.
+    fn run(&self, extra: &[&str]) -> std::process::Output {
+        bin()
             .arg(self.root.join("main.asm"))
             .arg("--pseudo")
             .arg(self.root.join("pseudo.txt"))
@@ -1229,13 +1241,7 @@ impl CacheProject {
             .args(extra)
             .env("HOME", self.root.join("home"))
             .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "assemble failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out.stdout
+            .unwrap()
     }
 
     /// The number of cached entries `nessemble cache info` reports.
@@ -1516,4 +1522,98 @@ fn a_file_writing_script_with_literal_arguments_runs_exactly_once() {
         "the script must have run exactly once"
     );
     assert_eq!(p.entry_count(), 0, "an uncacheable result is never stored");
+}
+
+// ---- operation limit and timing (plan 013, Phase 4) ------------------------
+
+#[test]
+fn max_operations_aborts_a_script_that_exceeds_the_cap() {
+    // A cheap, finite loop that easily exceeds a small cap but would finish
+    // instantly under the built-in default — proving `--max-operations` is
+    // actually reaching the engine, not just accepted and ignored.
+    let p = CacheProject::new(
+        "max-ops-abort",
+        ".org $C000\n.gen 1\n",
+        r"
+            fn custom(ints, texts) {
+                let x = 0;
+                for i in range(0, 100_000) {
+                    x += 1;
+                }
+                [x]
+            }
+        ",
+    );
+    let out = p.run(&["--no-cache", "--max-operations", "50"]);
+    assert!(
+        !out.status.success(),
+        "a 50-operation cap must not let a 100,000-iteration loop finish"
+    );
+}
+
+#[test]
+fn max_operations_high_enough_still_assembles() {
+    // The same script comfortably finishes under a cap that is actually large
+    // enough, confirming the flag caps rather than replaces the limit.
+    let p = CacheProject::new(
+        "max-ops-allow",
+        ".org $C000\n.gen 1\n",
+        r"
+            fn custom(ints, texts) {
+                let x = 0;
+                for i in range(0, 100) {
+                    x += 1;
+                }
+                [x]
+            }
+        ",
+    );
+    assert_eq!(
+        p.assemble(&["--no-cache", "--max-operations", "100000"]),
+        vec![100]
+    );
+}
+
+#[test]
+fn time_scripts_reports_calls_and_cache_hits_per_directive() {
+    let p = CacheProject::new(
+        "time-scripts",
+        ".org $C000\n.gen 1\n.gen 1\n.gen 2\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+    let out = p.run(&["--time-scripts"]);
+    assert!(
+        out.status.success(),
+        "assemble failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("Script timing:"),
+        "missing report header: {stderr}"
+    );
+    // Two distinct argument sets (`.gen 1`, `.gen 2`) are prewarmed as cache
+    // misses (2 calls), then all three call sites — `.gen 1` twice, `.gen 2`
+    // once — resolve again through the sequential passes, now as cache hits
+    // (3 more calls): 5 calls, 3 hits, 2 misses.
+    let row = stderr
+        .lines()
+        .find(|l| l.contains(".gen:"))
+        .unwrap_or_else(|| panic!("no `.gen` row in: {stderr}"));
+    assert!(row.contains("5 calls"), "expected 5 calls in: {row}");
+    assert!(row.contains("3 hits"), "expected 3 hits in: {row}");
+    assert!(row.contains("2 misses"), "expected 2 misses in: {row}");
+}
+
+#[test]
+fn without_time_scripts_no_report_is_printed() {
+    let p = CacheProject::new(
+        "time-scripts-off",
+        ".org $C000\n.gen 1\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+    let out = p.run(&[]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains("Script timing:"));
 }

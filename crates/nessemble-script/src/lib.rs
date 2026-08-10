@@ -105,7 +105,7 @@ pub fn run(
     texts: &[String],
     base_dir: &Path,
 ) -> Result<CustomOutput, String> {
-    run_impl(source, ints, texts, base_dir, None, None, false).map(|(output, _)| output)
+    run_with_options(source, ints, texts, base_dir, &RunOptions::default())
 }
 
 /// Like [`run`], but a `@/`-prefixed path the script resolves itself (via
@@ -122,7 +122,44 @@ pub fn run_with_root(
     base_dir: &Path,
     root: Option<&Path>,
 ) -> Result<CustomOutput, String> {
-    run_impl(source, ints, texts, base_dir, root, None, false).map(|(output, _)| output)
+    run_with_options(
+        source,
+        ints,
+        texts,
+        base_dir,
+        &RunOptions {
+            root: root.map(Path::to_path_buf),
+            ..RunOptions::default()
+        },
+    )
+}
+
+/// The knobs beyond a script's own arguments and base directory: gathered
+/// into one struct, rather than one more `_with_x`-suffixed entry point per
+/// knob, once there was a second one to add alongside `root`
+/// (`plans/013-structured-data-parsing.md` §8). `Default` matches what
+/// [`run`]/[`run_with_inputs`] already do: no project root, the engine's
+/// built-in operation limit.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// See [`run_with_root`].
+    pub root: Option<PathBuf>,
+    /// Overrides the engine's runaway-script guard
+    /// (`Engine::set_max_operations`, hardcoded to 10,000,000 otherwise).
+    /// `None` keeps the built-in default; `Some(0)` means unlimited, matching
+    /// `set_max_operations`'s own convention for the value `0`.
+    pub max_operations: Option<u64>,
+}
+
+/// Like [`run`]/[`run_with_root`], with every knob [`RunOptions`] carries.
+pub fn run_with_options(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    options: &RunOptions,
+) -> Result<CustomOutput, String> {
+    run_impl(source, ints, texts, base_dir, options, None, false).map(|(output, _)| output)
 }
 
 /// Whether `source` is safe to run more than once for the same arguments —
@@ -192,8 +229,36 @@ pub fn run_with_inputs_and_root(
     base_dir: &Path,
     root: Option<&Path>,
 ) -> Result<RunOutcome, String> {
+    run_with_inputs_and_options(
+        source,
+        ints,
+        texts,
+        base_dir,
+        &RunOptions {
+            root: root.map(Path::to_path_buf),
+            ..RunOptions::default()
+        },
+    )
+}
+
+/// Like [`run_with_inputs`], with every knob [`RunOptions`] carries.
+pub fn run_with_inputs_and_options(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    options: &RunOptions,
+) -> Result<RunOutcome, String> {
     let recorder = Recorder::default();
-    let (output, impurity) = run_impl(source, ints, texts, base_dir, root, Some(&recorder), true)?;
+    let (output, impurity) = run_impl(
+        source,
+        ints,
+        texts,
+        base_dir,
+        options,
+        Some(&recorder),
+        true,
+    )?;
     let inputs: Vec<PathBuf> = recorder.borrow().iter().cloned().collect();
     let cacheable = impurity.is_none() && matches!(output, CustomOutput::Bytes(_));
     Ok(RunOutcome {
@@ -211,11 +276,16 @@ fn run_impl(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
-    root: Option<&Path>,
+    options: &RunOptions,
     recorder: Option<&Recorder>,
     scan: bool,
 ) -> Result<(CustomOutput, Option<purity::Impurity>), String> {
-    let engine = engine_recording(base_dir, root, recorder);
+    let engine = engine_recording(
+        base_dir,
+        options.root.as_deref(),
+        options.max_operations,
+        recorder,
+    );
     let ast = engine.compile(source).map_err(|e| e.to_string())?;
     let impurity = if scan { purity::impurity(&ast) } else { None };
 
@@ -240,8 +310,8 @@ fn run_impl(
 /// **filesystem access means scripts are no longer sandboxed** — a directive can
 /// touch any path the assembler process can. Only run pseudo-op scripts you
 /// trust, the same as any build tooling.
-fn engine(base_dir: &Path, root: Option<&Path>) -> Engine {
-    engine_recording(base_dir, root, None)
+fn engine(base_dir: &Path, root: Option<&Path>, max_operations: Option<u64>) -> Engine {
+    engine_recording(base_dir, root, max_operations, None)
 }
 
 /// [`engine`], optionally recording every path the script resolves through the
@@ -261,9 +331,16 @@ fn engine(base_dir: &Path, root: Option<&Path>) -> Engine {
 /// `root` is the project root a `@/`-prefixed path resolves against
 /// (`plans/013-structured-data-parsing.md` §11.1); `None` where none could be
 /// determined, in which case `@/` in a script-resolved path is an error.
-fn engine_recording(base_dir: &Path, root: Option<&Path>, recorder: Option<&Recorder>) -> Engine {
+/// `max_operations` overrides the runaway-script guard below; `None` keeps
+/// the built-in default (`plans/013-structured-data-parsing.md` §8).
+fn engine_recording(
+    base_dir: &Path,
+    root: Option<&Path>,
+    max_operations: Option<u64>,
+    recorder: Option<&Recorder>,
+) -> Engine {
     let mut engine = Engine::new();
-    engine.set_max_operations(10_000_000);
+    engine.set_max_operations(max_operations.unwrap_or(10_000_000));
     engine.set_max_call_levels(64);
     // Leave the string/array size limits unbounded (0): rhai-fs's `read_string`
     // / `read_blob` (with no explicit length) fill a buffer sized to these
@@ -1853,6 +1930,50 @@ mod tests {
         assert_eq!(
             run(src, &[], &[], cwd()).unwrap(),
             CustomOutput::Bytes(vec![1, 2])
+        );
+    }
+
+    // ---- operation limit (plan 013, Phase 4) -------------------------------
+
+    #[test]
+    fn max_operations_aborts_a_script_that_exceeds_the_cap() {
+        let src = r"
+            fn custom(ints, texts) {
+                let x = 0;
+                for i in range(0, 100_000) {
+                    x += 1;
+                }
+                [x]
+            }
+        ";
+        let options = RunOptions {
+            max_operations: Some(50),
+            ..RunOptions::default()
+        };
+        assert!(run_with_options(src, &[], &[], cwd(), &options).is_err());
+    }
+
+    #[test]
+    fn max_operations_high_enough_still_lets_the_script_finish() {
+        let src = "fn custom(ints, texts) { let x = 0; for i in range(0, 100) { x += 1; } [x] }";
+        let options = RunOptions {
+            max_operations: Some(1_000_000),
+            ..RunOptions::default()
+        };
+        assert_eq!(
+            run_with_options(src, &[], &[], cwd(), &options).unwrap(),
+            CustomOutput::Bytes(vec![100])
+        );
+    }
+
+    #[test]
+    fn max_operations_none_keeps_the_built_in_default() {
+        // A script well within the hardcoded 10,000,000-operation default
+        // still runs when no cap is given, matching `run`'s own behavior.
+        let src = "fn custom(ints, texts) { let x = 0; for i in range(0, 200) { x += 1; } [x] }";
+        assert_eq!(
+            run_with_options(src, &[], &[], cwd(), &RunOptions::default()).unwrap(),
+            CustomOutput::Bytes(vec![200])
         );
     }
 
