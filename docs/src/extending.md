@@ -339,6 +339,102 @@ accepts an array:
 let shades = nes_shade(img.tile(0, 0, 8, 8));
 ```
 
+### Parsing structured data
+
+Assets aren't always images. A map editor, a tracker, or a spreadsheet usually
+saves XML or JSON, and `parse_xml`/`parse_xml_file` and `parse_json`/
+`parse_json_file` read them the same way `decode_png`/`decode_png_file` reads a
+PNG: the host does the parsing, and the script only ever walks an
+already-parsed document. A Rhai script tokenizing a document by hand is roughly
+10× slower than an entire out-of-process conversion in a compiled language —
+these functions exist so no script has to.
+
+#### XML
+
+`parse_xml_file(path)` (and `parse_xml(source)`, for a string already in hand)
+returns the root element as a node with:
+
+- `.name` — the element name.
+- `.attrs` — a map of attribute name → string value (sorted by name, not
+  document order — see the note below).
+- `.attr(name)` — an attribute's value, or `()` if it isn't set. The common
+  case, and unaffected by the `.attrs` ordering note.
+- `.children` — an array of child **elements** (not text).
+- `.text` — the element's own text content, entities decoded, or `()` if it has
+  none. Whitespace used purely for indentation between child elements is not
+  filtered out — call `.trimmed()` on it if you only want meaningful text.
+- `.find(name)` — the first child element with that name, or `()`.
+- `.find_all(name)` — every child element with that name, as an array.
+
+```rust,ignore
+fn custom(ints, texts) {
+    let doc = parse_xml_file(texts[0]);
+    let out = [];
+    for row in doc.find_all("row") {
+        out += parse_int_list(row.attr("data"), ",");
+    }
+    out
+}
+```
+
+Scope is deliberately narrow: elements, attributes, text, and entities (the
+five predefined ones, plus numeric character references like `&#10;`/`&#x41;`).
+No namespaces, no XPath, no schema validation — and **no DTD processing**: a
+`<!DOCTYPE` is a parse error, not something silently skipped or expanded, since
+resolving external entities on a script's behalf is exactly the shape of an XXE
+vulnerability. Errors name the file and the line/column where parsing failed.
+
+> `.attrs` is a plain Rhai map, which is always key-sorted — Rhai has no
+> insertion-ordered map type. `.attr(name)` (a direct lookup) is unaffected;
+> only a script that iterates `.attrs` as a whole to reproduce document order
+> would notice.
+
+#### JSON
+
+`parse_json_file(path)` / `parse_json(source)` convert a document straight into
+native Rhai values: an object becomes a map, an array becomes an array, and
+scalars become the matching `int`/`float`/string/bool/`()`.
+
+```rust,ignore
+fn custom(ints, texts) {
+    let doc = parse_json_file(texts[0]);
+    let out = [];
+    for tile in doc.tiles {
+        out.push(tile.id);
+    }
+    out
+}
+```
+
+A syntax error's message already names its line and column.
+
+#### Bulk numeric decoding
+
+Structured formats store grids and arrays as delimited text, often thousands of
+values at a time. `parse_int_list(text, delim)` (and the three-argument form,
+`parse_int_list(text, delim, radix)`) decode a whole column in one native call
+instead of one interpreter iteration per value: split on the literal
+delimiter, trim whitespace, skip empty fields, and parse the rest.
+
+```rust,ignore
+let values = parse_int_list("1, 2,,3 ,", ",");   // [1, 2, 3]
+let bytes = parse_int_list("ff,1a", ",", 16);    // [255, 26]
+```
+
+#### String and hex helpers
+
+- `to_char(value)` — a one-character string for the Unicode scalar `value`, for
+  building a string out of bytes read from a blob (`s += to_char(b);`).
+- `"  text  ".trimmed()` — a trimmed **copy** of a string. The stock `trim()`
+  mutates in place and returns `()`, so `let t = s.trim();` binds unit; reach
+  for `trimmed()` when you want the result as a value.
+- `format_hex(value, width)` — assembly's own hex spelling: `$`-prefixed,
+  zero-padded. `format_hex(255, 2)` is `"$FF"`, `format_hex(0x1A, 4)` is
+  `"$001A"`.
+- `parse_int(str, radix)` (the two-argument form) and `blob.as_string()`
+  already exist in Rhai's own standard library and need nothing from this
+  crate — reach for them directly.
+
 ### Random numbers
 
 Scripts can draw random values through the
@@ -392,9 +488,10 @@ directive emitted, in two layers:
   reused while nothing the script depended on has changed.
 
 Nothing needs configuring, and scripts need no changes: the host **records every
-file a script opens** — through `open_file`, `read_blob`, or `decode_png_file` —
-and remembers those as the run's inputs. A script that computes a filename, or
-reads a palette nobody passed it, is covered.
+file a script opens** — through `open_file`, `read_blob`, `decode_png_file`,
+`parse_xml_file`, or `parse_json_file` — and remembers those as the run's
+inputs. A script that computes a filename, reads a palette nobody passed it, or
+follows a reference from inside one parsed document to another, is covered.
 
 An entry is reused only when all of the following still hold:
 
