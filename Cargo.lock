@@ -655,6 +655,7 @@ dependencies = [
  "rhai",
  "rhai-fs",
  "rhai-rand",
+ "serde_json",
 ]
 
 [[package]]
