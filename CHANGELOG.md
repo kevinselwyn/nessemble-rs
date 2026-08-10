@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.23.1 - 2026-08-10
+
+### Patch changes
+
+- The VS Code extension no longer fails to start with `unexpected argument '--stdio' found`: it left the language client's transport at an explicit `stdio`, which appends a `--stdio` flag that `nessemble lsp` does not accept.
+
 ## 2.23.0 - 2026-08-04
 
 ### Minor changes
