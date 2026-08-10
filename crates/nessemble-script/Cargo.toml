@@ -14,6 +14,10 @@ nessemble-media.workspace = true
 rhai = { version = "1", default-features = false, features = ["std", "internals"] }
 rhai-fs = { version = "0.1.5", default-features = false, optional = true }
 rhai-rand = { version = "0.1.6", default-features = false, features = ["float", "array"], optional = true }
+# `parse_json`/`parse_json_file` (see `json`). Already a workspace dependency
+# (`nessemble-cli`, `nessemble-core`'s dev-dependencies), so this adds nothing
+# new the workspace does not already build.
+serde_json.workspace = true
 
 [features]
 default = ["fs", "rand"]
