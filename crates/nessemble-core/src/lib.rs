@@ -19,7 +19,7 @@ mod paths;
 mod preprocess;
 pub mod tooling;
 
-pub use assemble::{crc_32, CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
+pub use assemble::{crc_32, CustomOutput, CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
 pub use paths::{
     find_project_root, project_root, resolve_path_arg, PathArgError, PROJECT_MARKERS,
     PROJECT_ROOT_PREFIX,
@@ -539,7 +539,7 @@ fn is_directive_name(name: &str) -> bool {
 pub fn lenient_custom_resolver(known: std::collections::HashSet<String>) -> CustomResolver {
     Box::new(move |name, _ints, _texts, _base, _root| {
         if known.contains(name) {
-            Ok(Vec::new())
+            Ok(CustomOutput::Bytes(Vec::new()))
         } else {
             Err(nessemble_i18n::t!(
                 "unknown-custom",

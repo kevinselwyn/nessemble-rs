@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use nessemble_core::{parse_pseudo_mapping, CustomResolver};
+use nessemble_core::{parse_pseudo_mapping, CustomOutput, CustomResolver};
 use nessemble_i18n::t;
 
 use crate::{cache, home};
@@ -57,17 +57,19 @@ impl Resolver {
         texts: &[String],
         base_dir: &Path,
         root: Option<&Path>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<CustomOutput, String> {
         let (path, _from_pseudo) = self.locate(name, base_dir)?;
 
         // A cache hit answers without reading, compiling, or running the script.
+        // Only ever a `CustomOutput::Bytes` entry lands here — `emit_source`
+        // output is never written to the cache in the first place (below).
         let key = self
             .cache
             .as_ref()
             .and_then(|_| cache::Key::new(name, ints, texts, base_dir, root, &path));
         if let (Some(cache), Some(key)) = (self.cache.as_ref(), key.as_ref()) {
             if let Some(bytes) = cache.get(key) {
-                return Ok(bytes);
+                return Ok(CustomOutput::Bytes(bytes));
             }
         }
 
@@ -80,10 +82,10 @@ impl Resolver {
             return run_script(&source, ints, texts, base_dir, root);
         };
         let outcome = run_with_inputs(&source, ints, texts, base_dir, root)?;
-        if outcome.cacheable {
-            cache.put(&key, &outcome.inputs, &outcome.bytes);
+        if let (true, CustomOutput::Bytes(bytes)) = (outcome.cacheable, &outcome.output) {
+            cache.put(&key, &outcome.inputs, bytes);
         }
-        Ok(outcome.bytes)
+        Ok(outcome.output)
     }
 }
 
@@ -166,7 +168,7 @@ fn run_script(
     texts: &[String],
     base_dir: &Path,
     root: Option<&Path>,
-) -> Result<Vec<u8>, String> {
+) -> Result<CustomOutput, String> {
     nessemble_script::run_with_root(source, ints, texts, base_dir, root)
 }
 
@@ -199,7 +201,7 @@ fn run_with_inputs(
 /// Stand-in for [`nessemble_script::RunOutcome`] when scripting is compiled out.
 #[cfg(not(feature = "scripting"))]
 pub struct Outcome {
-    pub bytes: Vec<u8>,
+    pub output: CustomOutput,
     pub inputs: Vec<PathBuf>,
     pub cacheable: bool,
 }
@@ -211,6 +213,6 @@ fn run_script(
     _texts: &[String],
     _base_dir: &Path,
     _root: Option<&Path>,
-) -> Result<Vec<u8>, String> {
+) -> Result<CustomOutput, String> {
     Err("scripting is disabled".to_string())
 }

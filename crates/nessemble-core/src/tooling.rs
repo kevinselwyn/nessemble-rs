@@ -4200,7 +4200,9 @@ start:
                  _texts: &[String],
                  _dir: &std::path::Path,
                  _root: Option<&std::path::Path>| {
-                    Ok(ints.iter().map(|&i| i as u8).collect())
+                    Ok(crate::CustomOutput::Bytes(
+                        ints.iter().map(|&i| i as u8).collect(),
+                    ))
                 },
             )
         }

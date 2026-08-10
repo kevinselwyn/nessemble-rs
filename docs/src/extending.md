@@ -85,7 +85,9 @@ fn custom(ints, texts) {
 - `texts` is an array of the string arguments (quotes already removed).
 - Return the emitted bytes as an **array of integers** (each taken `& 0xFF`), a
   **blob**, or a **string** (its bytes are emitted). Returning `()` emits
-  nothing.
+  nothing. Wrap a string in [`emit_source(...)`](#emitting-assembly-source)
+  instead to return assembly *source* for the assembler to expand, rather than
+  bytes.
 
 ### Example
 
@@ -185,6 +187,65 @@ fn custom(ints, texts) {
     []
 }
 ```
+
+### Emitting assembly source
+
+A script can return `emit_source(text)` instead of bytes: `text` is assembly
+source, expanded **inline at the directive's own call site** — lexed, parsed,
+and executed exactly as if it had been written there — rather than emitted as
+raw bytes. This is the escape hatch for a directive whose job is to *generate*
+assembly, not compute a fixed byte sequence: a data table expressed as real
+`.db`/`.dw` lines with labels a caller can reference, or a repeated pattern a
+script would rather spell as instructions than as opcode bytes.
+
+```rust,ignore
+fn custom(ints, texts) {
+    let out = "";
+    for i in 0..ints[0] {
+        out += "frame" + i + ": .db " + (i * 8) + "\n";
+    }
+    emit_source(out)
+}
+```
+
+```nessemble
+.frames 3
+    LDA frame1   ; a label the emitted source defined, used right after it
+```
+
+A plain returned string already means "emit these bytes" (matching the
+reference Lua host's convention) — `emit_source` is what distinguishes
+"this is source to expand" from that, so wrap the string rather than
+returning it directly.
+
+A few things follow from the source being expanded **inline**, not in a
+separate file:
+
+- **Labels and constants the emitted source defines are real symbols**,
+  usable by code before or after the directive, exactly like a label defined
+  in a `.macro` body. Like a macro-defined label, one from emitted source is
+  hidden from the `-l` list file unless [`--mlist`](usage.md#--mlist) is
+  given.
+- **Diagnostics, spans, and coverage are attributed to the directive's own
+  line**, not to a position inside the emitted text — there is no file for an
+  editor to open at "line 3 of whatever `.frames` returned", so a parse error
+  in the emitted source is reported as `.frames`'s own error, on `.frames`'s
+  own line.
+- **`.include`, `.inestrn`, `.macro`, and `.macrodef` cannot appear in emitted
+  source.** Those are preprocessor constructs — `.include`/`.macro` splice
+  text *before* parsing, at a stage that has already finished by the time a
+  script runs — and using one in `emit_source`'s text is a directive-specific
+  error rather than the more confusing "unknown custom pseudo-op" a bare parse
+  of `.include` would otherwise give.
+- **A script that emits source is never [cached](#caching).** The assembler
+  has to re-expand the source on every build regardless — it has assembly-time
+  side effects (symbols, byte emission) an on-disk cache cannot replay — so
+  caching would only ever have saved the (comparatively cheap) expansion step,
+  not the script's own execution.
+- **Emitted source can itself invoke a custom directive**, including one that
+  emits source again — it dispatches exactly like any other directive. Nested
+  `emit_source` more than ten levels deep is a hard error rather than a stack
+  overflow.
 
 ### Filesystem access
 
@@ -544,6 +605,9 @@ automatically:
   any per-file check.
 - **`import`ing a module** — a module's source is invisible to the recorder, so
   such a script is refused rather than tracked incompletely.
+- **[`emit_source`](#emitting-assembly-source) output** — the assembler must
+  re-expand it fresh on every build regardless (it has assembly-time side
+  effects a cache cannot replay), so nothing would be saved by storing it.
 
 The check is deliberately cautious: it looks at what a script *could* do, so a
 `rand()` in a branch that never runs is enough to keep the script out of the

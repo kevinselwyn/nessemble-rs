@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use nessemble_core::{assemble_with, CustomResolver, Options};
+use nessemble_core::{assemble_with, CustomOutput, CustomResolver, Options};
 
 /// A resolver that records every call and returns bytes from `outputs` in order,
 /// repeating the last entry once exhausted. Returning *different* bytes per call
@@ -23,7 +23,7 @@ fn counting_resolver(outputs: Vec<Vec<u8>>) -> (CustomResolver, Rc<RefCell<Vec<S
         let nth = log.len();
         log.push(format!(".{name} {ints:?} {texts:?}"));
         let last = outputs.len().saturating_sub(1);
-        Ok(outputs[nth.min(last)].clone())
+        Ok(CustomOutput::Bytes(outputs[nth.min(last)].clone()))
     });
     (resolver, calls)
 }

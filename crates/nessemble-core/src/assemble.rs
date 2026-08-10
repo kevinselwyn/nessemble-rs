@@ -22,6 +22,11 @@ const MAX_BANKS: usize = 256;
 const TRAINER_MAX: usize = 512;
 /// Matches the reference `MAX_NESTED_IFS`.
 const MAX_NESTED_IFS: usize = 10;
+/// Bound on `emit_source` expanding source that itself emits source,
+/// recursively — the same depth `MAX_INCLUDE_DEPTH` (`preprocess.rs`) uses for
+/// `.include`/`.macro` recursion, applied to this analogous case so a
+/// pathological script errors instead of overflowing the stack.
+const MAX_EMIT_SOURCE_DEPTH: usize = 10;
 
 /// Convert a NES 2.0 RAM size in bytes to its logarithmic shift count, where a
 /// present size is `64 << shift` bytes. Returns `Some(0)` for no RAM (0 bytes),
@@ -278,13 +283,22 @@ pub struct Assembler {
     root: Option<PathBuf>,
     /// Resolver for custom pseudo-ops (`.foo`): given the directive name, its
     /// numeric and string arguments, the base directory, and the project root
-    /// (if any), it returns the bytes to emit (or an error message).
+    /// (if any), it returns what the directive resolves to (or an error
+    /// message).
     custom: CustomResolver,
-    /// What each custom-directive invocation in this run emitted, so a
+    /// What each custom-directive invocation in this run resolved to, so a
     /// directive's script executes **once** rather than once per pass. See
     /// [`Assembler::exec_custom`]; kept for the whole run (not cleared between
-    /// passes), since sharing across passes is the point.
-    custom_memo: HashMap<CustomKey, Result<Vec<u8>, String>>,
+    /// passes), since sharing across passes is the point. Memoizing the
+    /// *source* of an `emit_source` result (rather than only its eventual
+    /// bytes) is what keeps the expansion deterministic across both passes —
+    /// see [`Assembler::exec_emitted_source`].
+    custom_memo: HashMap<CustomKey, Result<CustomOutput, String>>,
+    /// Recursion depth of `emit_source` expansion currently in progress — an
+    /// expansion whose own source contains a directive that itself emits
+    /// source increments this around the nested call. See
+    /// [`MAX_EMIT_SOURCE_DEPTH`].
+    custom_expansion_depth: usize,
 }
 
 /// A source span as collected during assembly: like [`SourceSpan`] but keyed by
@@ -297,7 +311,7 @@ struct RawSpan {
     len: usize,
 }
 
-/// Resolves a custom pseudo-op to the bytes it emits. See [`Assembler::custom`].
+/// Resolves a custom pseudo-op to what it produces. See [`Assembler::custom`].
 ///
 /// The fourth argument is the base directory (the directive's own source
 /// file's directory); the fifth is the project root a `@/`-prefixed path a
@@ -313,8 +327,24 @@ pub type CustomResolver = Box<
         &[String],
         &std::path::Path,
         Option<&std::path::Path>,
-    ) -> Result<Vec<u8>, String>,
+    ) -> Result<CustomOutput, String>,
 >;
+
+/// What a custom directive's script resolves to.
+///
+/// `Source` is what `emit_source(text)` produces (`plans/013-structured-data-parsing.md`
+/// §6): assembly source expanded inline at the directive's own call site, like
+/// a `.macro` invocation whose body is not known until the script runs —
+/// distinct from `Bytes`, which is what a plain returned string/array/blob
+/// already meant (emit these bytes verbatim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomOutput {
+    /// Bytes to write through the normal emission path.
+    Bytes(Vec<u8>),
+    /// Assembly source to lex, parse, and execute inline
+    /// ([`Assembler::exec_emitted_source`]).
+    Source(String),
+}
 
 /// Identifies one custom-directive invocation: the directive name, its evaluated
 /// integer and string arguments, and the **site** it was written at (file index
@@ -402,6 +432,7 @@ impl Assembler {
             root,
             custom,
             custom_memo: HashMap::new(),
+            custom_expansion_depth: 0,
         }
     }
 
@@ -1418,9 +1449,85 @@ impl Assembler {
             resolved
         };
         match result {
-            Ok(bytes) => self.write_all(&bytes),
+            Ok(CustomOutput::Bytes(bytes)) => self.write_all(&bytes),
+            Ok(CustomOutput::Source(src)) => self.exec_emitted_source(name, &src),
             Err(msg) => self.hard_error(msg),
         }
+    }
+
+    /// Expand `src` — the assembly source `.name`'s script returned via
+    /// `emit_source` (`plans/013-structured-data-parsing.md` §6) — inline at
+    /// the directive's own call site: lex, parse, and execute each resulting
+    /// statement exactly as if it had been written there.
+    ///
+    /// Every diagnostic, symbol, and emitted byte is attributed to the
+    /// directive's own file and line — `cur_file`/`cur_line` are left exactly
+    /// as `exec_custom`'s caller (`run_pass`, or an enclosing
+    /// `exec_emitted_source`) set them, deliberately not repointed at a
+    /// position inside `src`, because there is no file for an editor to open
+    /// at that position (§2.6's reasoning for `parse_xml_file` errors, applied
+    /// here to generated source instead of a parsed document). A label or
+    /// constant the expansion defines is flagged
+    /// [`from_macro`](crate::ast::Line::from_macro) like one from a `.macro`
+    /// body, for the same reason: it did not appear in the file's own text.
+    ///
+    /// `.include`, `.inestrn`, `.macro`, and `.macrodef` are preprocessor-only
+    /// constructs — preprocessing has already finished by the time a script
+    /// runs — and are rejected with a directive-specific error rather than
+    /// whatever a bare parse of them would otherwise produce (`.include` with
+    /// no preprocessor to run it parses as an unrecognized custom pseudo-op,
+    /// which would be a confusing error for a builtin directive to give).
+    fn exec_emitted_source(&mut self, name: &str, src: &str) {
+        if self.custom_expansion_depth >= MAX_EMIT_SOURCE_DEPTH {
+            self.hard_error(t!("emit-source-too-deep", pseudo = format!(".{name}")));
+            return;
+        }
+
+        let tokens = crate::lexer::Lexer::new(src).tokenize();
+        let lines = match crate::parse::parse(tokens) {
+            Ok(lines) => lines,
+            Err(e) => {
+                self.hard_error(t!(
+                    "emit-source-parse-error",
+                    pseudo = format!(".{name}"),
+                    line = e.line,
+                    message = e.message
+                ));
+                return;
+            }
+        };
+
+        for line in &lines {
+            let unsupported = match &line.stmt {
+                Stmt::Pseudo(Pseudo::Custom(n, _))
+                    if matches!(n.as_str(), "include" | "macro" | "macrodef") =>
+                {
+                    Some(n.clone())
+                }
+                Stmt::Pseudo(Pseudo::InesTrn) => Some("inestrn".to_string()),
+                _ => None,
+            };
+            if let Some(directive) = unsupported {
+                self.hard_error(t!(
+                    "emit-source-unsupported-directive",
+                    pseudo = format!(".{name}"),
+                    directive = format!(".{directive}")
+                ));
+                return;
+            }
+        }
+
+        let saved_from_macro = self.cur_from_macro;
+        self.cur_from_macro = true;
+        self.custom_expansion_depth += 1;
+        for line in &lines {
+            self.exec_stmt(&line.stmt);
+            if self.aborted {
+                break;
+            }
+        }
+        self.custom_expansion_depth -= 1;
+        self.cur_from_macro = saved_from_macro;
     }
 
     /// Directory of the file the current line came from, which filename-based

@@ -56,6 +56,9 @@ unsupported-directive = Unsupported directive `.{ $name }` (not yet implemented)
 
 unknown-custom = Unknown custom pseudo-instruction `{ $pseudo }`
 custom-not-exist = Command for custom pseudo-instruction `{ $pseudo }` does not exist
+emit-source-parse-error = `.{ $pseudo }` emitted source that failed to parse (line { $line }): { $message }
+emit-source-unsupported-directive = `.{ $pseudo }` emitted `{ $directive }`, which is not supported in a directive's own emitted source
+emit-source-too-deep = `.{ $pseudo }` emitted source too many levels deep (a script emitting source that emits source, recursively?)
 
 ## Diagnostic framing (CLI)
 

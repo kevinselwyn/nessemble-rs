@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use nessemble_core::{assemble_file, assemble_file_with, AssembleError, CustomResolver, Options};
+use nessemble_core::{
+    assemble_file, assemble_file_with, AssembleError, CustomOutput, CustomResolver, Options,
+};
 
 /// A throwaway directory tree, removed on drop. Canonicalized at creation (as
 /// `nessemble_core`'s own root discovery does internally) so paths built from
@@ -70,7 +72,7 @@ fn recording_resolver() -> (CustomResolver, Rc<RefCell<Vec<Vec<String>>>>) {
     let log = Rc::clone(&seen);
     let resolver: CustomResolver = Box::new(move |_name, _ints, texts, _base, _root| {
         log.borrow_mut().push(texts.to_vec());
-        Ok(vec![0x42])
+        Ok(CustomOutput::Bytes(vec![0x42]))
     });
     (resolver, seen)
 }
@@ -316,7 +318,7 @@ fn the_resolver_receives_the_same_root_a_declared_argument_resolves_against() {
     let log = Rc::clone(&seen);
     let resolver: CustomResolver = Box::new(move |_name, _ints, _texts, _base, root| {
         *log.borrow_mut() = Some(root.map(Path::to_path_buf));
-        Ok(vec![0x00])
+        Ok(CustomOutput::Bytes(vec![0x00]))
     });
 
     assemble_file_with(

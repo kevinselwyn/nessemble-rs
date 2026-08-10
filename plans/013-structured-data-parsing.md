@@ -1,7 +1,7 @@
 # nessemble-rs: A Plan for Structured Data Parsing in Custom Pseudo-Ops
 
-> Status: **Phases 0–1 shipped ([§12](#12-phased-plan), [§13.2](#132-phase-1));
-> Phases 2–4 designed, not yet built.** This document gives custom pseudo-op scripts native, host-side parsers
+> Status: **Phases 0–2 shipped ([§12](#12-phased-plan), [§13.2](#132-phase-1),
+> [§13.3](#133-phase-2)); Phases 3–4 designed, not yet built.** This document gives custom pseudo-op scripts native, host-side parsers
 > for structured text — XML first, JSON alongside it ([§2](#2-native-document-parsing))
 > — on the same "host does the byte-level work, the script does the logic"
 > contract [`decode_png_file`](../crates/nessemble-script/src/lib.rs) already
@@ -260,7 +260,7 @@ every field, and guessing per-field from a prefix would silently misinterpret a
 column that mixes decimal and hex by convention rather than by marker. A caller
 that needs prefix-aware parsing already has `parse_int(field, radix)` per field.
 
-## 6. Deferred: source-returning directives
+## 6. Source-returning directives. **Shipped (Phase 2, §13.3).**
 
 The request's §3 — letting `custom()` return a string of **assembly source** that
 the assembler expands macro-expansion-style, rather than only bytes — is real and
@@ -283,6 +283,11 @@ does not conflict with anything Phase 0 ships: `emit_source` would be one more
 function registered in `engine_recording`, and `dynamic_to_bytes` would grow one
 more `Dynamic` shape to recognize before the plain-string case — additive, not a
 rework of the parsing added here.
+
+Built as Phase 2, once Phase 1 shipped; see [§13.3](#133-phase-2) for how the
+sketch above compares to what was actually built — in particular, the
+distinguishing marker turned out to be `Dynamic::tag`, not a wrapper type, and
+the listing/linter/coverage impact was smaller than this section worried about.
 
 ## 7. Deferred: parallel script execution
 
@@ -465,11 +470,11 @@ carry an optional project root, in the additive shape plan 011 used when it adde
 function is left inconsistent with another. See [§13.2](#132-phase-1) for what
 shipped.
 
-### Phase 2 — source-returning directives (deferred, §6)
+### Phase 2 — source-returning directives (§6). **Shipped.**
 
 `emit_source(text)`, the distinguishing return shape, `nessemble-core` expansion
 of the returned source at the directive's call site, and listing/linter/coverage
-visibility into the expanded lines.
+visibility into the expanded lines. See [§13.3](#133-phase-2) for what shipped.
 
 ### Phase 3 — parallel script execution (deferred, §7)
 
@@ -581,3 +586,104 @@ reported via a new CLI flag.
   escapes-the-root error cases, and the CLI end-to-end case
   (`custom_pseudo_script_resolves_at_slash_against_the_root_flag`) alongside the
   cache-key case above.
+
+### 13.3 Phase 2
+
+- **The distinguishing marker is `Dynamic::tag`, not a wrapper type.** §6's
+  sketch proposed `emit_source(text)` returning "a tagged handle" without
+  committing to a mechanism; Rhai's own `Dynamic::tag()`/`set_tag()` (used
+  elsewhere in the ecosystem for exactly "same shape, different meaning")
+  turned out to be a closer fit than inventing a wrapper struct and
+  registering it as an engine type (the way `Image`/`xml_node` are): no new
+  type, no `register_type_with_name`, and `dynamic_to_output` (renamed from
+  `dynamic_to_bytes`, which it now wraps) checks the tag before falling
+  through to the existing string/blob/array/int cases unchanged.
+- **`CustomResolver`'s Ok type widened to `CustomOutput` (`Bytes(Vec<u8>)` /
+  `Source(String)`)**, touching the same nine construction sites Phase 1's
+  root parameter did — the same reasoning applies: every one lives inside this
+  workspace, so the "breaking" edge is entirely internal.
+  `nessemble_script::run`/`run_with_root`/`run_with_inputs`/
+  `run_with_inputs_and_root` changed their success payload from `Vec<u8>` to
+  `CustomOutput` for the same reason Phase 1 widened `CustomResolver` itself
+  rather than adding parallel `_with_output` entry points: an embedder that
+  never calls `emit_source` still gets `CustomOutput::Bytes` back, so a
+  second, bytes-only API would only have added surface area nobody needed.
+  `nessemble-wasm`'s resolver needed **no change at all** — `nessemble_script::run`
+  already returns the right type, so `emit_source` works under wasm for free
+  (it has no filesystem dependency, unlike the `fs`-gated path functions).
+- **`emit_source` output is never written to the on-disk cache**, decided in
+  §6.1 rather than the `--pseudo` design (which predates this feature): the
+  assembler must re-expand the source on every build regardless (assembly-time
+  side effects — symbols, byte emission — a cache cannot replay), so caching
+  it would only ever have saved the comparatively cheap expansion step, not
+  the script's own execution. Concretely, `RunOutcome::cacheable` is `false`
+  whenever `output` is `Source`, independent of the existing purity scan —
+  which also means `nessemble-cli/src/cache.rs`'s on-disk schema needed **no
+  change**: only `Bytes` outcomes are ever written, so a cache hit is always
+  `CustomOutput::Bytes` by construction and `Cache::get`'s return type stayed
+  `Option<Vec<u8>>`.
+- **Expansion is lex → parse → `exec_stmt`, with `cur_file`/`cur_line` left
+  untouched.** `Assembler::exec_emitted_source` calls the crate's own
+  (crate-private, not `pub`, but visible from `assemble.rs` as a descendant of
+  the module that declares them) `lexer::Lexer`/`parse::parse` directly on the
+  returned string, then runs each resulting statement through the existing
+  `exec_stmt` dispatch — deliberately **not** repointing `cur_file`/`cur_line`
+  at a position inside the emitted text first, so every diagnostic, symbol,
+  and byte the expansion produces is attributed to the directive's own call
+  site. This is what makes the listing/coverage impact §6 worried about much
+  smaller than expected (next bullet) and directly reuses §2.6's reasoning
+  ("no second squiggle in a file the editor never opens") for generated source
+  instead of a parsed document.
+- **Listing, linter, and coverage needed far less new work than §6 predicted**,
+  once actually investigated: the list file (`-l`) renders symbols only (no
+  byte listing exists to update), so a label the expansion defines just needs
+  the right `from_macro`-style flag (below) to behave correctly; the linter is
+  purely textual and never runs scripts, so an `emit_source` directive is
+  already conservatively treated as "unknown effects", identically to any
+  other custom pseudo-op or macro invocation, with no code change; and
+  coverage is keyed by `(file, line)` spans, which pinning `cur_file`/
+  `cur_line` to the call site (previous bullet) satisfies automatically —
+  there is no synthetic file for `nessemble-cli`'s ignore-directive scan
+  (`std::fs::read_to_string`) to fail to find.
+- **A label or constant the expansion defines is flagged like one from a
+  `.macro` body**, reusing `Line::from_macro`/`ListSymbol::from_macro` rather
+  than adding a third state. `exec_emitted_source` sets
+  `Assembler::cur_from_macro = true` for the duration of the expansion (saved
+  and restored around it, since it is ordinary mutable assembler state, not
+  scoped to the call) — an emitted label is invisible in the `-l` list file
+  unless `--mlist`, matching a macro-defined one exactly, which is the
+  documented, deliberate behavior (`docs/src/extending.md`), not an
+  accidental reuse.
+- **`.include`, `.inestrn`, `.macro`, and `.macrodef` are rejected by a
+  pre-execution scan of every parsed statement**, before any of them run —
+  not caught ad hoc during dispatch. `.include`/`.macro`/`.macrodef` have no
+  `Pseudo` variant at all (they exist only as preprocessor-level constructs,
+  consumed by `Pre` before `parse::parse` ever sees them), so a bare parse of
+  `.include` in emitted source would otherwise fall through to
+  `Pseudo::Custom("include", …)` and fail as "unknown custom pseudo-op
+  `.include`" — a genuinely confusing error for a directive that obviously
+  exists. `.inestrn` **does** have a real `Pseudo::InesTrn` variant (it is
+  usable standalone outside `Pre`), but executing it without the preprocessor
+  splicing the actual trainer bytes in would only set the iNES trainer flag
+  with no trainer content — silently wrong rather than obviously broken — so
+  it is rejected too, for consistency with the other three rather than because
+  parsing itself fails.
+- **A depth guard (`MAX_EMIT_SOURCE_DEPTH = 10`) bounds recursive
+  `emit_source`** — emitted source that itself invokes a directive which emits
+  source again — mirroring `preprocess.rs`'s `MAX_INCLUDE_DEPTH` for
+  `.include`/`.macro` recursion. Not called for explicitly in §6, but the same
+  risk (a pathological script recursing until the process stack overflows,
+  which Rust cannot catch) applies here and gets the same fix.
+- New i18n messages (`emit-source-parse-error`, `emit-source-unsupported-directive`,
+  `emit-source-too-deep`) follow the existing `en-US.ftl` convention rather
+  than reusing `unsupported-directive` (already taken, and worded for a
+  built-in directive not yet implemented — a different situation from one that
+  will never be implemented in this context).
+- Tests: `nessemble-core/tests/emit_source.rs` (assembler-side mechanics, via a
+  hand-written `CustomResolver` — no Rhai involved) covers byte emission at the
+  call site, a label defined in emitted source usable immediately after it
+  (and flagged `from_macro`), nested custom-directive dispatch inside emitted
+  source, a parse error naming the directive and its own line, each of the
+  four rejected directives, the recursion-depth guard, and source-map
+  attribution. `nessemble-script/src/lib.rs`'s own tests cover the
+  `emit_source`/`dynamic_to_output` tagging and the never-cacheable rule.

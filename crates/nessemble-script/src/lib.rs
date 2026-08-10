@@ -71,6 +71,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use nessemble_core::CustomOutput;
 #[cfg(any(feature = "fs", feature = "rand"))]
 use rhai::packages::Package;
 use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
@@ -87,8 +88,11 @@ mod xml;
 
 use xml::XmlNode;
 
-/// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
-/// or a human-readable error message (a thrown string, or an engine error).
+/// Run `source`'s `custom(ints, texts)` function and return what the directive
+/// resolves to — bytes to emit, or (via `emit_source`) a string of assembly
+/// source for the assembler to expand at the call site
+/// (`plans/013-structured-data-parsing.md` §6) — or a human-readable error
+/// message (a thrown string, or an engine error).
 ///
 /// A relative path opened by the script (via rhai-fs's `open_file`) resolves
 /// against `base_dir` — the directory of the source file that contains the
@@ -100,8 +104,8 @@ pub fn run(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
-) -> Result<Vec<u8>, String> {
-    run_impl(source, ints, texts, base_dir, None, None, false).map(|(bytes, _)| bytes)
+) -> Result<CustomOutput, String> {
+    run_impl(source, ints, texts, base_dir, None, None, false).map(|(output, _)| output)
 }
 
 /// Like [`run`], but a `@/`-prefixed path the script resolves itself (via
@@ -117,8 +121,8 @@ pub fn run_with_root(
     texts: &[String],
     base_dir: &Path,
     root: Option<&Path>,
-) -> Result<Vec<u8>, String> {
-    run_impl(source, ints, texts, base_dir, root, None, false).map(|(bytes, _)| bytes)
+) -> Result<CustomOutput, String> {
+    run_impl(source, ints, texts, base_dir, root, None, false).map(|(output, _)| output)
 }
 
 /// The paths a script resolved through the host's file API, in sorted order.
@@ -130,14 +134,20 @@ type Recorder = Rc<RefCell<BTreeSet<PathBuf>>>;
 /// actually resolved through the host's file API on *this* invocation, so a cache
 /// can check those files for changes rather than guessing at a dependency set.
 /// `cacheable` is `false` when the script did something whose result must not be
-/// reused — see [`purity`].
+/// reused (see [`purity`]) **or** when `output` is
+/// [`CustomOutput::Source`] — the assembler must expand it fresh on every
+/// invocation regardless (it has assembly-time side effects: symbols, byte
+/// emission), so caching only ever saved the script's own execution, and an
+/// on-disk cache that could hand back a `Source` string would need the
+/// assembler to re-expand *that*, an added layer of trust in stored text this
+/// plan does not add. A script that emits source is therefore always re-run.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
-    /// The bytes the directive emits.
-    pub bytes: Vec<u8>,
+    /// What the directive resolves to.
+    pub output: CustomOutput,
     /// Absolute paths the script resolved through the host's file API.
     pub inputs: Vec<PathBuf>,
-    /// Whether these bytes may be reused on a later build.
+    /// Whether this outcome may be reused on a later build.
     pub cacheable: bool,
     /// Why the run is not cacheable, when it is not.
     pub impurity: Option<purity::Impurity>,
@@ -163,12 +173,13 @@ pub fn run_with_inputs_and_root(
     root: Option<&Path>,
 ) -> Result<RunOutcome, String> {
     let recorder = Recorder::default();
-    let (bytes, impurity) = run_impl(source, ints, texts, base_dir, root, Some(&recorder), true)?;
+    let (output, impurity) = run_impl(source, ints, texts, base_dir, root, Some(&recorder), true)?;
     let inputs: Vec<PathBuf> = recorder.borrow().iter().cloned().collect();
+    let cacheable = impurity.is_none() && matches!(output, CustomOutput::Bytes(_));
     Ok(RunOutcome {
-        bytes,
+        output,
         inputs,
-        cacheable: impurity.is_none(),
+        cacheable,
         impurity,
     })
 }
@@ -183,7 +194,7 @@ fn run_impl(
     root: Option<&Path>,
     recorder: Option<&Recorder>,
     scan: bool,
-) -> Result<(Vec<u8>, Option<purity::Impurity>), String> {
+) -> Result<(CustomOutput, Option<purity::Impurity>), String> {
     let engine = engine_recording(base_dir, root, recorder);
     let ast = engine.compile(source).map_err(|e| e.to_string())?;
     let impurity = if scan { purity::impurity(&ast) } else { None };
@@ -196,7 +207,7 @@ fn run_impl(
         .call_fn(&mut scope, &ast, "custom", (int_arr, text_arr))
         .map_err(|e| error_message(&e))?;
 
-    Ok((dynamic_to_bytes(result)?, impurity))
+    Ok((dynamic_to_output(result)?, impurity))
 }
 
 /// A resource-guarded engine with filesystem access.
@@ -414,6 +425,17 @@ fn engine_recording(base_dir: &Path, root: Option<&Path>, recorder: Option<&Reco
     engine.register_fn("to_char", to_char);
     engine.register_fn("trimmed", trimmed);
     engine.register_fn("format_hex", format_hex);
+
+    // `emit_source(text)` — return `text` as assembly source for the
+    // assembler to expand inline at the directive's own call site, rather
+    // than as bytes (`plans/013-structured-data-parsing.md` §6). A plain
+    // returned string already means "emit these bytes" (`dynamic_to_output`,
+    // matching the reference Lua host), so the distinguishing marker cannot
+    // itself be "the return value is a string" — `emit_source` tags the
+    // string with [`EMIT_SOURCE_TAG`] instead of wrapping it in a new type,
+    // since `Dynamic`'s own tag is exactly Rhai's mechanism for "this value's
+    // shape is ordinary, but its meaning here is not".
+    engine.register_fn("emit_source", emit_source);
 
     // Random-number functions (`rand`, `rand(min, max)`, `rand_float`,
     // `rand_bool`, and array `shuffle`/`sample`) for scripts that need
@@ -921,6 +943,34 @@ fn format_hex(value: i64, width: i64) -> Result<String, Box<EvalAltResult>> {
     Ok(format!("${:0w$X}", (value as u64) & mask, w = w))
 }
 
+/// The [`Dynamic`] tag [`emit_source`] sets, so [`dynamic_to_output`] can tell
+/// its string apart from an ordinary returned one (which already means "emit
+/// these bytes" — [`dynamic_to_bytes`]). An arbitrary value, private to this
+/// module; nothing outside it inspects a `Dynamic`'s tag. `i32` matches
+/// `Dynamic`'s own tag type on the 64-bit targets this crate builds for
+/// (`rhai::types::dynamic::Tag`, not re-exported at the crate root).
+const EMIT_SOURCE_TAG: i32 = 1;
+
+/// `emit_source(text)` — tag `text` so [`dynamic_to_output`] treats it as
+/// assembly source to expand rather than bytes to emit.
+fn emit_source(text: &str) -> Dynamic {
+    let mut value = Dynamic::from(text.to_string());
+    value.set_tag(EMIT_SOURCE_TAG);
+    value
+}
+
+/// Convert a script's return value into what the directive resolves to:
+/// [`CustomOutput::Source`] for an `emit_source`-tagged string,
+/// [`CustomOutput::Bytes`] otherwise ([`dynamic_to_bytes`]).
+fn dynamic_to_output(value: Dynamic) -> Result<CustomOutput, String> {
+    if value.tag() == EMIT_SOURCE_TAG && value.is_string() {
+        return Ok(CustomOutput::Source(
+            value.into_string().unwrap_or_default(),
+        ));
+    }
+    dynamic_to_bytes(value).map(CustomOutput::Bytes)
+}
+
 /// Convert a script's return value into emitted bytes.
 fn dynamic_to_bytes(value: Dynamic) -> Result<Vec<u8>, String> {
     if value.is_unit() {
@@ -984,10 +1034,21 @@ mod tests {
         Path::new(".")
     }
 
+    /// Unwrap a `run`/`run_with_root` result down to plain bytes, for the many
+    /// existing tests that predate `emit_source` and don't care about the
+    /// distinction. Panics (loudly, not silently) if the script emitted source
+    /// instead — none of these tests do.
+    fn bytes(result: Result<CustomOutput, String>) -> Result<Vec<u8>, String> {
+        result.map(|output| match output {
+            CustomOutput::Bytes(b) => b,
+            CustomOutput::Source(s) => panic!("expected bytes, got emit_source({s:?})"),
+        })
+    }
+
     #[test]
     fn sums_integer_arguments() {
         let src = "fn custom(ints, texts) { let s = 0; for i in ints { s += i; } [s % 256] }";
-        assert_eq!(run(src, &[1, 2, 3], &[], cwd()).unwrap(), vec![6]);
+        assert_eq!(bytes(run(src, &[1, 2, 3], &[], cwd())).unwrap(), vec![6]);
     }
 
     #[test]
@@ -997,7 +1058,7 @@ mod tests {
                    let t = ints[0].to_float() / ints[1].to_float(); \
                    [(t * 16.0).floor().to_int() % 256] }";
         // (3 / 4) * 16 = 12
-        assert_eq!(run(src, &[3, 4], &[], cwd()).unwrap(), vec![12]);
+        assert_eq!(bytes(run(src, &[3, 4], &[], cwd())).unwrap(), vec![12]);
     }
 
     #[test]
@@ -1009,7 +1070,10 @@ mod tests {
     #[test]
     fn receives_string_arguments() {
         let src = "fn custom(ints, texts) { texts[0].to_blob() }";
-        assert_eq!(run(src, &[], &["Hi".to_string()], cwd()).unwrap(), b"Hi");
+        assert_eq!(
+            bytes(run(src, &[], &["Hi".to_string()], cwd())).unwrap(),
+            b"Hi"
+        );
     }
 
     /// A unique, freshly-created directory in the OS temp area, removed on drop.
@@ -1042,7 +1106,10 @@ mod tests {
         let dir = TempDir::new("read");
         std::fs::write(dir.0.join("asset.bin"), b"\x01\x02\x03NES").unwrap();
         let src = r#"fn custom(ints, texts) { open_file("asset.bin", "r").read_blob() }"#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), b"\x01\x02\x03NES");
+        assert_eq!(
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
+            b"\x01\x02\x03NES"
+        );
     }
 
     #[test]
@@ -1051,7 +1118,7 @@ mod tests {
         std::fs::write(dir.0.join("note.txt"), b"hello").unwrap();
         let src = r#"fn custom(ints, texts) { open_file(texts[0], "r").read_string().to_blob() }"#;
         assert_eq!(
-            run(src, &[], &["note.txt".to_string()], &dir.0).unwrap(),
+            bytes(run(src, &[], &["note.txt".to_string()], &dir.0)).unwrap(),
             b"hello"
         );
     }
@@ -1062,7 +1129,7 @@ mod tests {
         // or truncating), and `File#write` persists the bytes.
         let dir = TempDir::new("write");
         let src = r#"fn custom(ints, texts) { open_file("out.bin").write("ok"); () }"#;
-        let out = run(src, &[], &[], &dir.0).unwrap();
+        let out = bytes(run(src, &[], &[], &dir.0)).unwrap();
         assert_eq!(out, Vec::<u8>::new());
         assert_eq!(std::fs::read(dir.0.join("out.bin")).unwrap(), b"ok");
     }
@@ -1075,12 +1142,12 @@ mod tests {
         std::fs::write(&file, b"ABS").unwrap();
         let src = r#"fn custom(ints, texts) { open_file(texts[0], "r").read_blob() }"#;
         // `base_dir` is an unrelated directory; the absolute path still resolves.
-        let out = run(
+        let out = bytes(run(
             src,
             &[],
             &[file.to_string_lossy().into_owned()],
             Path::new("/nonexistent-base"),
-        );
+        ));
         assert_eq!(out.unwrap(), b"ABS");
     }
 
@@ -1112,7 +1179,7 @@ mod tests {
         "#;
         // width, height, then the two pixels' RGBA bytes.
         assert_eq!(
-            run(src, &[], &[], &dir.0).unwrap(),
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
             vec![2, 1, 10, 20, 30, 40, 50, 60, 70, 80]
         );
     }
@@ -1135,7 +1202,7 @@ mod tests {
 
         // read_blob(path) == open_file(path, "r").read_blob()
         let src = r#"fn custom(ints, texts) { read_blob("asset.bin") }"#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), b"\x01\x02\x03");
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), b"\x01\x02\x03");
 
         // decode_png_file(path) == decode_png(read_blob(path))
         let src = r#"
@@ -1144,7 +1211,7 @@ mod tests {
                 [img.width, img.height, img.r(0, 0)]
             }
         "#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![1, 1, 9]);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), vec![1, 1, 9]);
     }
 
     #[test]
@@ -1168,7 +1235,7 @@ mod tests {
             }
         "#;
         assert_eq!(
-            run(src, &[], &[], &dir.0).unwrap(),
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
             vec![20, 20, 20, 255, 30, 10, 20, 30, 40]
         );
     }
@@ -1244,7 +1311,7 @@ mod tests {
                 out
             }
         "#;
-        let out = run(src, &[], &[], &dir.0).unwrap();
+        let out = bytes(run(src, &[], &[], &dir.0)).unwrap();
         // Cell (0,0) matches bank cells 0 and 2 — the lowest index wins; (1,0)
         // matches cell 1; (0,1) matches cell 3; (1,1) matches nothing (-1 → 0).
         assert_eq!(out, vec![1, 1, 2, 2, 4, 4, 0, 0]);
@@ -1267,7 +1334,10 @@ mod tests {
             }
         "#;
         // Cells 0 and 2 are the all-dark cell; 4 and -1 are outside the bank.
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![1, 0, 1, 0, 0, 0]);
+        assert_eq!(
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
+            vec![1, 0, 1, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -1285,7 +1355,7 @@ mod tests {
         "#;
         // The unmatched cell is mid-gray (shade 1): distance 4 to the all-dark
         // cells 0/2, 6 to cell 3, 8 to the all-light cell 1 — so cell 0.
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![0, 1]);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), vec![0, 1]);
     }
 
     #[test]
@@ -1313,7 +1383,7 @@ mod tests {
         "#;
         // Two whole cells (the third column and third row are partial): the
         // light cell is index 1, and index 2 is out of range.
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![2, 0]);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), vec![2, 0]);
     }
 
     #[test]
@@ -1395,7 +1465,7 @@ mod tests {
             }
         "#;
         let started = std::time::Instant::now();
-        let out = run(src, &[], &[], &dir.0).unwrap();
+        let out = bytes(run(src, &[], &[], &dir.0)).unwrap();
         let elapsed = started.elapsed();
         let expected: i64 = (0..20000).map(|x: i64| (x % 512) % 256).sum();
         assert_eq!(out, vec![(expected % 256) as u8]);
@@ -1417,7 +1487,7 @@ mod tests {
             }
         ";
         assert_eq!(
-            run(src, &[], &[], cwd()).unwrap(),
+            bytes(run(src, &[], &[], cwd())).unwrap(),
             vec![0, 1, 2, 3, 1, 0, 1, 2, 3]
         );
     }
@@ -1439,7 +1509,7 @@ mod tests {
                 out
             }
         ";
-        let out = run(src, &[], &[], cwd()).unwrap();
+        let out = bytes(run(src, &[], &[], cwd())).unwrap();
         assert_eq!(out.len(), 9);
         for &b in &out[..8] {
             assert!(
@@ -1467,7 +1537,7 @@ mod tests {
             }
         "#;
         assert_eq!(
-            run(src, &[], &[], cwd()).unwrap(),
+            bytes(run(src, &[], &[], cwd())).unwrap(),
             vec![1, 2, 3, 8, 7, 4, 66]
         );
     }
@@ -1506,7 +1576,7 @@ mod tests {
         assert_eq!(names, ["a.bin", "b.bin", "c.png", "d.xml", "e.json"]);
         // Absolute, so a recorded path means the same thing from anywhere.
         assert!(out.inputs.iter().all(|p| p.is_absolute()));
-        assert_eq!(out.bytes, b"ab");
+        assert_eq!(out.output, CustomOutput::Bytes(b"ab".to_vec()));
         assert!(out.cacheable);
     }
 
@@ -1525,7 +1595,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
 
         let src = r#"fn custom(ints, texts) { read_blob("@/assets/logo.bin") }"#;
-        let out = run_with_root(src, &[], &[], &sub, Some(&root)).unwrap();
+        let out = bytes(run_with_root(src, &[], &[], &sub, Some(&root))).unwrap();
         assert_eq!(out, b"logo");
     }
 
@@ -1552,7 +1622,7 @@ mod tests {
                 a + e
             }
         "#;
-        let out = run_with_root(src, &[], &[], &root, Some(&root)).unwrap();
+        let out = bytes(run_with_root(src, &[], &[], &root, Some(&root))).unwrap();
         assert_eq!(out, b"ae");
     }
 
@@ -1616,7 +1686,7 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, ["inner.xml", "outer.xml"]);
-        assert_eq!(out.bytes, b"inner");
+        assert_eq!(out.output, CustomOutput::Bytes(b"inner".to_vec()));
         assert!(out.cacheable);
     }
 
@@ -1731,16 +1801,21 @@ mod tests {
         // sees it, and code that cannot run cannot make the result vary.)
         let src = "fn custom(ints, texts) { if ints[0] == 0 { [7] } else { [rand(0, 9)] } }";
         let out = run_with_inputs(src, &[0], &[], cwd()).unwrap();
-        assert_eq!(out.bytes, vec![7]);
+        assert_eq!(out.output, CustomOutput::Bytes(vec![7]));
         assert!(!out.cacheable);
     }
 
     #[test]
-    fn run_still_returns_only_bytes() {
-        // The original entry point is unchanged, so `nessemble-wasm` and every
-        // existing caller keep working.
+    fn run_still_returns_bytes_for_an_ordinary_script() {
+        // `run`'s signature is unchanged (still four arguments, still
+        // fallible), so `nessemble-wasm` and every existing caller keep
+        // working; only the success payload widened from `Vec<u8>` to
+        // `CustomOutput` to also carry `emit_source`'s shape (§6 below).
         let src = "fn custom(ints, texts) { [1, 2] }";
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![1, 2]);
+        assert_eq!(
+            run(src, &[], &[], cwd()).unwrap(),
+            CustomOutput::Bytes(vec![1, 2])
+        );
     }
 
     // ---- structured data parsing (plan 013) --------------------------------
@@ -1757,7 +1832,10 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 1, 2, 3, 4]);
+        assert_eq!(
+            bytes(run(src, &[], &[], cwd())).unwrap(),
+            vec![2, 1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -1797,7 +1875,7 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), expected);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), expected);
     }
 
     #[test]
@@ -1845,7 +1923,10 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 1, 2, 3, 4]);
+        assert_eq!(
+            bytes(run(src, &[], &[], cwd())).unwrap(),
+            vec![2, 1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -1854,7 +1935,7 @@ mod tests {
         std::fs::write(dir.0.join("d.json"), br#"{"v": 7}"#).unwrap();
         let src = r#"fn custom(ints, texts) { [parse_json_file("d.json").v] }"#;
         let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
-        assert_eq!(out.bytes, vec![7]);
+        assert_eq!(out.output, CustomOutput::Bytes(vec![7]));
         assert_eq!(out.inputs.len(), 1);
         assert!(out.inputs[0].ends_with("d.json"));
     }
@@ -1881,7 +1962,10 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![1, 2, 3, 255, 26]);
+        assert_eq!(
+            bytes(run(src, &[], &[], cwd())).unwrap(),
+            vec![1, 2, 3, 255, 26]
+        );
     }
 
     #[test]
@@ -1902,7 +1986,7 @@ mod tests {
             }
         "#;
         // "HI" (2) + "padded" (6) + "$FF$FF$001A" (11)
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 6, 11]);
+        assert_eq!(bytes(run(src, &[], &[], cwd())).unwrap(), vec![2, 6, 11]);
     }
 
     #[test]
@@ -1914,7 +1998,7 @@ mod tests {
                 [s.len(), t.len()]
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![6, 2]);
+        assert_eq!(bytes(run(src, &[], &[], cwd())).unwrap(), vec![6, 2]);
     }
 
     #[test]
@@ -1930,9 +2014,45 @@ mod tests {
             }
         "#;
         assert_eq!(
-            run(src, &[], &["hi".to_string()], cwd()).unwrap(),
+            bytes(run(src, &[], &["hi".to_string()], cwd())).unwrap(),
             vec![26, 2]
         );
+    }
+
+    // ---- source-returning directives (plan 013 §6) -------------------------
+
+    #[test]
+    fn emit_source_is_distinguished_from_a_plain_returned_string() {
+        // A plain string still means "emit these bytes" (`dynamic_to_bytes`,
+        // the reference Lua host's convention); `emit_source` tags the same
+        // shape to mean something else instead.
+        let plain = "fn custom(ints, texts) { \"AB\" }";
+        assert_eq!(
+            run(plain, &[], &[], cwd()).unwrap(),
+            CustomOutput::Bytes(b"AB".to_vec())
+        );
+
+        let emitted = r#"fn custom(ints, texts) { emit_source(".db $41, $42") }"#;
+        assert_eq!(
+            run(emitted, &[], &[], cwd()).unwrap(),
+            CustomOutput::Source(".db $41, $42".to_string())
+        );
+    }
+
+    #[test]
+    fn emit_source_output_is_never_cacheable() {
+        // The assembler must re-expand the source on every invocation
+        // regardless (it has assembly-time side effects: symbols, byte
+        // emission), so caching it would only ever save the (comparatively
+        // cheap) expansion step, not the script's own execution — and would
+        // need the on-disk cache to trust stored text as a re-expansion input,
+        // which this plan does not add. A script this simple would otherwise
+        // read as pure (no file access, no randomness) and be cached.
+        let src = r#"fn custom(ints, texts) { emit_source(".db 1") }"#;
+        let outcome = run_with_inputs(src, &[], &[], cwd()).unwrap();
+        assert_eq!(outcome.output, CustomOutput::Source(".db 1".to_string()));
+        assert!(!outcome.cacheable, "a Source outcome must never be cached");
+        assert!(outcome.impurity.is_none(), "the script itself is pure");
     }
 
     /// Write a minimal 1×1 grayscale PNG that `decode_png` accepts.
