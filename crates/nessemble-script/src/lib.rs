@@ -125,6 +125,26 @@ pub fn run_with_root(
     run_impl(source, ints, texts, base_dir, root, None, false).map(|(output, _)| output)
 }
 
+/// Whether `source` is safe to run more than once for the same arguments —
+/// the same test [`run_with_inputs`]'s `cacheable` flag applies
+/// ([`purity::impurity`]), checked **without running the script**, so a
+/// caller can decide whether running it is safe *before* paying for the
+/// execution. Used to keep a prewarm step
+/// (`plans/013-structured-data-parsing.md` §7) from running a script an
+/// extra, uncounted time when that script does something — writing a file,
+/// drawing randomness — that must happen exactly as many times as the
+/// sequential emission passes actually call it. A script this crate cannot
+/// even compile is conservatively impure (`false`): if it can't be scanned,
+/// it can't be judged safe to duplicate.
+#[must_use]
+pub fn is_pure(source: &str) -> bool {
+    let engine = Engine::new();
+    let Ok(ast) = engine.compile(source) else {
+        return false;
+    };
+    purity::impurity(&ast).is_none()
+}
+
 /// The paths a script resolved through the host's file API, in sorted order.
 type Recorder = Rc<RefCell<BTreeSet<PathBuf>>>;
 
@@ -1745,6 +1765,24 @@ mod tests {
         let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
         assert!(!out.cacheable);
         assert_eq!(out.impurity, Some(purity::Impurity::WritesAFile));
+    }
+
+    #[test]
+    fn is_pure_agrees_with_run_with_inputs_cacheable_without_running_anything() {
+        // A file-writing script: `is_pure` must say `false` *before* the
+        // write happens, not after — a prewarm step relies on being able to
+        // ask without paying for (or risking) the execution
+        // (`plans/013-structured-data-parsing.md` §7).
+        let src = r#"fn custom(ints, texts) { open_file("out.bin").write("ok"); () }"#;
+        assert!(!is_pure(src));
+
+        let pure_src = "fn custom(ints, texts) { [ints[0]] }";
+        assert!(is_pure(pure_src));
+    }
+
+    #[test]
+    fn is_pure_is_false_for_a_script_that_does_not_even_compile() {
+        assert!(!is_pure("fn custom(ints texts) { ["));
     }
 
     #[test]

@@ -289,7 +289,7 @@ sketch above compares to what was actually built — in particular, the
 distinguishing marker turned out to be `Dynamic::tag`, not a wrapper type, and
 the listing/linter/coverage impact was smaller than this section worried about.
 
-## 7. Deferred: parallel script execution
+## 7. Parallel script execution. **Shipped (Phase 3, §13.4).**
 
 The request's §6 is the largest available win on script-heavy builds (a build
 reported as 100% of one CPU core, wall time equal to user+sys time), and it needs
@@ -313,6 +313,11 @@ concurrent access and would need it before anything else runs in parallel.
 does not block on it, and vice versa — a future parallel-prewarm phase benefits
 identically whether the invocations it parallelizes call `decode_png_file` or
 `parse_xml_file`.
+
+Built as Phase 3, once Phase 2 shipped; see [§13.4](#134-phase-3) for the shape
+that shipped — a scan-ahead prewarm restricted to statically-safe arguments (the
+first of the two options sketched above), not a general scan-ahead prepass, and
+a purity check the sketch above didn't anticipate needing.
 
 ## 8. Deferred: operation limits and timing
 
@@ -476,11 +481,11 @@ shipped.
 of the returned source at the directive's call site, and listing/linter/coverage
 visibility into the expanded lines. See [§13.3](#133-phase-2) for what shipped.
 
-### Phase 3 — parallel script execution (deferred, §7)
+### Phase 3 — parallel script execution (§7). **Shipped.**
 
 A concurrency-safe cache (`nessemble-cli/src/cache.rs`'s `get`/`put`), and a
 prewarm step that runs independent invocations concurrently ahead of the
-sequential emission passes.
+sequential emission passes. See [§13.4](#134-phase-3) for what shipped.
 
 ### Phase 4 — operation limits and `--time-scripts` (deferred, §8)
 
@@ -687,3 +692,104 @@ reported via a new CLI flag.
   four rejected directives, the recursion-depth guard, and source-map
   attribution. `nessemble-script/src/lib.rs`'s own tests cover the
   `emit_source`/`dynamic_to_output` tagging and the never-cacheable rule.
+
+### 13.4 Phase 3
+
+- **A scan-ahead prewarm, not a scan-ahead prepass or a widened `CustomResolver`.**
+  §7 sketched two options ("a scan-ahead prepass restricted to arguments that
+  are safe to know early, or a 'parallel prewarm' step … *before* the
+  sequential emission passes read from it"); the shipped shape is the second,
+  and it turned out **not** to need `CustomResolver`, `Assembler`, or the
+  `Fn` bound on the resolver trait object to change at all. The insight that
+  made this possible: prewarming does not need to run *through* the injected
+  `CustomResolver` closure concurrently (which would have required widening it
+  to `Send + Sync`, rippling into `nessemble_script::coverage::SharedCoverage`
+  — currently `Rc<RefCell<…>>`, not thread-safe — for a resolver variant that
+  would never actually use it). It only needs to populate the **on-disk**
+  cache before the real, sequential resolver call reads from it, and that
+  on-disk cache is `nessemble-cli`'s own `Resolver`/`cache::Cache`, entirely
+  independent of `nessemble_core::CustomResolver`'s type.
+- **The scan lives in `nessemble-core`, not `nessemble-cli`**, as two new
+  public entry points, `prewarm_candidates_file`/`prewarm_candidates`,
+  mirroring `assemble_file_with`/`assemble_with`'s own preprocess-then-parse
+  shape but stopping before constructing an `Assembler` at all. The
+  alternative — reimplementing preprocessing/parsing in `nessemble-cli` to
+  avoid growing `nessemble-core`'s public surface — was rejected outright:
+  `mod lexer`/`mod parse`/`mod preprocess` are crate-private specifically so
+  there is exactly one implementation of them, and duplicating a second one
+  in the CLI crate is precisely the kind of drift risk plan 011/013 have
+  avoided everywhere else. Best-effort by design: a preprocessing or parse
+  failure here yields **no candidates**, never an error — the real assemble
+  call that follows is left as the sole authority on reporting it, since
+  reporting the same problem twice (once from a scan that exists purely as an
+  optimization) would be worse than staying quiet.
+- **A candidate is "safe" if every string argument resolves the same way
+  `exec_custom` resolves it, and every integer argument is `literal_eval`-able**
+  — no `Symbol`, `LocalForward`/`LocalBackward`, or `Bank` reference anywhere
+  in the expression tree. This is deliberately narrower than "safe to know
+  early" could be (a forward reference to an *already-defined* constant is
+  technically knowable without a second pass, for instance) — the chosen rule
+  costs nothing to prove correct (no assembler state involved at all) and
+  covers the case §7 was written for (asset-conversion directives with
+  literal or file-path arguments), which was judged worth more than a cleverer
+  heuristic with a larger correctness surface to get right. `resolve_str_arg`,
+  extracted out of `Assembler::exec_custom`, is shared by both so the scan and
+  the real pass cannot resolve a declared argument two different ways.
+- **A script that would not be cached is never prewarmed, not merely never
+  cached.** This is the one real correctness gap the naive version of this
+  phase had: prewarming happens *before* the real `Assembler` exists, so it
+  cannot go through `custom_memo` (the once-per-call-site memoization
+  `Assembler::exec_custom` already provides across a run's two passes) —
+  meaning a script that writes a file, draws randomness, or does anything
+  else on the [never-cached list](../docs/src/extending.md#what-is-never-cached)
+  would otherwise run once from prewarm *and again* from the sequential pass
+  that follows, a real duplicated side effect rather than merely wasted work.
+  Caught by writing `an_impure_script_with_literal_arguments_runs_exactly_once`-style
+  test coverage before trusting the design, not found by a fuzzer.
+  `nessemble_script::is_pure(source)` — new, and the fix — answers the
+  purity question by compiling the script and running the existing
+  `purity::impurity` AST scan **without calling `custom()`**, so the check
+  itself never risks the side effect it exists to prevent one extra
+  occurrence of.
+- **The on-disk cache schema needed no change**, despite `cache.rs`'s `get`/
+  `put` being genuinely unsafe under concurrent access before this phase (see
+  next bullet): because an uncacheable outcome is never written to disk
+  (previous bullet) and a `CustomOutput::Source` outcome is likewise never
+  written (`plans/013-structured-data-parsing.md` §13.3), *only* `Bytes`
+  outcomes are ever stored — so `Cache::get`'s return type stays
+  `Option<Vec<u8>>`, and a prewarmed hit is wrapped `CustomOutput::Bytes(...)`
+  at the one call site that reads it back.
+- **`write_atomic`'s tmp file needed a real fix, not just a design note.**
+  §7 flagged "cache reads/writes are not currently safe under concurrent
+  access" as a prerequisite; the specific bug was `write_atomic`'s temp
+  filename being unique per *process* (`std::process::id()`) but not per
+  *call* — two threads racing to write different cache entries (or, less
+  likely but still possible, the same one) could collide on the same temp
+  path and corrupt one or both. Fixed with a process-id-plus-atomic-counter
+  suffix. `concurrent_puts_to_distinct_keys_do_not_corrupt_each_other` and
+  `concurrent_puts_to_the_same_key_leave_a_consistent_entry`
+  (`nessemble-cli/src/cache.rs`) are regression tests for exactly this,
+  verified (by temporarily reverting the fix) to fail intermittently without
+  it and pass reliably with it.
+- **`rayon` is a direct dependency of `nessemble-cli` only**, not a workspace
+  dependency — confirmed absent from `Cargo.lock` before this phase, per §7's
+  own note. `nessemble-core` and `nessemble-script` gained no new dependency
+  and no new feature flag; wasm is unaffected since the parallelism lives
+  entirely in the CLI's own prewarm step, which nothing in the wasm build path
+  calls.
+- **Candidates are deduplicated before dispatch.** Two call sites can
+  legitimately share identical arguments (`custom_memo.rs`'s own
+  `separate_call_sites_resolve_separately`), which would otherwise mean two
+  threads racing to compute and write the same cache entry — wasted work,
+  not a correctness problem once the tmp-file fix above landed, but avoided
+  anyway since it costs only a `HashSet` over `PrewarmCandidate`, which
+  derives `Hash`/`Eq` for exactly this.
+- Tests: `nessemble-core/tests/prewarm.rs` covers the scan in isolation
+  (literal/symbol/bank arguments, declared-argument resolution matching the
+  real pass, macro-expanded invocations, best-effort failure handling).
+  `nessemble-cli/src/cache.rs` covers the concurrency fix directly.
+  `nessemble-cli/tests/cli.rs` covers the end-to-end outcome — many
+  literal-argument directives prewarming to the right bytes in the right
+  order with every entry cached, a symbol-dependent directive falling back to
+  the sequential path untouched, `--no-cache` skipping prewarming cleanly,
+  and the impure-script-runs-exactly-once regression above.

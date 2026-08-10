@@ -298,8 +298,21 @@ impl Cache {
 
 /// Write `bytes` to `path` via a temporary file and a rename, so a concurrent
 /// reader never sees a half-written file. Returns whether it succeeded.
+///
+/// The tmp name is unique per **call**, not just per process: prewarming
+/// (`plans/013-structured-data-parsing.md` §7) calls `get`/`put` for
+/// different keys concurrently from multiple threads in the same process, and
+/// two entries that happen to share a `path` — a `get`'s touch racing a
+/// `put`, or two `put`s, for the same [`Key`] — must not collide on the same
+/// tmp file, which a process-id-only name allows.
 fn write_atomic(path: &Path, bytes: &[u8]) -> bool {
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     if std::fs::write(&tmp, bytes).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;
@@ -561,5 +574,55 @@ mod tests {
             None,
             "an unconfirmable dependency stores nothing"
         );
+    }
+
+    #[test]
+    fn concurrent_puts_to_distinct_keys_do_not_corrupt_each_other() {
+        // Prewarming (`plans/013-structured-data-parsing.md` §7) calls `put`
+        // for many different keys concurrently from multiple threads in one
+        // process — `write_atomic`'s tmp file must be unique per *call*, not
+        // just per process, or two threads racing to write different entries
+        // can clobber each other's temp file.
+        let t = TempCache::new("concurrent-distinct");
+        let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
+        let keys: Vec<Key> = (0..64u8)
+            .map(|i| Key::new("foo", &[i64::from(i)], &[], &t.root, None, &script).unwrap())
+            .collect();
+
+        std::thread::scope(|scope| {
+            for (i, key) in keys.iter().enumerate() {
+                let cache = &t.cache;
+                scope.spawn(move || cache.put(key, &[], &[i as u8]));
+            }
+        });
+
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(
+                t.cache.get(key),
+                Some(vec![i as u8]),
+                "entry {i} corrupted by a concurrent write to another key"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_puts_to_the_same_key_leave_a_consistent_entry() {
+        // Two call sites can share identical arguments (`plans/011-pseudo-op-caching.md`),
+        // so two prewarm tasks can legitimately race to write the *same* cache
+        // key. The result must always be one complete, self-consistent entry
+        // — never bytes from one write paired with another write's metadata.
+        let t = TempCache::new("concurrent-same");
+        let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
+        let key = t.key(&script);
+
+        std::thread::scope(|scope| {
+            for _ in 0..32 {
+                let cache = &t.cache;
+                let key = &key;
+                scope.spawn(move || cache.put(key, &[], &[0xAB, 0xCD, 0xEF]));
+            }
+        });
+
+        assert_eq!(t.cache.get(&key), Some(vec![0xAB, 0xCD, 0xEF]));
     }
 }

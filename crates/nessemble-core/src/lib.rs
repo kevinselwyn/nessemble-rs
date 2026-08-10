@@ -19,7 +19,9 @@ mod paths;
 mod preprocess;
 pub mod tooling;
 
-pub use assemble::{crc_32, CustomOutput, CustomResolver, Diag, ListSymbol, SourceMap, SourceSpan};
+pub use assemble::{
+    crc_32, CustomOutput, CustomResolver, Diag, ListSymbol, PrewarmCandidate, SourceMap, SourceSpan,
+};
 pub use paths::{
     find_project_root, project_root, resolve_path_arg, PathArgError, PROJECT_MARKERS,
     PROJECT_ROOT_PREFIX,
@@ -182,6 +184,57 @@ pub fn assemble_file_with(
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let root = resolve_root(options, Some(&base));
     assemble_impl(&source, options, base, &display_name(path), root, custom)
+}
+
+/// Scan the file at `path` for custom-directive invocations whose arguments
+/// are knowable without running either assembly pass — every string argument
+/// resolves the same way [`assemble_file_with`] would resolve it, and every
+/// integer argument is a compile-time-literal expression with no symbol,
+/// local-label, or bank reference. Safe to resolve ahead of time, e.g. to
+/// prewarm a cache concurrently before the real assembly call
+/// (`plans/013-structured-data-parsing.md` §7).
+///
+/// Best-effort: a preprocessing or parse failure here (a missing include, a
+/// syntax error) simply yields no candidates rather than an error — the
+/// [`assemble_file_with`] call this is meant to run ahead of remains the sole
+/// authority on reporting it, so nothing is lost by staying quiet here.
+#[must_use]
+pub fn prewarm_candidates_file(path: &Path, options: &Options) -> Vec<PrewarmCandidate> {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let root = resolve_root(options, Some(&base));
+    prewarm_candidates_impl(&source, base, &display_name(path), root)
+}
+
+/// Like [`prewarm_candidates_file`], for in-memory `source` — mirroring
+/// [`assemble_with`]'s stdin-style resolution (relative to the current
+/// directory).
+#[must_use]
+pub fn prewarm_candidates(source: &str, options: &Options) -> Vec<PrewarmCandidate> {
+    let cwd = std::env::current_dir().ok();
+    let base = cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+    let root = resolve_root(options, cwd.as_deref());
+    prewarm_candidates_impl(source, base, "stdin", root)
+}
+
+fn prewarm_candidates_impl(
+    source: &str,
+    base: PathBuf,
+    top_name: &str,
+    root: Option<PathBuf>,
+) -> Vec<PrewarmCandidate> {
+    let Ok(pre) = preprocess::preprocess(source, base, top_name, root) else {
+        return Vec::new();
+    };
+    let Ok(lines) = parse::parse(pre.tokens) else {
+        return Vec::new();
+    };
+    assemble::prewarm_candidates(&lines, &pre.dirs, pre.root.as_deref())
 }
 
 /// Assemble in-memory `source` as though it were the file at `path`: includes

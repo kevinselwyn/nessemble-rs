@@ -36,6 +36,10 @@ serde.workspace = true
 serde_json.workspace = true
 nessemble-script = { workspace = true, optional = true }
 nessemble-lsp = { workspace = true, optional = true }
+# Prewarming the pseudo-op cache concurrently (`plans/013-structured-data-parsing.md`
+# §7) — the only data-parallelism need in the workspace, so it stays a direct
+# dependency of this crate rather than a workspace one.
+rayon = "1"
 
 [lints]
 workspace = true

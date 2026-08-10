@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use nessemble_core::{parse_pseudo_mapping, CustomOutput, CustomResolver};
 use nessemble_i18n::t;
+use rayon::prelude::*;
 
 use crate::{cache, home};
 
@@ -87,6 +88,74 @@ impl Resolver {
         }
         Ok(outcome.output)
     }
+
+    /// Prewarm the on-disk cache for `candidates`, running the ones that
+    /// aren't already cached **concurrently**, ahead of the sequential
+    /// emission passes that will call [`Self::resolve`] for the same
+    /// invocations (`plans/013-structured-data-parsing.md` §7). A script is
+    /// the expensive part of a directive on a script-heavy build (decoding a
+    /// PNG, parsing XML, …); every invocation is independent by construction,
+    /// so nothing about running several of them at once changes what any one
+    /// of them computes.
+    ///
+    /// A no-op when caching is off (`self.cache` is `None`): with nowhere to
+    /// stash a concurrently-computed result for the sequential pass to pick
+    /// up, running ahead of time would only waste the work, never save it.
+    /// Two call sites can share identical arguments, so candidates are
+    /// deduplicated first — otherwise two threads could race to compute and
+    /// write the very same cache entry.
+    fn prewarm(&self, candidates: &[nessemble_core::PrewarmCandidate]) {
+        if self.cache.is_none() {
+            return;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&nessemble_core::PrewarmCandidate> =
+            candidates.iter().filter(|c| seen.insert(*c)).collect();
+        unique.par_iter().for_each(|c| self.prewarm_one(c));
+    }
+
+    /// Prewarm a single candidate, unless it is already cached or its script
+    /// is not safe to run an extra, uncounted time.
+    ///
+    /// Prewarming happens entirely ahead of — and independently of —
+    /// `custom_memo`, the assembler's own once-per-call-site memoization
+    /// (`Assembler::exec_custom`): running a script here does not stop the
+    /// real, sequential pass from also running it once, as it always has.
+    /// That composes cleanly for a *cacheable* result (the sequential pass's
+    /// own call just hits the now-warm cache instead), but not for one that
+    /// isn't: a script that writes a file, or draws randomness, must run
+    /// exactly as many times as the sequential passes call it — running it
+    /// here too would be a real extra side effect, not merely wasted work.
+    /// [`nessemble_script::is_pure`] answers that *without* running the
+    /// script, so the check costs a compile, not an execution.
+    fn prewarm_one(&self, c: &nessemble_core::PrewarmCandidate) {
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        let Ok((path, _)) = self.locate(&c.name, &c.base_dir) else {
+            return;
+        };
+        let Some(key) = cache::Key::new(
+            &c.name,
+            &c.ints,
+            &c.texts,
+            &c.base_dir,
+            c.root.as_deref(),
+            &path,
+        ) else {
+            return;
+        };
+        if cache.get(&key).is_some() {
+            return; // Already warm — nothing to do.
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        if !is_pure(&source) {
+            return;
+        }
+        let _ = self.resolve(&c.name, &c.ints, &c.texts, &c.base_dir, c.root.as_deref());
+    }
 }
 
 /// Construct the resolver state from the optional `-p` mapping file, also
@@ -120,6 +189,25 @@ fn make_resolver(pseudo_file: Option<&str>, caching: bool) -> Resolver {
 /// run (see [`build_resolver_with_coverage`]).
 pub fn build_resolver(pseudo_file: Option<&str>, caching: bool) -> CustomResolver {
     let resolver = make_resolver(pseudo_file, caching);
+    Box::new(move |name, ints, texts, base_dir, root| {
+        resolver.resolve(name, ints, texts, base_dir, root)
+    })
+}
+
+/// Like [`build_resolver`], but first prewarming the cache concurrently for
+/// every candidate a scan of the program already found safe to resolve ahead
+/// of time (`nessemble_core::prewarm_candidates_file`/`prewarm_candidates`,
+/// `plans/013-structured-data-parsing.md` §7). Identical to `build_resolver`
+/// otherwise — same lookup precedence, same caching behavior, same resolver
+/// shape — except the sequential emission passes that follow are likely to
+/// find several scripts already warm.
+pub fn build_resolver_prewarmed(
+    pseudo_file: Option<&str>,
+    caching: bool,
+    candidates: &[nessemble_core::PrewarmCandidate],
+) -> CustomResolver {
+    let resolver = make_resolver(pseudo_file, caching);
+    resolver.prewarm(candidates);
     Box::new(move |name, ints, texts, base_dir, root| {
         resolver.resolve(name, ints, texts, base_dir, root)
     })
@@ -215,4 +303,16 @@ fn run_script(
     _root: Option<&Path>,
 ) -> Result<CustomOutput, String> {
     Err("scripting is disabled".to_string())
+}
+
+#[cfg(feature = "scripting")]
+fn is_pure(source: &str) -> bool {
+    nessemble_script::is_pure(source)
+}
+
+/// Without the scripting feature nothing can run at all, so there is nothing
+/// safe to prewarm.
+#[cfg(not(feature = "scripting"))]
+fn is_pure(_source: &str) -> bool {
+    false
 }

@@ -1399,28 +1399,17 @@ impl Assembler {
             match arg {
                 CustomArg::Int(e) => ints.push(self.eval(e)),
                 CustomArg::Str(s) => {
-                    let (path, is_declared) = crate::strip_file_url(s);
-                    if is_declared {
-                        let resolved = match crate::resolve_path_arg(
-                            self.root.as_deref(),
-                            self.cur_dir(),
-                            path,
-                        ) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                self.hard_error(e.message(path));
-                                return;
+                    match resolve_str_arg(s, self.cur_dir(), self.root.as_deref()) {
+                        Ok((text, declared_path)) => {
+                            texts.push(text);
+                            if let Some(resolved) = declared_path {
+                                declared.push((crate::strip_file_url(s).0.to_string(), resolved));
                             }
-                        };
-                        let is_root_relative = path.starts_with(crate::PROJECT_ROOT_PREFIX);
-                        texts.push(if is_root_relative {
-                            resolved.to_string_lossy().into_owned()
-                        } else {
-                            path.to_string()
-                        });
-                        declared.push((path.to_string(), resolved));
-                    } else {
-                        texts.push(path.to_string());
+                        }
+                        Err(e) => {
+                            self.hard_error(e.message(crate::strip_file_url(s).0));
+                            return;
+                        }
                     }
                 }
             }
@@ -1991,4 +1980,121 @@ fn dedup(diags: &[Diag]) -> Vec<Diag> {
         .filter(|d| seen.insert((d.file.clone(), d.line, d.message.clone())))
         .cloned()
         .collect()
+}
+
+/// Resolve one custom-directive string argument to what `texts` should carry,
+/// and — if it was declared (`file://`) — the path to existence-check. Shared
+/// by [`Assembler::exec_custom`] and [`prewarm_candidates`] so the two cannot
+/// drift: a prewarm scan that resolved a declared argument differently from
+/// the real pass would prewarm the wrong cache entry.
+fn resolve_str_arg(
+    s: &str,
+    dir: &Path,
+    root: Option<&Path>,
+) -> Result<(String, Option<PathBuf>), crate::PathArgError> {
+    let (path, is_declared) = crate::strip_file_url(s);
+    if !is_declared {
+        return Ok((path.to_string(), None));
+    }
+    let resolved = crate::resolve_path_arg(root, dir, path)?;
+    let is_root_relative = path.starts_with(crate::PROJECT_ROOT_PREFIX);
+    let text = if is_root_relative {
+        resolved.to_string_lossy().into_owned()
+    } else {
+        path.to_string()
+    };
+    Ok((text, Some(resolved)))
+}
+
+/// A custom-directive invocation whose arguments are knowable without running
+/// either assembly pass: every string argument resolves the same way
+/// [`Assembler::exec_custom`] resolves it (declared/`@/` paths are looked up
+/// against static per-file tables, no assembler state involved), and every
+/// integer argument is a [`literal_eval`]-able expression — no symbol, local
+/// label, or bank reference, so its value cannot depend on anything a pass
+/// discovers. Safe to resolve ahead of time, e.g. to prewarm a cache
+/// concurrently before the sequential emission passes read from it
+/// (`plans/013-structured-data-parsing.md` §7).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PrewarmCandidate {
+    pub name: String,
+    pub ints: Vec<i64>,
+    pub texts: Vec<String>,
+    pub base_dir: PathBuf,
+    pub root: Option<PathBuf>,
+}
+
+/// Evaluate `expr` if it references no symbol, anonymous local label, or
+/// bank — a compile-time-literal expression whose value cannot differ between
+/// passes (or depend on anything a pass discovers). `None` otherwise. Shares
+/// [`Assembler::apply`]'s arithmetic so a literal expression evaluates
+/// identically here and in the real pass.
+fn literal_eval(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Num(n) => Some(*n),
+        Expr::Symbol(_) | Expr::LocalForward(_) | Expr::LocalBackward(_) | Expr::Bank(_) => None,
+        Expr::High(e) => Some((literal_eval(e)? >> 8) & 0xFF),
+        Expr::Low(e) => Some(literal_eval(e)? & 0xFF),
+        Expr::Binary(a, op, b) => Some(Assembler::apply(literal_eval(a)?, *op, literal_eval(b)?)),
+    }
+}
+
+/// Scan `lines` for [`PrewarmCandidate`]s: every `Pseudo::Custom` invocation
+/// whose arguments resolve without running a pass. A directive with even one
+/// symbol-dependent integer argument, or a declared string argument that
+/// doesn't resolve or names a file that isn't there, is simply left out — it
+/// runs sequentially as it always has, through the real pass's own
+/// `exec_custom`, which remains the sole authority on errors (a prewarm scan
+/// never reports one of its own).
+#[must_use]
+pub(crate) fn prewarm_candidates(
+    lines: &[Line],
+    dirs: &[PathBuf],
+    root: Option<&Path>,
+) -> Vec<PrewarmCandidate> {
+    let mut out = Vec::new();
+    for line in lines {
+        let Stmt::Pseudo(Pseudo::Custom(name, args)) = &line.stmt else {
+            continue;
+        };
+        let dir = dirs
+            .get(line.file as usize)
+            .map_or_else(|| Path::new("."), PathBuf::as_path);
+        let mut ints = Vec::new();
+        let mut texts = Vec::new();
+        let mut safe = true;
+        for arg in args {
+            match arg {
+                CustomArg::Int(e) => {
+                    if let Some(v) = literal_eval(e) {
+                        ints.push(v);
+                    } else {
+                        safe = false;
+                        break;
+                    }
+                }
+                CustomArg::Str(s) => match resolve_str_arg(s, dir, root) {
+                    Ok((_, Some(resolved))) if !resolved.exists() => {
+                        safe = false;
+                        break;
+                    }
+                    Ok((text, _)) => texts.push(text),
+                    Err(_) => {
+                        safe = false;
+                        break;
+                    }
+                },
+            }
+        }
+        if safe {
+            out.push(PrewarmCandidate {
+                name: name.clone(),
+                ints,
+                texts,
+                base_dir: dir.to_path_buf(),
+                root: root.map(Path::to_path_buf),
+            });
+        }
+    }
+    out
 }

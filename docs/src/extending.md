@@ -592,6 +592,40 @@ the same timestamp tick as the previous one can go unnoticed. If a build ever lo
 stale, [`--no-cache`](usage.md#no-cache) bypasses the cache entirely and
 [`nessemble cache clear`](usage.md#cache-info--cache-clear) empties it.
 
+### Prewarming runs independent scripts concurrently
+
+Before assembling, `nessemble` scans the program for custom-directive
+invocations whose arguments it can already work out — a directive whose
+integer arguments are plain numbers (no forward-referenced label) and whose
+string arguments are either undeclared or name a file that exists. Every
+invocation is independent by construction, so the ones it finds are resolved
+**concurrently**, across as many CPU cores as are available, filling the cache
+before the sequential assembly passes read from it. On a script-heavy build —
+several `.tilemap`/`.incpng`-style directives, each decoding its own PNG — this
+overlaps work that used to run one script at a time.
+
+This is transparent to almost every script: nothing about *what* a directive
+computes changes, only when it computes it, and the same "once per build,
+memoized across passes" guarantee still holds for the bytes that actually
+reach the ROM. Two things follow from prewarming happening ahead of, and
+independently of, that per-build memoization:
+
+- **A script that writes a file, draws randomness, or otherwise does
+  something the [never-cached](#what-is-never-cached) list covers is never
+  prewarmed** — running it an extra, uncounted time would be a real side
+  effect, not merely wasted work, so `nessemble` checks for exactly that
+  (without running the script) before ever including it.
+- **A directive whose arguments are not yet knowable — a forward-referenced
+  label, most commonly — is left for the sequential passes**, exactly as
+  before prewarming existed; nothing about it changes.
+
+Directive scripts remain independent of each other in every way that matters
+(each runs on its own interpreter instance, its own cache reads and writes),
+so no script needs to change to benefit from this. The one thing worth
+knowing: if a script reaches *outside* what the host tracks — writing to a
+fixed path some other tool also touches, say — assume it can now run
+concurrently with other invocations, not only with itself across builds.
+
 ### What is never cached
 
 Some scripts must really run every time, and are detected and excluded

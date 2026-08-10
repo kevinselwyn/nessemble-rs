@@ -30,7 +30,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use nessemble_core::{assemble_file_with, assemble_with, render_list_file, AssembleError, Options};
+use nessemble_core::{
+    assemble_file_with, assemble_with, prewarm_candidates, prewarm_candidates_file,
+    render_list_file, AssembleError, Options,
+};
 use nessemble_i18n::t;
 
 /// Return codes mirroring the reference tool.
@@ -256,17 +259,27 @@ fn assemble_mode(cli: &Cli) -> u8 {
 
     let input: Option<PathBuf> = cli.infile.as_deref().map(PathBuf::from);
     let result = match &input {
-        Some(path) => assemble_file_with(
-            path,
-            &options,
-            custom::build_resolver(cli.pseudo.as_deref(), !cli.no_cache),
-        ),
-        None => match read_stdin() {
-            Ok(source) => assemble_with(
-                &source,
+        Some(path) => {
+            let candidates = prewarm_candidates_file(path, &options);
+            assemble_file_with(
+                path,
                 &options,
-                custom::build_resolver(cli.pseudo.as_deref(), !cli.no_cache),
-            ),
+                custom::build_resolver_prewarmed(cli.pseudo.as_deref(), !cli.no_cache, &candidates),
+            )
+        }
+        None => match read_stdin() {
+            Ok(source) => {
+                let candidates = prewarm_candidates(&source, &options);
+                assemble_with(
+                    &source,
+                    &options,
+                    custom::build_resolver_prewarmed(
+                        cli.pseudo.as_deref(),
+                        !cli.no_cache,
+                        &candidates,
+                    ),
+                )
+            }
             Err(e) => {
                 eprintln!("nessemble: could not read input: {e}");
                 return RETURN_EPERM;
