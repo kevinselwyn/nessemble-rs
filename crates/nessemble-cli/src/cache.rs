@@ -34,8 +34,12 @@ use serde::{Deserialize, Serialize};
 use crate::home;
 
 /// On-disk layout version. An entry written by a different version is a miss,
-/// never a misread.
-const FORMAT: u32 = 1;
+/// never a misread. Bumped when [`Key`]'s shape changes (most recently, adding
+/// `root` — `plans/013-structured-data-parsing.md` §11.1); `serde`'s
+/// missing-field error already makes a differently-shaped old entry
+/// undeserializable, so the bump is a documentation signal more than a
+/// mechanism.
+const FORMAT: u32 = 2;
 
 /// Total size the cache is trimmed back to on write, oldest entries first.
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
@@ -82,9 +86,13 @@ impl Stamp {
 /// The script is identified by a [`Stamp`], so editing a script invalidates every
 /// entry that ran it, and re-pointing a `--pseudo` mapping at a different file
 /// changes the key outright. `base_dir` is here because the script's own relative
-/// reads resolve against it, and the `nessemble` version is here because the host
-/// helpers (`nes_shade`, `find_cell`, …) define the output — a release must not
-/// serve bytes computed by a different implementation of them.
+/// reads resolve against it, `root` because a `@/`-prefixed one instead resolves
+/// against the project root (`plans/013-structured-data-parsing.md` §11.1) —
+/// without it, two builds sharing a `base_dir` but disagreeing on the root (say,
+/// a `.nessemblerc` added between them) could serve one build's `@/` bytes to
+/// the other — and the `nessemble` version is here because the host helpers
+/// (`nes_shade`, `find_cell`, …) define the output — a release must not serve
+/// bytes computed by a different implementation of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
     format: u32,
@@ -93,6 +101,7 @@ pub struct Key {
     ints: Vec<i64>,
     texts: Vec<String>,
     base_dir: PathBuf,
+    root: Option<PathBuf>,
     script: Stamp,
 }
 
@@ -103,6 +112,7 @@ impl Key {
         ints: &[i64],
         texts: &[String],
         base_dir: &Path,
+        root: Option<&Path>,
         script: &Path,
     ) -> Option<Key> {
         Some(Key {
@@ -112,6 +122,7 @@ impl Key {
             ints: ints.to_vec(),
             texts: texts.to_vec(),
             base_dir: base_dir.to_path_buf(),
+            root: root.map(Path::to_path_buf),
             script: Stamp::of(script)?,
         })
     }
@@ -334,7 +345,15 @@ mod tests {
         }
 
         fn key(&self, script: &Path) -> Key {
-            Key::new("tilemap", &[1], &["a".to_string()], &self.root, script).expect("key")
+            Key::new(
+                "tilemap",
+                &[1],
+                &["a".to_string()],
+                &self.root,
+                None,
+                script,
+            )
+            .expect("key")
         }
     }
 
@@ -415,23 +434,60 @@ mod tests {
         let t = TempCache::new("args");
         let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
         let base = &t.root;
-        let key = Key::new("foo", &[1], &["a".to_string()], base, &script).unwrap();
+        let key = Key::new("foo", &[1], &["a".to_string()], base, None, &script).unwrap();
         t.cache.put(&key, &[], &[0x01]);
 
-        let other_int = Key::new("foo", &[2], &["a".to_string()], base, &script).unwrap();
-        let other_text = Key::new("foo", &[1], &["b".to_string()], base, &script).unwrap();
-        let other_name = Key::new("bar", &[1], &["a".to_string()], base, &script).unwrap();
+        let other_int = Key::new("foo", &[2], &["a".to_string()], base, None, &script).unwrap();
+        let other_text = Key::new("foo", &[1], &["b".to_string()], base, None, &script).unwrap();
+        let other_name = Key::new("bar", &[1], &["a".to_string()], base, None, &script).unwrap();
         let other_dir = Key::new(
             "foo",
             &[1],
             &["a".to_string()],
             Path::new("/elsewhere"),
+            None,
             &script,
         )
         .unwrap();
         for key in [other_int, other_text, other_name, other_dir] {
             assert_eq!(t.cache.get(&key), None);
         }
+    }
+
+    #[test]
+    fn the_project_root_is_part_of_the_key() {
+        // Two builds with the same base_dir but different project roots must not
+        // share a cache entry: a script that resolves a `@/`-prefixed path itself
+        // could read a different file under each root
+        // (`plans/013-structured-data-parsing.md` §11.1).
+        let t = TempCache::new("root");
+        let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
+        let no_root = Key::new("foo", &[1], &["a".to_string()], &t.root, None, &script).unwrap();
+        t.cache.put(&no_root, &[], &[0x01]);
+
+        let with_root = Key::new(
+            "foo",
+            &[1],
+            &["a".to_string()],
+            &t.root,
+            Some(Path::new("/proj")),
+            &script,
+        )
+        .unwrap();
+        assert_eq!(t.cache.get(&with_root), None);
+
+        let other_root = Key::new(
+            "foo",
+            &[1],
+            &["a".to_string()],
+            &t.root,
+            Some(Path::new("/elsewhere")),
+            &script,
+        )
+        .unwrap();
+        t.cache.put(&with_root, &[], &[0x02]);
+        assert_eq!(t.cache.get(&other_root), None);
+        assert_eq!(t.cache.get(&with_root), Some(vec![0x02]));
     }
 
     #[test]

@@ -651,6 +651,7 @@ name = "nessemble-script"
 version = "2.23.1"
 dependencies = [
  "image",
+ "nessemble-core",
  "nessemble-media",
  "rhai",
  "rhai-fs",

@@ -158,10 +158,12 @@ The script still sees a plain path in `texts[0]`, just an absolute one this
 time — `@/` resolution happens once, before the file-existence check, so
 `texts[0]` is already `"/path/to/project/art/map.png"` by the time `custom`
 runs. Nothing about the script changes; `read_blob(texts[0])` works exactly as
-it does for a source-relative path. This is also the only way to write a
-project-root-relative path in a custom pseudo-op's argument: `@/` resolves
-solely where the assembler already knows a string is a path, and `file://` is
-what says so for an argument that has no built-in directive to say it for.
+it does for a source-relative path.
+
+A script's own file reads honour `@/` too — see
+[Filesystem access](#filesystem-access) — so declaring an argument is about the
+existence check and editor support above, not about unlocking `@/` for a path
+the script builds itself.
 
 Declaring is optional and per-argument. A script that treats a missing file as
 *optional* — falling back to a default when it isn't there — should leave the
@@ -199,7 +201,22 @@ disk instead of only computing them. The main entry point is `open_file`:
   the file's bytes as a blob, equivalent to `open_file(path, "r").read_blob()`.
 
 Relative paths resolve against the **source file's directory** — the same base
-as `.include` and the `.inc*` importers — while absolute paths are used as-is.
+as `.include` and the `.inc*` importers — absolute paths are used as-is, and a
+path prefixed `@/` resolves from the
+[project root](syntax.md#project-root-relative-paths), the same as everywhere
+else `@/` is honoured:
+
+```rust,ignore
+fn custom(ints, texts) {
+    read_blob("@/assets/shared.bin")
+}
+```
+
+`open_file`, `read_blob`, `decode_png_file`, `parse_xml_file`, and
+`parse_json_file` all resolve `@/` identically — no one of them is left
+behaving differently from the others. A `@/` path is an error when no project
+root could be determined, naming the sigil rather than falling back to the
+source file's directory.
 
 A `.embed "file"` directive that emits a file's bytes verbatim:
 
@@ -498,7 +515,11 @@ An entry is reused only when all of the following still hold:
 - the **script** itself is unchanged (a `--pseudo` mapping pointing at a different
   script is a different entry too),
 - every **file the script read** is unchanged,
-- the directive's **arguments** and the directory it was called from are the same,
+- the directive's **arguments**, the directory it was called from, and the
+  [project root](syntax.md#project-root-relative-paths) (if any) are the same —
+  two builds that agree on everything else but disagree on `--root` do not
+  share an entry, since a `@/`-prefixed path the script resolves itself could
+  read a different file under each,
 - and the `nessemble` version is the same — the host's helpers define the output,
   so a new release starts from an empty cache.
 

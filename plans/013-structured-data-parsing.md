@@ -1,7 +1,7 @@
 # nessemble-rs: A Plan for Structured Data Parsing in Custom Pseudo-Ops
 
-> Status: **Phase 0 shipped ([§8](#8-phased-plan)); Phases 1–4 designed, not yet
-> built.** This document gives custom pseudo-op scripts native, host-side parsers
+> Status: **Phases 0–1 shipped ([§12](#12-phased-plan), [§13.2](#132-phase-1));
+> Phases 2–4 designed, not yet built.** This document gives custom pseudo-op scripts native, host-side parsers
 > for structured text — XML first, JSON alongside it ([§2](#2-native-document-parsing))
 > — on the same "host does the byte-level work, the script does the logic"
 > contract [`decode_png_file`](../crates/nessemble-script/src/lib.rs) already
@@ -14,8 +14,8 @@
 > larger, riskier parts of the originating request — assembly-source-returning
 > directives, parallel script execution, a settable operation limit, and a
 > per-directive timing report — as designed-but-deferred phases
-> ([§5](#5-deferred-source-returning-directives), [§6](#6-deferred-parallel-script-execution),
-> [§7](#7-deferred-operation-limits-and-timing)).
+> ([§6](#6-deferred-source-returning-directives), [§7](#7-deferred-parallel-script-execution),
+> [§8](#8-deferred-operation-limits-and-timing)).
 >
 > The through-line, inherited from the request this plan answers: **the host does
 > byte- and character-level work; the script does the logic.** Rhai is a
@@ -456,13 +456,14 @@ JSON: `serde_json` is **already** a workspace dependency (`nessemble-cli`,
   "Caching" section's file list grows the two new functions.
 - Changeset: `minor` (new script-facing functionality, no breaking change).
 
-### Phase 1 — `@/` for the script-file API (deferred, §11.1)
+### Phase 1 — `@/` for the script-file API (§11.1). **Shipped.**
 
 Widen `CustomResolver` and `nessemble-script`'s public `run`/`run_with_inputs` to
 carry an optional project root, in the additive shape plan 011 used when it added
 `run_with_inputs` alongside `run`. Every one of `read_blob`, `decode_png_file`,
 `parse_xml_file`, `parse_json_file` gains `@/` support in the same change, so no
-function is left inconsistent with another.
+function is left inconsistent with another. See [§13.2](#132-phase-1) for what
+shipped.
 
 ### Phase 2 — source-returning directives (deferred, §6)
 
@@ -523,3 +524,60 @@ reported via a new CLI flag.
   dependency tracking through both a direct call and a nested one
   (`records_every_route_from_a_path_to_a_file`,
   `a_nested_parse_xml_file_call_is_recorded_too`).
+
+### 13.2 Phase 1
+
+- **`CustomResolver` itself widened to a fifth argument** (`Option<&Path>`,
+  the project root), rather than a parallel `_with_root` type as one reading of
+  §12's "additive" framing might suggest. §11.1 already called for exactly this
+  ("widening `CustomResolver`… for all five path-taking script functions at
+  once"), and every one of its nine construction sites (`default_custom_resolver`,
+  `lenient_custom_resolver`, `nessemble-cli`'s two `build_resolver*` functions,
+  `nessemble-wasm`'s, and four test helpers) lives inside this workspace, so the
+  "breaking" edge of the change is entirely internal — nothing outside the repo
+  constructs a `CustomResolver` by hand. What stayed additive, as §12 specifies,
+  is `nessemble-script`'s own public API: `run`/`run_with_inputs` are untouched
+  (they still exist, still take four arguments, still mean "no project root"),
+  and `run_with_root`/`run_with_inputs_and_root` are new siblings alongside them
+  — an embedder of `nessemble-script` directly (not through `CustomResolver`)
+  sees no breaking change at all.
+- **`nessemble-script` gained a dependency on `nessemble-core`** to resolve
+  `@/`, rather than reimplementing the prefix/escape-check logic locally. There
+  is no cycle (`nessemble-core` does not depend on `nessemble-script`, unlike
+  `nessemble-rc`'s situation in plan 012 §4, which is why *that* plan
+  duplicated its marker-list logic instead), and reusing
+  `nessemble_core::resolve_path_arg` means the two crates cannot drift on the
+  one thing that actually matters here: the Windows-safe, component-wise escape
+  check (plan 012 §13.3) that a from-scratch reimplementation would risk
+  getting subtly wrong.
+- **The on-disk cache key gained a `root` field** (`nessemble-cli/src/cache.rs`
+  `Key`, `FORMAT` bumped `1` → `2`) — not called out in §11.1 or §12, but a
+  direct consequence of the caching architecture in §3: once a script can
+  resolve `@/` itself, two builds sharing a `base_dir` but disagreeing on the
+  project root (say, a `.nessemblerc` added between them, or two `--root`
+  flags) could otherwise read a stale entry keyed on inputs recorded under a
+  *different* root's resolution of the same `@/`-prefixed name. Covered by
+  `the_project_root_is_part_of_the_key` (unit) and
+  `a_different_project_root_is_not_served_from_the_others_cache_entry` (CLI
+  end-to-end).
+- **`nessemble-script`'s `resolve` became fallible** (`Result<PathBuf, String>`
+  rather than a bare `PathBuf`), since `@/` introduces two new failure modes
+  (no root, or a path that escapes it) that plain relative/absolute resolution
+  never had. Every one of the five registrations that call it —
+  `path` (rhai-fs's own path hook, so `open_file("@/…")` gains `@/` too),
+  `read_blob`, `decode_png_file`, `parse_xml_file`, `parse_json_file` — prefixes
+  the resulting message with its own name, matching the existing
+  `"<fn>: cannot read …"` convention rather than introducing a new one.
+- **`coverage::run_with_coverage` gained the same `root` parameter**, even
+  though neither §11.1 nor §12 names it. Leaving it out would have meant
+  `nessemble coverage --scripts` resolving `@/` differently from an ordinary
+  build — exactly the "one function inconsistent with another" outcome §11.1
+  is about.
+- Every acceptance criterion Phase 1 is testable against has a regression
+  test: `@/` resolving from the root rather than `base_dir`
+  (`a_root_relative_path_resolves_from_the_project_root_not_base_dir`), every
+  path-taking function agreeing
+  (`every_path_taking_function_honors_at_slash`), the no-root and
+  escapes-the-root error cases, and the CLI end-to-end case
+  (`custom_pseudo_script_resolves_at_slash_against_the_root_flag`) alongside the
+  cache-key case above.

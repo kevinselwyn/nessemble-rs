@@ -9,6 +9,11 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# `resolve_path_arg`/`PROJECT_ROOT_PREFIX` — the same `@/` resolution every
+# other path-taking argument uses, so a script's own file API doesn't
+# reimplement (and risk drifting from) the escape check. No cycle: nessemble-core
+# does not depend on this crate.
+nessemble-core.workspace = true
 nessemble-media.workspace = true
 # `internals` exposes the AST types the purity scan walks (see `purity`).
 rhai = { version = "1", default-features = false, features = ["std", "internals"] }

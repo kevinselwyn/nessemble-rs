@@ -4195,7 +4195,11 @@ start:
         // (`.hibytes`), with `align_continuations` both on and off.
         fn resolver() -> crate::CustomResolver {
             Box::new(
-                |_name: &str, ints: &[i64], _texts: &[String], _dir: &std::path::Path| {
+                |_name: &str,
+                 ints: &[i64],
+                 _texts: &[String],
+                 _dir: &std::path::Path,
+                 _root: Option<&std::path::Path>| {
                     Ok(ints.iter().map(|&i| i as u8).collect())
                 },
             )

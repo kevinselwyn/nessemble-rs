@@ -466,7 +466,7 @@ fn display_name(path: &Path) -> String {
 
 /// The default resolver: every custom pseudo-op is unknown.
 fn default_custom_resolver() -> CustomResolver {
-    Box::new(|name, _ints, _texts, _base| {
+    Box::new(|name, _ints, _texts, _base, _root| {
         Err(nessemble_i18n::t!(
             "unknown-custom",
             pseudo = format!(".{name}")
@@ -537,7 +537,7 @@ fn is_directive_name(name: &str) -> bool {
 #[must_use]
 #[allow(clippy::implicit_hasher)] // callers use the standard HashSet.
 pub fn lenient_custom_resolver(known: std::collections::HashSet<String>) -> CustomResolver {
-    Box::new(move |name, _ints, _texts, _base| {
+    Box::new(move |name, _ints, _texts, _base, _root| {
         if known.contains(name) {
             Ok(Vec::new())
         } else {

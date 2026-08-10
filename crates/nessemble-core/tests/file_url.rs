@@ -49,7 +49,7 @@ impl Drop for TempTree {
 fn recording_resolver() -> (CustomResolver, Rc<RefCell<Vec<Vec<String>>>>) {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let log = Rc::clone(&seen);
-    let resolver: CustomResolver = Box::new(move |_name, _ints, texts, _base| {
+    let resolver: CustomResolver = Box::new(move |_name, _ints, texts, _base, _root| {
         log.borrow_mut().push(texts.to_vec());
         Ok(vec![0x42])
     });

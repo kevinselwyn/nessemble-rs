@@ -277,8 +277,8 @@ pub struct Assembler {
     /// [`crate::PROJECT_ROOT_PREFIX`] and `plans/012-project-root-paths.md`.
     root: Option<PathBuf>,
     /// Resolver for custom pseudo-ops (`.foo`): given the directive name, its
-    /// numeric and string arguments, and the base directory, it returns the
-    /// bytes to emit (or an error message).
+    /// numeric and string arguments, the base directory, and the project root
+    /// (if any), it returns the bytes to emit (or an error message).
     custom: CustomResolver,
     /// What each custom-directive invocation in this run emitted, so a
     /// directive's script executes **once** rather than once per pass. See
@@ -298,8 +298,23 @@ struct RawSpan {
 }
 
 /// Resolves a custom pseudo-op to the bytes it emits. See [`Assembler::custom`].
-pub type CustomResolver =
-    Box<dyn Fn(&str, &[i64], &[String], &std::path::Path) -> Result<Vec<u8>, String>>;
+///
+/// The fourth argument is the base directory (the directive's own source
+/// file's directory); the fifth is the project root a `@/`-prefixed path a
+/// script resolves itself should join against, `None` when no root could be
+/// determined (`plans/013-structured-data-parsing.md` §11.1). It is the same
+/// value [`crate::resolve_path_arg`] takes for every other path-taking
+/// argument, so a script's own file API resolves `@/` identically to
+/// `.incbin`/a declared `file://` argument.
+pub type CustomResolver = Box<
+    dyn Fn(
+        &str,
+        &[i64],
+        &[String],
+        &std::path::Path,
+        Option<&std::path::Path>,
+    ) -> Result<Vec<u8>, String>,
+>;
 
 /// Identifies one custom-directive invocation: the directive name, its evaluated
 /// integer and string arguments, and the **site** it was written at (file index
@@ -1398,7 +1413,7 @@ impl Assembler {
         let result = if let Some(memoized) = self.custom_memo.get(&key) {
             memoized.clone()
         } else {
-            let resolved = (self.custom)(name, &ints, &texts, self.cur_dir());
+            let resolved = (self.custom)(name, &ints, &texts, self.cur_dir(), self.root.as_deref());
             self.custom_memo.insert(key, resolved.clone());
             resolved
         };

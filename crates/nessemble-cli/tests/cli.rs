@@ -816,6 +816,51 @@ fn custom_pseudo_reads_a_file_via_rhai_fs() {
 }
 
 #[test]
+fn custom_pseudo_script_resolves_at_slash_against_the_root_flag() {
+    // End-to-end: a script's own `read_blob("@/…")` call resolves against
+    // `--root`, exactly as a declared `file://@/…` argument or `.incbin
+    // "@/…"` already does (plan 013 §11.1). The `.asm` file, the mapping, and
+    // the script all live outside the root, so only `--root` makes it work.
+    let dir = std::env::temp_dir().join(format!(
+        "nessemble-atslash-root-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = dir.join("proj");
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(root.join("assets/data.bin"), [0xAA, 0xBB]).unwrap();
+
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("main.asm"), b".embed\n").unwrap();
+    std::fs::write(
+        elsewhere.join("embed.rhai"),
+        b"fn custom(ints, texts) { read_blob(\"@/assets/data.bin\") }\n",
+    )
+    .unwrap();
+    std::fs::write(elsewhere.join("pseudo.txt"), b".embed = embed.rhai\n").unwrap();
+
+    let out = bin()
+        .arg(elsewhere.join("main.asm"))
+        .args(["--root"])
+        .arg(&root)
+        .args(["--pseudo"])
+        .arg(elsewhere.join("pseudo.txt"))
+        .args(["--output", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, vec![0xAA, 0xBB]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn bundled_ease_script_resolves_after_install() {
     let home = std::env::temp_dir().join(format!("nessemble-ease-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
@@ -1303,6 +1348,43 @@ fn a_hit_answers_without_running_the_script() {
     assert_eq!(p.assemble(&[]), vec![0x11], "served from the cache");
     // The escape hatch reaches the edited script.
     assert_eq!(p.assemble(&["--no-cache"]), vec![0x22]);
+}
+
+#[test]
+fn a_different_project_root_is_not_served_from_the_others_cache_entry() {
+    // Two builds share every other key field (script, arguments, base_dir), but
+    // point `--root` at different directories a `@/`-prefixed path the script
+    // resolves itself would read from differently. Without `root` in the cache
+    // key, the second build could be served the first root's bytes
+    // (`plans/013-structured-data-parsing.md` §11.1).
+    let p = CacheProject::new(
+        "root-key",
+        ".org $C000\n.gen\n",
+        "fn custom(ints, texts) { read_blob(\"@/data.bin\") }",
+    );
+    let root_a = p.root.join("a");
+    let root_b = p.root.join("b");
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    std::fs::write(root_a.join("data.bin"), [0x01]).unwrap();
+    std::fs::write(root_b.join("data.bin"), [0x02]).unwrap();
+
+    assert_eq!(
+        p.assemble(&["--root", root_a.to_str().unwrap()]),
+        vec![0x01]
+    );
+    assert_eq!(p.entry_count(), 1);
+    assert_eq!(
+        p.assemble(&["--root", root_b.to_str().unwrap()]),
+        vec![0x02],
+        "a different root must not reuse root_a's cached bytes"
+    );
+    assert_eq!(p.entry_count(), 2, "each root gets its own entry");
+    // Both stay independently servable from the cache.
+    assert_eq!(
+        p.assemble(&["--root", root_a.to_str().unwrap()]),
+        vec![0x01]
+    );
 }
 
 #[test]

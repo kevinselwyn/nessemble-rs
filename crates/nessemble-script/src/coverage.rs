@@ -85,12 +85,13 @@ pub fn run_with_coverage(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
+    root: Option<&Path>,
     script_path: &Path,
     cov: &SharedCoverage,
 ) -> Result<Vec<u8>, String> {
     let hits: Rc<RefCell<BTreeSet<u32>>> = Rc::new(RefCell::new(BTreeSet::new()));
 
-    let mut engine = engine(base_dir);
+    let mut engine = engine(base_dir, root);
     {
         let hits = hits.clone();
         // `register_debugger` is a stable-but-volatile Rhai API (marked
@@ -170,7 +171,7 @@ mod tests {
         let path = Path::new("test.rhai");
 
         // Take the `then` branch: `x = 10` runs, `x = 20` does not.
-        let out = run_with_coverage(SRC, &[1], &[], Path::new("."), path, &cov).unwrap();
+        let out = run_with_coverage(SRC, &[1], &[], Path::new("."), None, path, &cov).unwrap();
         assert_eq!(out, vec![10]);
         let after_then = uncovered(&cov);
         // The else branch (and any structural line) is uncovered so far.
@@ -180,7 +181,7 @@ mod tests {
         );
 
         // Now take the `else` branch too; hits accumulate across invocations.
-        let out = run_with_coverage(SRC, &[-1], &[], Path::new("."), path, &cov).unwrap();
+        let out = run_with_coverage(SRC, &[-1], &[], Path::new("."), None, path, &cov).unwrap();
         assert_eq!(out, vec![20]);
         let after_both = uncovered(&cov);
         assert!(
@@ -198,8 +199,16 @@ mod tests {
             "    throw \"boom\";\n",
             "}\n",
         );
-        let err = run_with_coverage(src, &[], &[], Path::new("."), Path::new("t.rhai"), &cov)
-            .unwrap_err();
+        let err = run_with_coverage(
+            src,
+            &[],
+            &[],
+            Path::new("."),
+            None,
+            Path::new("t.rhai"),
+            &cov,
+        )
+        .unwrap_err();
         assert_eq!(err, "boom");
         // The lines reached before the throw were still recorded.
         assert!(!cov.borrow().is_empty());

@@ -56,6 +56,7 @@ impl Resolver {
         ints: &[i64],
         texts: &[String],
         base_dir: &Path,
+        root: Option<&Path>,
     ) -> Result<Vec<u8>, String> {
         let (path, _from_pseudo) = self.locate(name, base_dir)?;
 
@@ -63,7 +64,7 @@ impl Resolver {
         let key = self
             .cache
             .as_ref()
-            .and_then(|_| cache::Key::new(name, ints, texts, base_dir, &path));
+            .and_then(|_| cache::Key::new(name, ints, texts, base_dir, root, &path));
         if let (Some(cache), Some(key)) = (self.cache.as_ref(), key.as_ref()) {
             if let Some(bytes) = cache.get(key) {
                 return Ok(bytes);
@@ -76,9 +77,9 @@ impl Resolver {
         // Without a cache to fill there is nothing to gain from recording the
         // script's inputs, so take the plain path.
         let (Some(cache), Some(key)) = (self.cache.as_ref(), key) else {
-            return run_script(&source, ints, texts, base_dir);
+            return run_script(&source, ints, texts, base_dir, root);
         };
-        let outcome = run_with_inputs(&source, ints, texts, base_dir)?;
+        let outcome = run_with_inputs(&source, ints, texts, base_dir, root)?;
         if outcome.cacheable {
             cache.put(&key, &outcome.inputs, &outcome.bytes);
         }
@@ -117,7 +118,9 @@ fn make_resolver(pseudo_file: Option<&str>, caching: bool) -> Resolver {
 /// run (see [`build_resolver_with_coverage`]).
 pub fn build_resolver(pseudo_file: Option<&str>, caching: bool) -> CustomResolver {
     let resolver = make_resolver(pseudo_file, caching);
-    Box::new(move |name, ints, texts, base_dir| resolver.resolve(name, ints, texts, base_dir))
+    Box::new(move |name, ints, texts, base_dir, root| {
+        resolver.resolve(name, ints, texts, base_dir, root)
+    })
 }
 
 /// Build a resolver that also records Rhai line coverage for **project** scripts
@@ -131,7 +134,7 @@ pub fn build_resolver_with_coverage(
     // Never cached: a hit runs nothing, so it would record no lines and report a
     // covered script as uncovered.
     let resolver = make_resolver(pseudo_file, false);
-    Box::new(move |name, ints, texts, base_dir| {
+    Box::new(move |name, ints, texts, base_dir, root| {
         let (path, from_pseudo) = resolver.locate(name, base_dir)?;
         let source = std::fs::read_to_string(&path)
             .map_err(|_| t!("custom-not-exist", pseudo = format!(".{name}")))?;
@@ -139,10 +142,10 @@ pub fn build_resolver_with_coverage(
             // Key by absolute path so the report is unambiguous across dirs.
             let key = path.canonicalize().unwrap_or(path);
             nessemble_script::coverage::run_with_coverage(
-                &source, ints, texts, base_dir, &key, &coverage,
+                &source, ints, texts, base_dir, root, &key, &coverage,
             )
         } else {
-            run_script(&source, ints, texts, base_dir)
+            run_script(&source, ints, texts, base_dir, root)
         }
     })
 }
@@ -162,8 +165,9 @@ fn run_script(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
+    root: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
-    nessemble_script::run(source, ints, texts, base_dir)
+    nessemble_script::run_with_root(source, ints, texts, base_dir, root)
 }
 
 /// Run a script, reporting the files it read and whether its bytes may be cached
@@ -174,8 +178,9 @@ fn run_with_inputs(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
+    root: Option<&Path>,
 ) -> Result<nessemble_script::RunOutcome, String> {
-    nessemble_script::run_with_inputs(source, ints, texts, base_dir)
+    nessemble_script::run_with_inputs_and_root(source, ints, texts, base_dir, root)
 }
 
 /// Without the scripting feature there is nothing to run, and so nothing to
@@ -186,6 +191,7 @@ fn run_with_inputs(
     _ints: &[i64],
     _texts: &[String],
     _base_dir: &Path,
+    _root: Option<&Path>,
 ) -> Result<Outcome, String> {
     Err("scripting is disabled".to_string())
 }
@@ -204,6 +210,7 @@ fn run_script(
     _ints: &[i64],
     _texts: &[String],
     _base_dir: &Path,
+    _root: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
     Err("scripting is disabled".to_string())
 }

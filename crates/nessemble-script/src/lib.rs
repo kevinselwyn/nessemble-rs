@@ -93,14 +93,32 @@ use xml::XmlNode;
 /// A relative path opened by the script (via rhai-fs's `open_file`) resolves
 /// against `base_dir` — the directory of the source file that contains the
 /// directive — matching how `.include` and the `.inc*` importers resolve paths.
-/// Absolute paths are used as-is.
+/// Absolute paths are used as-is. A `@/`-prefixed path is an error (no project
+/// root); use [`run_with_root`] to give scripts `@/` support.
 pub fn run(
     source: &str,
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
 ) -> Result<Vec<u8>, String> {
-    run_impl(source, ints, texts, base_dir, None, false).map(|(bytes, _)| bytes)
+    run_impl(source, ints, texts, base_dir, None, None, false).map(|(bytes, _)| bytes)
+}
+
+/// Like [`run`], but a `@/`-prefixed path the script resolves itself (via
+/// `read_blob`, `decode_png_file`, `parse_xml_file`, `parse_json_file`, or
+/// rhai-fs's `open_file`) joins against `root` instead of erroring — the same
+/// resolution every other path-taking argument gets
+/// (`plans/013-structured-data-parsing.md` §11.1). `root` is `None` where no
+/// project root could be determined, in which case a `@/` path is still an
+/// error, exactly as [`run`] leaves it.
+pub fn run_with_root(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    root: Option<&Path>,
+) -> Result<Vec<u8>, String> {
+    run_impl(source, ints, texts, base_dir, root, None, false).map(|(bytes, _)| bytes)
 }
 
 /// The paths a script resolved through the host's file API, in sorted order.
@@ -133,8 +151,19 @@ pub fn run_with_inputs(
     texts: &[String],
     base_dir: &Path,
 ) -> Result<RunOutcome, String> {
+    run_with_inputs_and_root(source, ints, texts, base_dir, None)
+}
+
+/// Like [`run_with_inputs`], with [`run_with_root`]'s `@/` support.
+pub fn run_with_inputs_and_root(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    root: Option<&Path>,
+) -> Result<RunOutcome, String> {
     let recorder = Recorder::default();
-    let (bytes, impurity) = run_impl(source, ints, texts, base_dir, Some(&recorder), true)?;
+    let (bytes, impurity) = run_impl(source, ints, texts, base_dir, root, Some(&recorder), true)?;
     let inputs: Vec<PathBuf> = recorder.borrow().iter().cloned().collect();
     Ok(RunOutcome {
         bytes,
@@ -151,10 +180,11 @@ fn run_impl(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
+    root: Option<&Path>,
     recorder: Option<&Recorder>,
     scan: bool,
 ) -> Result<(Vec<u8>, Option<purity::Impurity>), String> {
-    let engine = engine_recording(base_dir, recorder);
+    let engine = engine_recording(base_dir, root, recorder);
     let ast = engine.compile(source).map_err(|e| e.to_string())?;
     let impurity = if scan { purity::impurity(&ast) } else { None };
 
@@ -179,8 +209,8 @@ fn run_impl(
 /// **filesystem access means scripts are no longer sandboxed** — a directive can
 /// touch any path the assembler process can. Only run pseudo-op scripts you
 /// trust, the same as any build tooling.
-fn engine(base_dir: &Path) -> Engine {
-    engine_recording(base_dir, None)
+fn engine(base_dir: &Path, root: Option<&Path>) -> Engine {
+    engine_recording(base_dir, root, None)
 }
 
 /// [`engine`], optionally recording every path the script resolves through the
@@ -196,7 +226,11 @@ fn engine(base_dir: &Path) -> Engine {
 /// the entire correctness argument for the on-disk cache
 /// (`plans/011-pseudo-op-caching.md`, `plans/013-structured-data-parsing.md`
 /// §3), and there is no separate check that catches an omission.
-fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
+///
+/// `root` is the project root a `@/`-prefixed path resolves against
+/// (`plans/013-structured-data-parsing.md` §11.1); `None` where none could be
+/// determined, in which case `@/` in a script-resolved path is an error.
+fn engine_recording(base_dir: &Path, root: Option<&Path>, recorder: Option<&Recorder>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(10_000_000);
     engine.set_max_call_levels(64);
@@ -220,20 +254,29 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // rhai-fs turns a path string into a `PathBuf` via this `path` function,
         // so redefining it reroutes every relative `open_file`/`open_dir`.
         let base = base_dir.to_path_buf();
+        let root_buf = root.map(Path::to_path_buf);
         let rec = recorder.cloned();
         engine.register_fn("path", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
-            move |p: &str| -> PathBuf { record(rec.as_ref(), resolve(&base, p)) }
+            move |p: &str| -> Result<PathBuf, Box<EvalAltResult>> {
+                let full = resolve(&base, root.as_deref(), p)
+                    .map_err(|e| -> Box<EvalAltResult> { e.into() })?;
+                Ok(record(rec.as_ref(), full))
+            }
         });
         // `read_blob(path)` — read a whole file as a blob, resolving relative
         // paths against the source directory (same rooting as `open_file`). Saves
         // the `open_file(path, "r").read_blob()` handle/mode ceremony.
         engine.register_fn("read_blob", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
             move |p: &str| -> Result<Blob, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full = resolve(&base, root.as_deref(), p)
+                    .map_err(|e| -> Box<EvalAltResult> { format!("read_blob: {e}").into() })?;
+                let full = record(rec.as_ref(), full);
                 std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("read_blob: cannot read {}: {e}", full.display()).into()
                 })
@@ -243,9 +286,14 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // (`decode_png(read_blob(path))`).
         engine.register_fn("decode_png_file", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
             move |p: &str| -> Result<Image, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full =
+                    resolve(&base, root.as_deref(), p).map_err(|e| -> Box<EvalAltResult> {
+                        format!("decode_png_file: {e}").into()
+                    })?;
+                let full = record(rec.as_ref(), full);
                 let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("decode_png_file: cannot read {}: {e}", full.display()).into()
                 })?;
@@ -256,9 +304,12 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // (`parse_xml(read_blob(path).as_string())`, roughly).
         engine.register_fn("parse_xml_file", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
             move |p: &str| -> Result<XmlNode, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full = resolve(&base, root.as_deref(), p)
+                    .map_err(|e| -> Box<EvalAltResult> { format!("parse_xml_file: {e}").into() })?;
+                let full = record(rec.as_ref(), full);
                 let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("parse_xml_file: cannot read {}: {e}", full.display()).into()
                 })?;
@@ -273,8 +324,14 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // `parse_json_file(path)` — read and parse a JSON document in one call.
         engine.register_fn("parse_json_file", {
             let base = base.clone();
+            let root = root_buf.clone();
+            let rec = rec.clone();
             move |p: &str| -> Result<Dynamic, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full =
+                    resolve(&base, root.as_deref(), p).map_err(|e| -> Box<EvalAltResult> {
+                        format!("parse_json_file: {e}").into()
+                    })?;
+                let full = record(rec.as_ref(), full);
                 let text = std::fs::read_to_string(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("parse_json_file: cannot read {}: {e}", full.display()).into()
                 })?;
@@ -287,6 +344,7 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
     #[cfg(not(feature = "fs"))]
     {
         let _ = base_dir;
+        let _ = root;
         let _ = recorder;
     }
 
@@ -407,16 +465,16 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
     engine
 }
 
-/// Resolve a script-supplied path against the directive's source directory:
-/// relative paths join `base`, absolute paths are used as-is.
+/// Resolve a script-supplied path against the directive's source directory,
+/// or — for a `@/`-prefixed path — the project root: the same rule
+/// [`nessemble_core::resolve_path_arg`] applies to every other path-taking
+/// argument (`plans/013-structured-data-parsing.md` §11.1,
+/// `plans/012-project-root-paths.md`). `root` is `None` where no project root
+/// could be determined, in which case a `@/` path is an error naming the sigil
+/// rather than a silent fallback, matching [`nessemble_core::PathArgError`].
 #[cfg(feature = "fs")]
-fn resolve(base: &Path, p: &str) -> PathBuf {
-    let path = PathBuf::from(p);
-    if path.is_relative() {
-        base.join(path)
-    } else {
-        path
-    }
+fn resolve(base: &Path, root: Option<&Path>, p: &str) -> Result<PathBuf, String> {
+    nessemble_core::resolve_path_arg(root, base, p).map_err(|e| e.message(p))
 }
 
 /// A decoded image, as scripts see it.
@@ -1450,6 +1508,89 @@ mod tests {
         assert!(out.inputs.iter().all(|p| p.is_absolute()));
         assert_eq!(out.bytes, b"ab");
         assert!(out.cacheable);
+    }
+
+    // ---- `@/` project-root resolution (plan 013 §11.1) ---------------------
+
+    #[test]
+    fn a_root_relative_path_resolves_from_the_project_root_not_base_dir() {
+        // `@/`-prefixed paths a script resolves itself join the project root,
+        // not `base_dir` — the same rule `.incbin`/a declared `file://`
+        // argument already follow (plan 012, plan 013 §11.1).
+        let dir = TempDir::new("at-slash-root");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/logo.bin"), b"logo").unwrap();
+        let sub = root.join("src/gfx");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let src = r#"fn custom(ints, texts) { read_blob("@/assets/logo.bin") }"#;
+        let out = run_with_root(src, &[], &[], &sub, Some(&root)).unwrap();
+        assert_eq!(out, b"logo");
+    }
+
+    #[test]
+    fn every_path_taking_function_honors_at_slash() {
+        // read_blob, decode_png_file, parse_xml_file, parse_json_file, and
+        // rhai-fs's own open_file (via the `path` hook) all resolve `@/`
+        // identically — no function is left inconsistent with another.
+        let dir = TempDir::new("at-slash-every-fn");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.bin"), b"a").unwrap();
+        write_png_1x1(&root.join("b.png"));
+        std::fs::write(root.join("c.xml"), b"<r/>").unwrap();
+        std::fs::write(root.join("d.json"), b"1").unwrap();
+        std::fs::write(root.join("e.txt"), b"e").unwrap();
+        let src = r#"
+            fn custom(ints, texts) {
+                let a = read_blob("@/a.bin");
+                let img = decode_png_file("@/b.png");
+                let doc = parse_xml_file("@/c.xml");
+                let j = parse_json_file("@/d.json");
+                let e = open_file("@/e.txt", "r").read_blob();
+                a + e
+            }
+        "#;
+        let out = run_with_root(src, &[], &[], &root, Some(&root)).unwrap();
+        assert_eq!(out, b"ae");
+    }
+
+    #[test]
+    fn a_root_relative_path_is_recorded_as_its_resolved_absolute_path() {
+        let dir = TempDir::new("at-slash-record");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        let asset = root.join("assets/logo.bin");
+        std::fs::write(&asset, b"logo").unwrap();
+
+        let src = r#"fn custom(ints, texts) { read_blob("@/assets/logo.bin") }"#;
+        let out = run_with_inputs_and_root(src, &[], &[], &root, Some(&root)).unwrap();
+        assert_eq!(out.inputs, vec![asset]);
+    }
+
+    #[test]
+    fn a_root_relative_path_without_a_root_names_the_sigil() {
+        // No project root could be determined (e.g. `run`'s plain, root-less
+        // form) — a hard error, not a silent fallback to `base_dir`.
+        let dir = TempDir::new("at-slash-no-root");
+        let src = r#"fn custom(ints, texts) { read_blob("@/assets/logo.bin") }"#;
+        let err = run(src, &[], &[], &dir.0).unwrap_err();
+        assert!(err.contains("@/assets/logo.bin"), "unexpected error: {err}");
+        assert!(err.contains("no project root"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_root_relative_path_that_escapes_the_root_is_an_error() {
+        let dir = TempDir::new("at-slash-escape");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = r#"fn custom(ints, texts) { read_blob("@/../secret.bin") }"#;
+        let err = run_with_root(src, &[], &[], &root, Some(&root)).unwrap_err();
+        assert!(
+            err.contains("outside the project root"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
