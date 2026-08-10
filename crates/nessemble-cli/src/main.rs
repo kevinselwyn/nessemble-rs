@@ -426,7 +426,7 @@ fn print_script_timings(timings: &custom::Timings) {
     }
 
     let mut rows: Vec<(&str, &Agg)> = by_name.iter().map(|(n, a)| (*n, a)).collect();
-    rows.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    rows.sort_by_key(|(_, agg)| std::cmp::Reverse(agg.total));
 
     eprintln!("{}", t!("script-timing-header"));
     for (name, agg) in rows {
