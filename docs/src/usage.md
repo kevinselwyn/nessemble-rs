@@ -29,6 +29,8 @@ Options:
       --mlist                 include labels created by macros in the list file
   -p, --pseudo <pseudo.txt>   use custom pseudo-instruction functions
       --root <dir>            project root for `@/`-relative paths
+      --max-operations <n>    cap each pseudo-op script's Rhai operation count
+      --time-scripts          report per-directive script call count and wall time
   -c, --check                 check syntax only
   -v, --version               display program version
   -L, --license               display program license
@@ -122,6 +124,24 @@ starts.
 Neither reads nor writes the [custom pseudo-instruction
 cache](extending.md#caching): every directive's script runs. Reach for this when a
 build looks stale, or to confirm that a suspected caching problem is one.
+
+### --max-operations &lt;n&gt;
+
+Overrides the [runaway-script guard](extending.md#runaway-script-guard-and-timing)
+on every pseudo-op script, in place of the built-in default of 10,000,000
+Rhai operations. `0` means unlimited.
+
+```text
+nessemble src/main.asm --pseudo pseudo.txt --max-operations 50000000
+```
+
+### --time-scripts
+
+Prints a per-directive report to stderr after assembly: how many times each
+`.foo`-style directive was called, how many of those were cache hits versus
+real script runs, and the total wall time spent in it — busiest directive
+first. See [Runaway-script guard and
+timing](extending.md#runaway-script-guard-and-timing).
 
 ### -c, --check
 
@@ -350,6 +370,8 @@ section is classified; lines that emit only CHR data are omitted.
 - `-p`, `--pseudo <pseudo.txt>` — custom pseudo-op mapping, as in assemble mode.
 - `--root <dir>` — [project root](syntax.md#project-root-relative-paths) for
   `@/`-relative paths, as in assemble mode.
+- `--max-operations <n>` — caps each pseudo-op script's [Rhai operation
+  count](extending.md#runaway-script-guard-and-timing), as in assemble mode.
 - `--scripts` — also report **line coverage for the `-p` Rhai scripts**, so you
   can see which parts of a custom pseudo-op never ran during assembly. Each
   project script appears as its own file (each line executed or not); bundled

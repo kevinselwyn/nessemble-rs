@@ -22,6 +22,11 @@ const MAX_BANKS: usize = 256;
 const TRAINER_MAX: usize = 512;
 /// Matches the reference `MAX_NESTED_IFS`.
 const MAX_NESTED_IFS: usize = 10;
+/// Bound on `emit_source` expanding source that itself emits source,
+/// recursively — the same depth `MAX_INCLUDE_DEPTH` (`preprocess.rs`) uses for
+/// `.include`/`.macro` recursion, applied to this analogous case so a
+/// pathological script errors instead of overflowing the stack.
+const MAX_EMIT_SOURCE_DEPTH: usize = 10;
 
 /// Convert a NES 2.0 RAM size in bytes to its logarithmic shift count, where a
 /// present size is `64 << shift` bytes. Returns `Some(0)` for no RAM (0 bytes),
@@ -277,14 +282,23 @@ pub struct Assembler {
     /// [`crate::PROJECT_ROOT_PREFIX`] and `plans/012-project-root-paths.md`.
     root: Option<PathBuf>,
     /// Resolver for custom pseudo-ops (`.foo`): given the directive name, its
-    /// numeric and string arguments, and the base directory, it returns the
-    /// bytes to emit (or an error message).
+    /// numeric and string arguments, the base directory, and the project root
+    /// (if any), it returns what the directive resolves to (or an error
+    /// message).
     custom: CustomResolver,
-    /// What each custom-directive invocation in this run emitted, so a
+    /// What each custom-directive invocation in this run resolved to, so a
     /// directive's script executes **once** rather than once per pass. See
     /// [`Assembler::exec_custom`]; kept for the whole run (not cleared between
-    /// passes), since sharing across passes is the point.
-    custom_memo: HashMap<CustomKey, Result<Vec<u8>, String>>,
+    /// passes), since sharing across passes is the point. Memoizing the
+    /// *source* of an `emit_source` result (rather than only its eventual
+    /// bytes) is what keeps the expansion deterministic across both passes —
+    /// see [`Assembler::exec_emitted_source`].
+    custom_memo: HashMap<CustomKey, Result<CustomOutput, String>>,
+    /// Recursion depth of `emit_source` expansion currently in progress — an
+    /// expansion whose own source contains a directive that itself emits
+    /// source increments this around the nested call. See
+    /// [`MAX_EMIT_SOURCE_DEPTH`].
+    custom_expansion_depth: usize,
 }
 
 /// A source span as collected during assembly: like [`SourceSpan`] but keyed by
@@ -297,9 +311,40 @@ struct RawSpan {
     len: usize,
 }
 
-/// Resolves a custom pseudo-op to the bytes it emits. See [`Assembler::custom`].
-pub type CustomResolver =
-    Box<dyn Fn(&str, &[i64], &[String], &std::path::Path) -> Result<Vec<u8>, String>>;
+/// Resolves a custom pseudo-op to what it produces. See [`Assembler::custom`].
+///
+/// The fourth argument is the base directory (the directive's own source
+/// file's directory); the fifth is the project root a `@/`-prefixed path a
+/// script resolves itself should join against, `None` when no root could be
+/// determined (`plans/013-structured-data-parsing.md` §11.1). It is the same
+/// value [`crate::resolve_path_arg`] takes for every other path-taking
+/// argument, so a script's own file API resolves `@/` identically to
+/// `.incbin`/a declared `file://` argument.
+pub type CustomResolver = Box<
+    dyn Fn(
+        &str,
+        &[i64],
+        &[String],
+        &std::path::Path,
+        Option<&std::path::Path>,
+    ) -> Result<CustomOutput, String>,
+>;
+
+/// What a custom directive's script resolves to.
+///
+/// `Source` is what `emit_source(text)` produces (`plans/013-structured-data-parsing.md`
+/// §6): assembly source expanded inline at the directive's own call site, like
+/// a `.macro` invocation whose body is not known until the script runs —
+/// distinct from `Bytes`, which is what a plain returned string/array/blob
+/// already meant (emit these bytes verbatim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomOutput {
+    /// Bytes to write through the normal emission path.
+    Bytes(Vec<u8>),
+    /// Assembly source to lex, parse, and execute inline
+    /// ([`Assembler::exec_emitted_source`]).
+    Source(String),
+}
 
 /// Identifies one custom-directive invocation: the directive name, its evaluated
 /// integer and string arguments, and the **site** it was written at (file index
@@ -387,6 +432,7 @@ impl Assembler {
             root,
             custom,
             custom_memo: HashMap::new(),
+            custom_expansion_depth: 0,
         }
     }
 
@@ -1353,28 +1399,17 @@ impl Assembler {
             match arg {
                 CustomArg::Int(e) => ints.push(self.eval(e)),
                 CustomArg::Str(s) => {
-                    let (path, is_declared) = crate::strip_file_url(s);
-                    if is_declared {
-                        let resolved = match crate::resolve_path_arg(
-                            self.root.as_deref(),
-                            self.cur_dir(),
-                            path,
-                        ) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                self.hard_error(e.message(path));
-                                return;
+                    match resolve_str_arg(s, self.cur_dir(), self.root.as_deref()) {
+                        Ok((text, declared_path)) => {
+                            texts.push(text);
+                            if let Some(resolved) = declared_path {
+                                declared.push((crate::strip_file_url(s).0.to_string(), resolved));
                             }
-                        };
-                        let is_root_relative = path.starts_with(crate::PROJECT_ROOT_PREFIX);
-                        texts.push(if is_root_relative {
-                            resolved.to_string_lossy().into_owned()
-                        } else {
-                            path.to_string()
-                        });
-                        declared.push((path.to_string(), resolved));
-                    } else {
-                        texts.push(path.to_string());
+                        }
+                        Err(e) => {
+                            self.hard_error(e.message(crate::strip_file_url(s).0));
+                            return;
+                        }
                     }
                 }
             }
@@ -1398,14 +1433,90 @@ impl Assembler {
         let result = if let Some(memoized) = self.custom_memo.get(&key) {
             memoized.clone()
         } else {
-            let resolved = (self.custom)(name, &ints, &texts, self.cur_dir());
+            let resolved = (self.custom)(name, &ints, &texts, self.cur_dir(), self.root.as_deref());
             self.custom_memo.insert(key, resolved.clone());
             resolved
         };
         match result {
-            Ok(bytes) => self.write_all(&bytes),
+            Ok(CustomOutput::Bytes(bytes)) => self.write_all(&bytes),
+            Ok(CustomOutput::Source(src)) => self.exec_emitted_source(name, &src),
             Err(msg) => self.hard_error(msg),
         }
+    }
+
+    /// Expand `src` — the assembly source `.name`'s script returned via
+    /// `emit_source` (`plans/013-structured-data-parsing.md` §6) — inline at
+    /// the directive's own call site: lex, parse, and execute each resulting
+    /// statement exactly as if it had been written there.
+    ///
+    /// Every diagnostic, symbol, and emitted byte is attributed to the
+    /// directive's own file and line — `cur_file`/`cur_line` are left exactly
+    /// as `exec_custom`'s caller (`run_pass`, or an enclosing
+    /// `exec_emitted_source`) set them, deliberately not repointed at a
+    /// position inside `src`, because there is no file for an editor to open
+    /// at that position (§2.6's reasoning for `parse_xml_file` errors, applied
+    /// here to generated source instead of a parsed document). A label or
+    /// constant the expansion defines is flagged
+    /// [`from_macro`](crate::ast::Line::from_macro) like one from a `.macro`
+    /// body, for the same reason: it did not appear in the file's own text.
+    ///
+    /// `.include`, `.inestrn`, `.macro`, and `.macrodef` are preprocessor-only
+    /// constructs — preprocessing has already finished by the time a script
+    /// runs — and are rejected with a directive-specific error rather than
+    /// whatever a bare parse of them would otherwise produce (`.include` with
+    /// no preprocessor to run it parses as an unrecognized custom pseudo-op,
+    /// which would be a confusing error for a builtin directive to give).
+    fn exec_emitted_source(&mut self, name: &str, src: &str) {
+        if self.custom_expansion_depth >= MAX_EMIT_SOURCE_DEPTH {
+            self.hard_error(t!("emit-source-too-deep", pseudo = format!(".{name}")));
+            return;
+        }
+
+        let tokens = crate::lexer::Lexer::new(src).tokenize();
+        let lines = match crate::parse::parse(tokens) {
+            Ok(lines) => lines,
+            Err(e) => {
+                self.hard_error(t!(
+                    "emit-source-parse-error",
+                    pseudo = format!(".{name}"),
+                    line = e.line,
+                    message = e.message
+                ));
+                return;
+            }
+        };
+
+        for line in &lines {
+            let unsupported = match &line.stmt {
+                Stmt::Pseudo(Pseudo::Custom(n, _))
+                    if matches!(n.as_str(), "include" | "macro" | "macrodef") =>
+                {
+                    Some(n.clone())
+                }
+                Stmt::Pseudo(Pseudo::InesTrn) => Some("inestrn".to_string()),
+                _ => None,
+            };
+            if let Some(directive) = unsupported {
+                self.hard_error(t!(
+                    "emit-source-unsupported-directive",
+                    pseudo = format!(".{name}"),
+                    directive = format!(".{directive}")
+                ));
+                return;
+            }
+        }
+
+        let saved_from_macro = self.cur_from_macro;
+        self.cur_from_macro = true;
+        self.custom_expansion_depth += 1;
+        for line in &lines {
+            self.exec_stmt(&line.stmt);
+            if self.aborted {
+                break;
+            }
+        }
+        self.custom_expansion_depth -= 1;
+        self.cur_from_macro = saved_from_macro;
     }
 
     /// Directory of the file the current line came from, which filename-based
@@ -1869,4 +1980,121 @@ fn dedup(diags: &[Diag]) -> Vec<Diag> {
         .filter(|d| seen.insert((d.file.clone(), d.line, d.message.clone())))
         .cloned()
         .collect()
+}
+
+/// Resolve one custom-directive string argument to what `texts` should carry,
+/// and — if it was declared (`file://`) — the path to existence-check. Shared
+/// by [`Assembler::exec_custom`] and [`prewarm_candidates`] so the two cannot
+/// drift: a prewarm scan that resolved a declared argument differently from
+/// the real pass would prewarm the wrong cache entry.
+fn resolve_str_arg(
+    s: &str,
+    dir: &Path,
+    root: Option<&Path>,
+) -> Result<(String, Option<PathBuf>), crate::PathArgError> {
+    let (path, is_declared) = crate::strip_file_url(s);
+    if !is_declared {
+        return Ok((path.to_string(), None));
+    }
+    let resolved = crate::resolve_path_arg(root, dir, path)?;
+    let is_root_relative = path.starts_with(crate::PROJECT_ROOT_PREFIX);
+    let text = if is_root_relative {
+        resolved.to_string_lossy().into_owned()
+    } else {
+        path.to_string()
+    };
+    Ok((text, Some(resolved)))
+}
+
+/// A custom-directive invocation whose arguments are knowable without running
+/// either assembly pass: every string argument resolves the same way
+/// [`Assembler::exec_custom`] resolves it (declared/`@/` paths are looked up
+/// against static per-file tables, no assembler state involved), and every
+/// integer argument is a [`literal_eval`]-able expression — no symbol, local
+/// label, or bank reference, so its value cannot depend on anything a pass
+/// discovers. Safe to resolve ahead of time, e.g. to prewarm a cache
+/// concurrently before the sequential emission passes read from it
+/// (`plans/013-structured-data-parsing.md` §7).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PrewarmCandidate {
+    pub name: String,
+    pub ints: Vec<i64>,
+    pub texts: Vec<String>,
+    pub base_dir: PathBuf,
+    pub root: Option<PathBuf>,
+}
+
+/// Evaluate `expr` if it references no symbol, anonymous local label, or
+/// bank — a compile-time-literal expression whose value cannot differ between
+/// passes (or depend on anything a pass discovers). `None` otherwise. Shares
+/// [`Assembler::apply`]'s arithmetic so a literal expression evaluates
+/// identically here and in the real pass.
+fn literal_eval(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Num(n) => Some(*n),
+        Expr::Symbol(_) | Expr::LocalForward(_) | Expr::LocalBackward(_) | Expr::Bank(_) => None,
+        Expr::High(e) => Some((literal_eval(e)? >> 8) & 0xFF),
+        Expr::Low(e) => Some(literal_eval(e)? & 0xFF),
+        Expr::Binary(a, op, b) => Some(Assembler::apply(literal_eval(a)?, *op, literal_eval(b)?)),
+    }
+}
+
+/// Scan `lines` for [`PrewarmCandidate`]s: every `Pseudo::Custom` invocation
+/// whose arguments resolve without running a pass. A directive with even one
+/// symbol-dependent integer argument, or a declared string argument that
+/// doesn't resolve or names a file that isn't there, is simply left out — it
+/// runs sequentially as it always has, through the real pass's own
+/// `exec_custom`, which remains the sole authority on errors (a prewarm scan
+/// never reports one of its own).
+#[must_use]
+pub(crate) fn prewarm_candidates(
+    lines: &[Line],
+    dirs: &[PathBuf],
+    root: Option<&Path>,
+) -> Vec<PrewarmCandidate> {
+    let mut out = Vec::new();
+    for line in lines {
+        let Stmt::Pseudo(Pseudo::Custom(name, args)) = &line.stmt else {
+            continue;
+        };
+        let dir = dirs
+            .get(line.file as usize)
+            .map_or_else(|| Path::new("."), PathBuf::as_path);
+        let mut ints = Vec::new();
+        let mut texts = Vec::new();
+        let mut safe = true;
+        for arg in args {
+            match arg {
+                CustomArg::Int(e) => {
+                    if let Some(v) = literal_eval(e) {
+                        ints.push(v);
+                    } else {
+                        safe = false;
+                        break;
+                    }
+                }
+                CustomArg::Str(s) => match resolve_str_arg(s, dir, root) {
+                    Ok((_, Some(resolved))) if !resolved.exists() => {
+                        safe = false;
+                        break;
+                    }
+                    Ok((text, _)) => texts.push(text),
+                    Err(_) => {
+                        safe = false;
+                        break;
+                    }
+                },
+            }
+        }
+        if safe {
+            out.push(PrewarmCandidate {
+                name: name.clone(),
+                ints,
+                texts,
+                base_dir: dir.to_path_buf(),
+                root: root.map(Path::to_path_buf),
+            });
+        }
+    }
+    out
 }

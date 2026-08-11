@@ -225,10 +225,17 @@ fn build_resolver(pseudo: &HashMap<String, PseudoSpec>) -> CustomResolver {
             PseudoSpec::Enabled(false) => {}
         }
     }
-    Box::new(move |name, ints, texts, base_dir| match sources.get(name) {
-        Some(src) => nessemble_script::run(src, ints, texts, base_dir),
-        None => Err(format!("unknown custom pseudo-instruction `.{name}`")),
-    })
+    // The browser has no filesystem (`fs` is off for this build), and wasm's
+    // entry point never has a project root to hand (`std::env::current_dir`
+    // fails there, so `Options::project_root` ladder bottoms out at `None`) —
+    // `_root` is accepted only so this closure matches `CustomResolver`'s
+    // shared shape.
+    Box::new(
+        move |name, ints, texts, base_dir, _root| match sources.get(name) {
+            Some(src) => nessemble_script::run(src, ints, texts, base_dir),
+            None => Err(format!("unknown custom pseudo-instruction `.{name}`")),
+        },
+    )
 }
 
 /// Route Rust panics to the browser console with a readable message. Runs once

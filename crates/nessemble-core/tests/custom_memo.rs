@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use nessemble_core::{assemble_with, CustomResolver, Options};
+use nessemble_core::{assemble_with, CustomOutput, CustomResolver, Options};
 
 /// A resolver that records every call and returns bytes from `outputs` in order,
 /// repeating the last entry once exhausted. Returning *different* bytes per call
@@ -18,12 +18,12 @@ use nessemble_core::{assemble_with, CustomResolver, Options};
 fn counting_resolver(outputs: Vec<Vec<u8>>) -> (CustomResolver, Rc<RefCell<Vec<String>>>) {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let log = Rc::clone(&calls);
-    let resolver: CustomResolver = Box::new(move |name, ints, texts, _base| {
+    let resolver: CustomResolver = Box::new(move |name, ints, texts, _base, _root| {
         let mut log = log.borrow_mut();
         let nth = log.len();
         log.push(format!(".{name} {ints:?} {texts:?}"));
         let last = outputs.len().saturating_sub(1);
-        Ok(outputs[nth.min(last)].clone())
+        Ok(CustomOutput::Bytes(outputs[nth.min(last)].clone()))
     });
     (resolver, calls)
 }
@@ -120,7 +120,7 @@ fn a_forward_referenced_argument_resolves_on_each_pass() {
 fn a_resolver_error_is_reported_once_and_asked_once() {
     let calls = Rc::new(RefCell::new(0usize));
     let counter = Rc::clone(&calls);
-    let resolver: CustomResolver = Box::new(move |_name, _ints, _texts, _base| {
+    let resolver: CustomResolver = Box::new(move |_name, _ints, _texts, _base, _root| {
         *counter.borrow_mut() += 1;
         Err("no such easing type".to_string())
     });

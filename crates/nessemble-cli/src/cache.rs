@@ -34,8 +34,12 @@ use serde::{Deserialize, Serialize};
 use crate::home;
 
 /// On-disk layout version. An entry written by a different version is a miss,
-/// never a misread.
-const FORMAT: u32 = 1;
+/// never a misread. Bumped when [`Key`]'s shape changes (most recently, adding
+/// `root` — `plans/013-structured-data-parsing.md` §11.1); `serde`'s
+/// missing-field error already makes a differently-shaped old entry
+/// undeserializable, so the bump is a documentation signal more than a
+/// mechanism.
+const FORMAT: u32 = 2;
 
 /// Total size the cache is trimmed back to on write, oldest entries first.
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
@@ -82,9 +86,13 @@ impl Stamp {
 /// The script is identified by a [`Stamp`], so editing a script invalidates every
 /// entry that ran it, and re-pointing a `--pseudo` mapping at a different file
 /// changes the key outright. `base_dir` is here because the script's own relative
-/// reads resolve against it, and the `nessemble` version is here because the host
-/// helpers (`nes_shade`, `find_cell`, …) define the output — a release must not
-/// serve bytes computed by a different implementation of them.
+/// reads resolve against it, `root` because a `@/`-prefixed one instead resolves
+/// against the project root (`plans/013-structured-data-parsing.md` §11.1) —
+/// without it, two builds sharing a `base_dir` but disagreeing on the root (say,
+/// a `.nessemblerc` added between them) could serve one build's `@/` bytes to
+/// the other — and the `nessemble` version is here because the host helpers
+/// (`nes_shade`, `find_cell`, …) define the output — a release must not serve
+/// bytes computed by a different implementation of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
     format: u32,
@@ -93,6 +101,7 @@ pub struct Key {
     ints: Vec<i64>,
     texts: Vec<String>,
     base_dir: PathBuf,
+    root: Option<PathBuf>,
     script: Stamp,
 }
 
@@ -103,6 +112,7 @@ impl Key {
         ints: &[i64],
         texts: &[String],
         base_dir: &Path,
+        root: Option<&Path>,
         script: &Path,
     ) -> Option<Key> {
         Some(Key {
@@ -112,6 +122,7 @@ impl Key {
             ints: ints.to_vec(),
             texts: texts.to_vec(),
             base_dir: base_dir.to_path_buf(),
+            root: root.map(Path::to_path_buf),
             script: Stamp::of(script)?,
         })
     }
@@ -287,8 +298,21 @@ impl Cache {
 
 /// Write `bytes` to `path` via a temporary file and a rename, so a concurrent
 /// reader never sees a half-written file. Returns whether it succeeded.
+///
+/// The tmp name is unique per **call**, not just per process: prewarming
+/// (`plans/013-structured-data-parsing.md` §7) calls `get`/`put` for
+/// different keys concurrently from multiple threads in the same process, and
+/// two entries that happen to share a `path` — a `get`'s touch racing a
+/// `put`, or two `put`s, for the same [`Key`] — must not collide on the same
+/// tmp file, which a process-id-only name allows.
 fn write_atomic(path: &Path, bytes: &[u8]) -> bool {
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     if std::fs::write(&tmp, bytes).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;
@@ -334,7 +358,15 @@ mod tests {
         }
 
         fn key(&self, script: &Path) -> Key {
-            Key::new("tilemap", &[1], &["a".to_string()], &self.root, script).expect("key")
+            Key::new(
+                "tilemap",
+                &[1],
+                &["a".to_string()],
+                &self.root,
+                None,
+                script,
+            )
+            .expect("key")
         }
     }
 
@@ -415,23 +447,60 @@ mod tests {
         let t = TempCache::new("args");
         let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
         let base = &t.root;
-        let key = Key::new("foo", &[1], &["a".to_string()], base, &script).unwrap();
+        let key = Key::new("foo", &[1], &["a".to_string()], base, None, &script).unwrap();
         t.cache.put(&key, &[], &[0x01]);
 
-        let other_int = Key::new("foo", &[2], &["a".to_string()], base, &script).unwrap();
-        let other_text = Key::new("foo", &[1], &["b".to_string()], base, &script).unwrap();
-        let other_name = Key::new("bar", &[1], &["a".to_string()], base, &script).unwrap();
+        let other_int = Key::new("foo", &[2], &["a".to_string()], base, None, &script).unwrap();
+        let other_text = Key::new("foo", &[1], &["b".to_string()], base, None, &script).unwrap();
+        let other_name = Key::new("bar", &[1], &["a".to_string()], base, None, &script).unwrap();
         let other_dir = Key::new(
             "foo",
             &[1],
             &["a".to_string()],
             Path::new("/elsewhere"),
+            None,
             &script,
         )
         .unwrap();
         for key in [other_int, other_text, other_name, other_dir] {
             assert_eq!(t.cache.get(&key), None);
         }
+    }
+
+    #[test]
+    fn the_project_root_is_part_of_the_key() {
+        // Two builds with the same base_dir but different project roots must not
+        // share a cache entry: a script that resolves a `@/`-prefixed path itself
+        // could read a different file under each root
+        // (`plans/013-structured-data-parsing.md` §11.1).
+        let t = TempCache::new("root");
+        let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
+        let no_root = Key::new("foo", &[1], &["a".to_string()], &t.root, None, &script).unwrap();
+        t.cache.put(&no_root, &[], &[0x01]);
+
+        let with_root = Key::new(
+            "foo",
+            &[1],
+            &["a".to_string()],
+            &t.root,
+            Some(Path::new("/proj")),
+            &script,
+        )
+        .unwrap();
+        assert_eq!(t.cache.get(&with_root), None);
+
+        let other_root = Key::new(
+            "foo",
+            &[1],
+            &["a".to_string()],
+            &t.root,
+            Some(Path::new("/elsewhere")),
+            &script,
+        )
+        .unwrap();
+        t.cache.put(&with_root, &[], &[0x02]);
+        assert_eq!(t.cache.get(&other_root), None);
+        assert_eq!(t.cache.get(&with_root), Some(vec![0x02]));
     }
 
     #[test]
@@ -505,5 +574,55 @@ mod tests {
             None,
             "an unconfirmable dependency stores nothing"
         );
+    }
+
+    #[test]
+    fn concurrent_puts_to_distinct_keys_do_not_corrupt_each_other() {
+        // Prewarming (`plans/013-structured-data-parsing.md` §7) calls `put`
+        // for many different keys concurrently from multiple threads in one
+        // process — `write_atomic`'s tmp file must be unique per *call*, not
+        // just per process, or two threads racing to write different entries
+        // can clobber each other's temp file.
+        let t = TempCache::new("concurrent-distinct");
+        let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
+        let keys: Vec<Key> = (0..64u8)
+            .map(|i| Key::new("foo", &[i64::from(i)], &[], &t.root, None, &script).unwrap())
+            .collect();
+
+        std::thread::scope(|scope| {
+            for (i, key) in keys.iter().enumerate() {
+                let cache = &t.cache;
+                scope.spawn(move || cache.put(key, &[], &[i as u8]));
+            }
+        });
+
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(
+                t.cache.get(key),
+                Some(vec![i as u8]),
+                "entry {i} corrupted by a concurrent write to another key"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_puts_to_the_same_key_leave_a_consistent_entry() {
+        // Two call sites can share identical arguments (`plans/011-pseudo-op-caching.md`),
+        // so two prewarm tasks can legitimately race to write the *same* cache
+        // key. The result must always be one complete, self-consistent entry
+        // — never bytes from one write paired with another write's metadata.
+        let t = TempCache::new("concurrent-same");
+        let script = t.script("s.rhai", "fn custom(i, t) { [1] }");
+        let key = t.key(&script);
+
+        std::thread::scope(|scope| {
+            for _ in 0..32 {
+                let cache = &t.cache;
+                let key = &key;
+                scope.spawn(move || cache.put(key, &[], &[0xAB, 0xCD, 0xEF]));
+            }
+        });
+
+        assert_eq!(t.cache.get(&key), Some(vec![0xAB, 0xCD, 0xEF]));
     }
 }

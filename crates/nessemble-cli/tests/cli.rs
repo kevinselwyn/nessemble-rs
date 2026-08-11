@@ -816,6 +816,51 @@ fn custom_pseudo_reads_a_file_via_rhai_fs() {
 }
 
 #[test]
+fn custom_pseudo_script_resolves_at_slash_against_the_root_flag() {
+    // End-to-end: a script's own `read_blob("@/…")` call resolves against
+    // `--root`, exactly as a declared `file://@/…` argument or `.incbin
+    // "@/…"` already does (plan 013 §11.1). The `.asm` file, the mapping, and
+    // the script all live outside the root, so only `--root` makes it work.
+    let dir = std::env::temp_dir().join(format!(
+        "nessemble-atslash-root-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = dir.join("proj");
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(root.join("assets/data.bin"), [0xAA, 0xBB]).unwrap();
+
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("main.asm"), b".embed\n").unwrap();
+    std::fs::write(
+        elsewhere.join("embed.rhai"),
+        b"fn custom(ints, texts) { read_blob(\"@/assets/data.bin\") }\n",
+    )
+    .unwrap();
+    std::fs::write(elsewhere.join("pseudo.txt"), b".embed = embed.rhai\n").unwrap();
+
+    let out = bin()
+        .arg(elsewhere.join("main.asm"))
+        .args(["--root"])
+        .arg(&root)
+        .args(["--pseudo"])
+        .arg(elsewhere.join("pseudo.txt"))
+        .args(["--output", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, vec![0xAA, 0xBB]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn bundled_ease_script_resolves_after_install() {
     let home = std::env::temp_dir().join(format!("nessemble-ease-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
@@ -1176,7 +1221,19 @@ impl CacheProject {
 
     /// Assemble to stdout, returning the emitted bytes.
     fn assemble(&self, extra: &[&str]) -> Vec<u8> {
-        let out = bin()
+        let out = self.run(extra);
+        assert!(
+            out.status.success(),
+            "assemble failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    /// Assemble, returning the full process output regardless of exit status —
+    /// for tests that need to inspect stderr or a deliberate failure.
+    fn run(&self, extra: &[&str]) -> std::process::Output {
+        bin()
             .arg(self.root.join("main.asm"))
             .arg("--pseudo")
             .arg(self.root.join("pseudo.txt"))
@@ -1184,13 +1241,7 @@ impl CacheProject {
             .args(extra)
             .env("HOME", self.root.join("home"))
             .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "assemble failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out.stdout
+            .unwrap()
     }
 
     /// The number of cached entries `nessemble cache info` reports.
@@ -1306,6 +1357,43 @@ fn a_hit_answers_without_running_the_script() {
 }
 
 #[test]
+fn a_different_project_root_is_not_served_from_the_others_cache_entry() {
+    // Two builds share every other key field (script, arguments, base_dir), but
+    // point `--root` at different directories a `@/`-prefixed path the script
+    // resolves itself would read from differently. Without `root` in the cache
+    // key, the second build could be served the first root's bytes
+    // (`plans/013-structured-data-parsing.md` §11.1).
+    let p = CacheProject::new(
+        "root-key",
+        ".org $C000\n.gen\n",
+        "fn custom(ints, texts) { read_blob(\"@/data.bin\") }",
+    );
+    let root_a = p.root.join("a");
+    let root_b = p.root.join("b");
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    std::fs::write(root_a.join("data.bin"), [0x01]).unwrap();
+    std::fs::write(root_b.join("data.bin"), [0x02]).unwrap();
+
+    assert_eq!(
+        p.assemble(&["--root", root_a.to_str().unwrap()]),
+        vec![0x01]
+    );
+    assert_eq!(p.entry_count(), 1);
+    assert_eq!(
+        p.assemble(&["--root", root_b.to_str().unwrap()]),
+        vec![0x02],
+        "a different root must not reuse root_a's cached bytes"
+    );
+    assert_eq!(p.entry_count(), 2, "each root gets its own entry");
+    // Both stay independently servable from the cache.
+    assert_eq!(
+        p.assemble(&["--root", root_a.to_str().unwrap()]),
+        vec![0x01]
+    );
+}
+
+#[test]
 fn an_edited_script_is_not_served_from_the_cache() {
     let p = CacheProject::new(
         "edited",
@@ -1337,4 +1425,195 @@ fn a_changed_asset_is_not_served_from_the_cache() {
 
     std::fs::write(p.root.join("asset.bin"), b"\x09\x08\x07").unwrap();
     assert_eq!(p.assemble(&[]), vec![9, 8, 7], "the asset was re-read");
+}
+
+// ---- prewarming (plan 013, Phase 3) ---------------------------------------
+
+#[test]
+fn many_literal_argument_directives_prewarm_and_still_produce_correct_bytes() {
+    // Every `.gen N` call site's argument is a literal, so every one of them
+    // is a prewarm candidate, resolved concurrently ahead of the sequential
+    // emission passes (`plans/013-structured-data-parsing.md` §7). What
+    // actually matters is asserted here: the *outcome* is correct — right
+    // bytes, right order, every distinct invocation cached — with real
+    // concurrency exercised, not simulated.
+    use std::fmt::Write as _;
+    let count = 40u16;
+    let mut source = ".org $C000\n".to_string();
+    for i in 0..count {
+        let _ = writeln!(source, ".gen {i}");
+    }
+    let p = CacheProject::new(
+        "prewarm-many",
+        &source,
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+
+    let expected: Vec<u8> = (0..count).map(|i| i as u8).collect();
+    assert_eq!(p.assemble(&[]), expected);
+    assert_eq!(
+        p.entry_count(),
+        count as usize,
+        "every distinct invocation was cached, whether prewarmed or run sequentially"
+    );
+
+    // A second build is served entirely from the now fully warm cache.
+    assert_eq!(p.assemble(&[]), expected);
+    assert_eq!(p.entry_count(), count as usize);
+}
+
+#[test]
+fn a_symbol_dependent_directive_is_not_prewarmed_but_still_assembles() {
+    // `later`'s value isn't known until a pass resolves it, so this call site
+    // is left out of the prewarm scan entirely — it must still work, running
+    // sequentially through the ordinary (non-prewarmed) path.
+    let p = CacheProject::new(
+        "prewarm-symbol",
+        ".org $C000\n.gen later\n.db $00, $00\nlater:\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+    assert_eq!(p.assemble(&[]), vec![3, 0x00, 0x00]);
+}
+
+#[test]
+fn no_cache_skips_prewarming_without_erroring() {
+    // Prewarming is a no-op with nowhere to stash a concurrently-computed
+    // result (`Resolver::prewarm`'s own guard) — `--no-cache` must still
+    // assemble correctly and write nothing.
+    let p = CacheProject::new(
+        "prewarm-no-cache",
+        ".org $C000\n.gen 1\n.gen 2\n.gen 3\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+    assert_eq!(p.assemble(&["--no-cache"]), vec![1, 2, 3]);
+    assert_eq!(p.entry_count(), 0);
+}
+
+#[test]
+fn a_file_writing_script_with_literal_arguments_runs_exactly_once() {
+    // `.gen 1`'s argument is a literal, so it's a prewarm candidate — but its
+    // script writes a file, an effect that must happen exactly once per
+    // build. Without the purity guard (`nessemble_script::is_pure`), an
+    // uncacheable script would run once from prewarm *and again* from the
+    // sequential pass — this counter would read back `2`, and the assembled
+    // byte (taken from whichever run happened to be the sequential one)
+    // would silently disagree with it.
+    let p = CacheProject::new(
+        "prewarm-impure-once",
+        ".org $C000\n.gen 1\n",
+        r#"
+            fn custom(ints, texts) {
+                let count = 0;
+                try {
+                    count = parse_int(open_file("counter.txt", "r").read_string());
+                } catch {
+                    count = 0;
+                }
+                count += 1;
+                open_file("counter.txt").write(count.to_string());
+                [count]
+            }
+        "#,
+    );
+    assert_eq!(p.assemble(&[]), vec![1]);
+    assert_eq!(
+        std::fs::read_to_string(p.root.join("counter.txt")).unwrap(),
+        "1",
+        "the script must have run exactly once"
+    );
+    assert_eq!(p.entry_count(), 0, "an uncacheable result is never stored");
+}
+
+// ---- operation limit and timing (plan 013, Phase 4) ------------------------
+
+#[test]
+fn max_operations_aborts_a_script_that_exceeds_the_cap() {
+    // A cheap, finite loop that easily exceeds a small cap but would finish
+    // instantly under the built-in default — proving `--max-operations` is
+    // actually reaching the engine, not just accepted and ignored.
+    let p = CacheProject::new(
+        "max-ops-abort",
+        ".org $C000\n.gen 1\n",
+        r"
+            fn custom(ints, texts) {
+                let x = 0;
+                for i in range(0, 100_000) {
+                    x += 1;
+                }
+                [x]
+            }
+        ",
+    );
+    let out = p.run(&["--no-cache", "--max-operations", "50"]);
+    assert!(
+        !out.status.success(),
+        "a 50-operation cap must not let a 100,000-iteration loop finish"
+    );
+}
+
+#[test]
+fn max_operations_high_enough_still_assembles() {
+    // The same script comfortably finishes under a cap that is actually large
+    // enough, confirming the flag caps rather than replaces the limit.
+    let p = CacheProject::new(
+        "max-ops-allow",
+        ".org $C000\n.gen 1\n",
+        r"
+            fn custom(ints, texts) {
+                let x = 0;
+                for i in range(0, 100) {
+                    x += 1;
+                }
+                [x]
+            }
+        ",
+    );
+    assert_eq!(
+        p.assemble(&["--no-cache", "--max-operations", "100000"]),
+        vec![100]
+    );
+}
+
+#[test]
+fn time_scripts_reports_calls_and_cache_hits_per_directive() {
+    let p = CacheProject::new(
+        "time-scripts",
+        ".org $C000\n.gen 1\n.gen 1\n.gen 2\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+    let out = p.run(&["--time-scripts"]);
+    assert!(
+        out.status.success(),
+        "assemble failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("Script timing:"),
+        "missing report header: {stderr}"
+    );
+    // Two distinct argument sets (`.gen 1`, `.gen 2`) are prewarmed as cache
+    // misses (2 calls), then all three call sites — `.gen 1` twice, `.gen 2`
+    // once — resolve again through the sequential passes, now as cache hits
+    // (3 more calls): 5 calls, 3 hits, 2 misses.
+    let row = stderr
+        .lines()
+        .find(|l| l.contains(".gen:"))
+        .unwrap_or_else(|| panic!("no `.gen` row in: {stderr}"));
+    assert!(row.contains("5 calls"), "expected 5 calls in: {row}");
+    assert!(row.contains("3 hits"), "expected 3 hits in: {row}");
+    assert!(row.contains("2 misses"), "expected 2 misses in: {row}");
+}
+
+#[test]
+fn without_time_scripts_no_report_is_printed() {
+    let p = CacheProject::new(
+        "time-scripts-off",
+        ".org $C000\n.gen 1\n",
+        "fn custom(ints, texts) { [ints[0]] }",
+    );
+    let out = p.run(&[]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains("Script timing:"));
 }

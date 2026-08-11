@@ -20,7 +20,9 @@ use std::rc::Rc;
 use rhai::debugger::DebuggerCommand;
 use rhai::{ASTNode, Array, Dynamic, Scope};
 
-use super::{dynamic_to_bytes, engine, error_message};
+use nessemble_core::CustomOutput;
+
+use super::{dynamic_to_output, engine, error_message, RunOptions};
 
 /// Accumulated coverage for every instrumented script in one assembly, keyed by
 /// the script's path.
@@ -85,12 +87,13 @@ pub fn run_with_coverage(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
+    options: &RunOptions,
     script_path: &Path,
     cov: &SharedCoverage,
-) -> Result<Vec<u8>, String> {
+) -> Result<CustomOutput, String> {
     let hits: Rc<RefCell<BTreeSet<u32>>> = Rc::new(RefCell::new(BTreeSet::new()));
 
-    let mut engine = engine(base_dir);
+    let mut engine = engine(base_dir, options.root.as_deref(), options.max_operations);
     {
         let hits = hits.clone();
         // `register_debugger` is a stable-but-volatile Rhai API (marked
@@ -133,7 +136,7 @@ pub fn run_with_coverage(
     }
 
     match result {
-        Ok(value) => dynamic_to_bytes(value),
+        Ok(value) => dynamic_to_output(value),
         Err(err) => Err(error_message(&err)),
     }
 }
@@ -170,8 +173,17 @@ mod tests {
         let path = Path::new("test.rhai");
 
         // Take the `then` branch: `x = 10` runs, `x = 20` does not.
-        let out = run_with_coverage(SRC, &[1], &[], Path::new("."), path, &cov).unwrap();
-        assert_eq!(out, vec![10]);
+        let out = run_with_coverage(
+            SRC,
+            &[1],
+            &[],
+            Path::new("."),
+            &RunOptions::default(),
+            path,
+            &cov,
+        )
+        .unwrap();
+        assert_eq!(out, CustomOutput::Bytes(vec![10]));
         let after_then = uncovered(&cov);
         // The else branch (and any structural line) is uncovered so far.
         assert!(
@@ -180,8 +192,17 @@ mod tests {
         );
 
         // Now take the `else` branch too; hits accumulate across invocations.
-        let out = run_with_coverage(SRC, &[-1], &[], Path::new("."), path, &cov).unwrap();
-        assert_eq!(out, vec![20]);
+        let out = run_with_coverage(
+            SRC,
+            &[-1],
+            &[],
+            Path::new("."),
+            &RunOptions::default(),
+            path,
+            &cov,
+        )
+        .unwrap();
+        assert_eq!(out, CustomOutput::Bytes(vec![20]));
         let after_both = uncovered(&cov);
         assert!(
             after_both.len() < after_then.len(),
@@ -198,8 +219,16 @@ mod tests {
             "    throw \"boom\";\n",
             "}\n",
         );
-        let err = run_with_coverage(src, &[], &[], Path::new("."), Path::new("t.rhai"), &cov)
-            .unwrap_err();
+        let err = run_with_coverage(
+            src,
+            &[],
+            &[],
+            Path::new("."),
+            &RunOptions::default(),
+            Path::new("t.rhai"),
+            &cov,
+        )
+        .unwrap_err();
         assert_eq!(err, "boom");
         // The lines reached before the throw were still recorded.
         assert!(!cov.borrow().is_empty());

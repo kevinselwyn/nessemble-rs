@@ -85,7 +85,9 @@ fn custom(ints, texts) {
 - `texts` is an array of the string arguments (quotes already removed).
 - Return the emitted bytes as an **array of integers** (each taken `& 0xFF`), a
   **blob**, or a **string** (its bytes are emitted). Returning `()` emits
-  nothing.
+  nothing. Wrap a string in [`emit_source(...)`](#emitting-assembly-source)
+  instead to return assembly *source* for the assembler to expand, rather than
+  bytes.
 
 ### Example
 
@@ -158,10 +160,12 @@ The script still sees a plain path in `texts[0]`, just an absolute one this
 time — `@/` resolution happens once, before the file-existence check, so
 `texts[0]` is already `"/path/to/project/art/map.png"` by the time `custom`
 runs. Nothing about the script changes; `read_blob(texts[0])` works exactly as
-it does for a source-relative path. This is also the only way to write a
-project-root-relative path in a custom pseudo-op's argument: `@/` resolves
-solely where the assembler already knows a string is a path, and `file://` is
-what says so for an argument that has no built-in directive to say it for.
+it does for a source-relative path.
+
+A script's own file reads honour `@/` too — see
+[Filesystem access](#filesystem-access) — so declaring an argument is about the
+existence check and editor support above, not about unlocking `@/` for a path
+the script builds itself.
 
 Declaring is optional and per-argument. A script that treats a missing file as
 *optional* — falling back to a default when it isn't there — should leave the
@@ -184,6 +188,65 @@ fn custom(ints, texts) {
 }
 ```
 
+### Emitting assembly source
+
+A script can return `emit_source(text)` instead of bytes: `text` is assembly
+source, expanded **inline at the directive's own call site** — lexed, parsed,
+and executed exactly as if it had been written there — rather than emitted as
+raw bytes. This is the escape hatch for a directive whose job is to *generate*
+assembly, not compute a fixed byte sequence: a data table expressed as real
+`.db`/`.dw` lines with labels a caller can reference, or a repeated pattern a
+script would rather spell as instructions than as opcode bytes.
+
+```rust,ignore
+fn custom(ints, texts) {
+    let out = "";
+    for i in 0..ints[0] {
+        out += "frame" + i + ": .db " + (i * 8) + "\n";
+    }
+    emit_source(out)
+}
+```
+
+```nessemble
+.frames 3
+    LDA frame1   ; a label the emitted source defined, used right after it
+```
+
+A plain returned string already means "emit these bytes" (matching the
+reference Lua host's convention) — `emit_source` is what distinguishes
+"this is source to expand" from that, so wrap the string rather than
+returning it directly.
+
+A few things follow from the source being expanded **inline**, not in a
+separate file:
+
+- **Labels and constants the emitted source defines are real symbols**,
+  usable by code before or after the directive, exactly like a label defined
+  in a `.macro` body. Like a macro-defined label, one from emitted source is
+  hidden from the `-l` list file unless [`--mlist`](usage.md#--mlist) is
+  given.
+- **Diagnostics, spans, and coverage are attributed to the directive's own
+  line**, not to a position inside the emitted text — there is no file for an
+  editor to open at "line 3 of whatever `.frames` returned", so a parse error
+  in the emitted source is reported as `.frames`'s own error, on `.frames`'s
+  own line.
+- **`.include`, `.inestrn`, `.macro`, and `.macrodef` cannot appear in emitted
+  source.** Those are preprocessor constructs — `.include`/`.macro` splice
+  text *before* parsing, at a stage that has already finished by the time a
+  script runs — and using one in `emit_source`'s text is a directive-specific
+  error rather than the more confusing "unknown custom pseudo-op" a bare parse
+  of `.include` would otherwise give.
+- **A script that emits source is never [cached](#caching).** The assembler
+  has to re-expand the source on every build regardless — it has assembly-time
+  side effects (symbols, byte emission) an on-disk cache cannot replay — so
+  caching would only ever have saved the (comparatively cheap) expansion step,
+  not the script's own execution.
+- **Emitted source can itself invoke a custom directive**, including one that
+  emits source again — it dispatches exactly like any other directive. Nested
+  `emit_source` more than ten levels deep is a hard error rather than a stack
+  overflow.
+
 ### Filesystem access
 
 Scripts can read and write files through the
@@ -199,7 +262,22 @@ disk instead of only computing them. The main entry point is `open_file`:
   the file's bytes as a blob, equivalent to `open_file(path, "r").read_blob()`.
 
 Relative paths resolve against the **source file's directory** — the same base
-as `.include` and the `.inc*` importers — while absolute paths are used as-is.
+as `.include` and the `.inc*` importers — absolute paths are used as-is, and a
+path prefixed `@/` resolves from the
+[project root](syntax.md#project-root-relative-paths), the same as everywhere
+else `@/` is honoured:
+
+```rust,ignore
+fn custom(ints, texts) {
+    read_blob("@/assets/shared.bin")
+}
+```
+
+`open_file`, `read_blob`, `decode_png_file`, `parse_xml_file`, and
+`parse_json_file` all resolve `@/` identically — no one of them is left
+behaving differently from the others. A `@/` path is an error when no project
+root could be determined, naming the sigil rather than falling back to the
+source file's directory.
 
 A `.embed "file"` directive that emits a file's bytes verbatim:
 
@@ -498,7 +576,11 @@ An entry is reused only when all of the following still hold:
 - the **script** itself is unchanged (a `--pseudo` mapping pointing at a different
   script is a different entry too),
 - every **file the script read** is unchanged,
-- the directive's **arguments** and the directory it was called from are the same,
+- the directive's **arguments**, the directory it was called from, and the
+  [project root](syntax.md#project-root-relative-paths) (if any) are the same —
+  two builds that agree on everything else but disagree on `--root` do not
+  share an entry, since a `@/`-prefixed path the script resolves itself could
+  read a different file under each,
 - and the `nessemble` version is the same — the host's helpers define the output,
   so a new release starts from an empty cache.
 
@@ -509,6 +591,40 @@ result. The one gap: an edit that keeps a file's exact byte size *and* lands ins
 the same timestamp tick as the previous one can go unnoticed. If a build ever looks
 stale, [`--no-cache`](usage.md#no-cache) bypasses the cache entirely and
 [`nessemble cache clear`](usage.md#cache-info--cache-clear) empties it.
+
+### Prewarming runs independent scripts concurrently
+
+Before assembling, `nessemble` scans the program for custom-directive
+invocations whose arguments it can already work out — a directive whose
+integer arguments are plain numbers (no forward-referenced label) and whose
+string arguments are either undeclared or name a file that exists. Every
+invocation is independent by construction, so the ones it finds are resolved
+**concurrently**, across as many CPU cores as are available, filling the cache
+before the sequential assembly passes read from it. On a script-heavy build —
+several `.tilemap`/`.incpng`-style directives, each decoding its own PNG — this
+overlaps work that used to run one script at a time.
+
+This is transparent to almost every script: nothing about *what* a directive
+computes changes, only when it computes it, and the same "once per build,
+memoized across passes" guarantee still holds for the bytes that actually
+reach the ROM. Two things follow from prewarming happening ahead of, and
+independently of, that per-build memoization:
+
+- **A script that writes a file, draws randomness, or otherwise does
+  something the [never-cached](#what-is-never-cached) list covers is never
+  prewarmed** — running it an extra, uncounted time would be a real side
+  effect, not merely wasted work, so `nessemble` checks for exactly that
+  (without running the script) before ever including it.
+- **A directive whose arguments are not yet knowable — a forward-referenced
+  label, most commonly — is left for the sequential passes**, exactly as
+  before prewarming existed; nothing about it changes.
+
+Directive scripts remain independent of each other in every way that matters
+(each runs on its own interpreter instance, its own cache reads and writes),
+so no script needs to change to benefit from this. The one thing worth
+knowing: if a script reaches *outside* what the host tracks — writing to a
+fixed path some other tool also touches, say — assume it can now run
+concurrently with other invocations, not only with itself across builds.
 
 ### What is never cached
 
@@ -523,6 +639,9 @@ automatically:
   any per-file check.
 - **`import`ing a module** — a module's source is invisible to the recorder, so
   such a script is refused rather than tracked incompletely.
+- **[`emit_source`](#emitting-assembly-source) output** — the assembler must
+  re-expand it fresh on every build regardless (it has assembly-time side
+  effects a cache cannot replay), so nothing would be saved by storing it.
 
 The check is deliberately cautious: it looks at what a script *could* do, so a
 `rand()` in a branch that never runs is enough to keep the script out of the
@@ -531,6 +650,23 @@ would emit a stale ROM.
 
 `nessemble coverage --scripts` also bypasses the cache, since a cached result
 executes no lines and would report a covered script as uncovered.
+
+## Runaway-script guard and timing
+
+Every script runs on a Rhai engine with an operation-count guard, so a bug
+that loops forever fails the build instead of hanging it. The default is
+10,000,000 operations — generous for real work, small enough to fail fast on
+an accidental infinite loop.
+[`--max-operations`](usage.md#--max-operations-n) overrides it for a build
+that legitimately needs more (or wants a stricter cap of its own); `0` means
+unlimited, matching Rhai's own convention for that value.
+
+[`--time-scripts`](usage.md#--time-scripts) reports, per directive, how many
+times it was called, how many of those were cache hits versus real runs, and
+the total wall time spent in it — printed to stderr after assembly, busiest
+directive first. Prewarmed calls ([above](#prewarming-runs-independent-scripts-concurrently))
+count too, so the total reflects the real cost of a build, not just its
+sequential passes.
 
 ## Bundled scripts
 

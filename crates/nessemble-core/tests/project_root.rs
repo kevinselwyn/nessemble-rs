@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use nessemble_core::{assemble_file, assemble_file_with, AssembleError, CustomResolver, Options};
+use nessemble_core::{
+    assemble_file, assemble_file_with, AssembleError, CustomOutput, CustomResolver, Options,
+};
 
 /// A throwaway directory tree, removed on drop. Canonicalized at creation (as
 /// `nessemble_core`'s own root discovery does internally) so paths built from
@@ -68,9 +70,9 @@ fn asm(path: &Path) -> Vec<u8> {
 fn recording_resolver() -> (CustomResolver, Rc<RefCell<Vec<Vec<String>>>>) {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let log = Rc::clone(&seen);
-    let resolver: CustomResolver = Box::new(move |_name, _ints, texts, _base| {
+    let resolver: CustomResolver = Box::new(move |_name, _ints, texts, _base, _root| {
         log.borrow_mut().push(texts.to_vec());
-        Ok(vec![0x42])
+        Ok(CustomOutput::Bytes(vec![0x42]))
     });
     (resolver, seen)
 }
@@ -297,4 +299,34 @@ fn a_root_relative_declaration_and_a_dot_dot_declaration_key_differently() {
         seen.borrow().as_slice(),
         [vec![resolved], vec!["../art/map.png".to_string()]]
     );
+}
+
+// -- the resolver's own root argument (plan 013 §11.1) -----------------------
+
+#[test]
+fn the_resolver_receives_the_same_root_a_declared_argument_resolves_against() {
+    // `CustomResolver`'s fifth argument is `Assembler::root` itself — the same
+    // value a declared `@/`-prefixed argument already resolves against — so a
+    // script's own file API (`read_blob("@/…")`, via `nessemble-script`'s
+    // `run_with_root`) can resolve `@/` identically to `.incbin`/a declared
+    // `file://` argument, without a second root-discovery mechanism.
+    let tree = TempTree::new();
+    tree.write(".nessemblerc", b"");
+    tree.write("src/deep/main.asm", b".foo\n");
+
+    let seen: Rc<RefCell<Option<Option<PathBuf>>>> = Rc::new(RefCell::new(None));
+    let log = Rc::clone(&seen);
+    let resolver: CustomResolver = Box::new(move |_name, _ints, _texts, _base, root| {
+        *log.borrow_mut() = Some(root.map(Path::to_path_buf));
+        Ok(CustomOutput::Bytes(vec![0x00]))
+    });
+
+    assemble_file_with(
+        &tree.path("src/deep/main.asm"),
+        &Options::default(),
+        resolver,
+    )
+    .expect("assembles");
+
+    assert_eq!(seen.borrow().clone(), Some(Some(tree.root.clone())));
 }

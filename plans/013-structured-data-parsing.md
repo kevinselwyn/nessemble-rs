@@ -1,7 +1,9 @@
 # nessemble-rs: A Plan for Structured Data Parsing in Custom Pseudo-Ops
 
-> Status: **Phase 0 shipped ([§8](#8-phased-plan)); Phases 1–4 designed, not yet
-> built.** This document gives custom pseudo-op scripts native, host-side parsers
+> Status: **All phases shipped** ([§12](#12-phased-plan) — Phase 0
+> [§13.1](#131-phase-0), Phase 1 [§13.2](#132-phase-1), Phase 2
+> [§13.3](#133-phase-2), Phase 3 [§13.4](#134-phase-3), Phase 4
+> [§13.5](#135-phase-4)). This document gives custom pseudo-op scripts native, host-side parsers
 > for structured text — XML first, JSON alongside it ([§2](#2-native-document-parsing))
 > — on the same "host does the byte-level work, the script does the logic"
 > contract [`decode_png_file`](../crates/nessemble-script/src/lib.rs) already
@@ -10,12 +12,11 @@
 > function that opens a file through the existing `path`/`read_blob` registration
 > choke point ([§3](#3-cache-correctness-is-inherited-not-rebuilt)) is a tracked
 > cache dependency for free. It also closes the small set of string/blob gaps
-> found while prototyping ([§4](#4-string-and-blob-helpers)) and scopes the
-> larger, riskier parts of the originating request — assembly-source-returning
-> directives, parallel script execution, a settable operation limit, and a
-> per-directive timing report — as designed-but-deferred phases
-> ([§5](#5-deferred-source-returning-directives), [§6](#6-deferred-parallel-script-execution),
-> [§7](#7-deferred-operation-limits-and-timing)).
+> found while prototyping ([§4](#4-string-and-blob-helpers)) and, across later
+> phases, adds assembly-source-returning directives, parallel script execution,
+> a settable operation limit, and a per-directive timing report
+> ([§6](#6-source-returning-directives-shipped-phase-2-133), [§7](#7-parallel-script-execution-shipped-phase-3-134),
+> [§8](#8-operation-limits-and-timing-shipped-phase-4-135)).
 >
 > The through-line, inherited from the request this plan answers: **the host does
 > byte- and character-level work; the script does the logic.** Rhai is a
@@ -260,7 +261,7 @@ every field, and guessing per-field from a prefix would silently misinterpret a
 column that mixes decimal and hex by convention rather than by marker. A caller
 that needs prefix-aware parsing already has `parse_int(field, radix)` per field.
 
-## 6. Deferred: source-returning directives
+## 6. Source-returning directives. **Shipped (Phase 2, §13.3).**
 
 The request's §3 — letting `custom()` return a string of **assembly source** that
 the assembler expands macro-expansion-style, rather than only bytes — is real and
@@ -284,7 +285,12 @@ function registered in `engine_recording`, and `dynamic_to_bytes` would grow one
 more `Dynamic` shape to recognize before the plain-string case — additive, not a
 rework of the parsing added here.
 
-## 7. Deferred: parallel script execution
+Built as Phase 2, once Phase 1 shipped; see [§13.3](#133-phase-2) for how the
+sketch above compares to what was actually built — in particular, the
+distinguishing marker turned out to be `Dynamic::tag`, not a wrapper type, and
+the listing/linter/coverage impact was smaller than this section worried about.
+
+## 7. Parallel script execution. **Shipped (Phase 3, §13.4).**
 
 The request's §6 is the largest available win on script-heavy builds (a build
 reported as 100% of one CPU core, wall time equal to user+sys time), and it needs
@@ -309,7 +315,12 @@ does not block on it, and vice versa — a future parallel-prewarm phase benefit
 identically whether the invocations it parallelizes call `decode_png_file` or
 `parse_xml_file`.
 
-## 8. Deferred: operation limits and timing
+Built as Phase 3, once Phase 2 shipped; see [§13.4](#134-phase-3) for the shape
+that shipped — a scan-ahead prewarm restricted to statically-safe arguments (the
+first of the two options sketched above), not a general scan-ahead prepass, and
+a purity check the sketch above didn't anticipate needing.
+
+## 8. Operation limits and timing. **Shipped (Phase 4, §13.5).**
 
 Two smaller, independent asks from the request, both left out of Phase 0 for the
 same reason: they are CLI/engine-configuration surface, not parsing, and bundling
@@ -331,8 +342,11 @@ review, not easier.
   motivating example for the feature is this plan's own §2.1 table, which the
   request's author had to reconstruct by hand-timing a shell wrapper.
 
-Both are natural **Phase 4** work (§8 below) once §§2–5 give scripts something
-substantial to time and something worth bounding the operation count of.
+Built as Phase 4, once Phase 3 shipped; see [§13.5](#135-phase-4) for what
+shipped — the operation limit landed close to the sketch above (a `RunOptions`
+struct, since by then it was the *second* knob wanting a `_with_x`-suffixed
+entry point, not the first); `--time-scripts` counts prewarm's concurrent calls
+too, which the sketch above did not anticipate needing to say anything about.
 
 ## 9. Non-goals
 
@@ -456,30 +470,31 @@ JSON: `serde_json` is **already** a workspace dependency (`nessemble-cli`,
   "Caching" section's file list grows the two new functions.
 - Changeset: `minor` (new script-facing functionality, no breaking change).
 
-### Phase 1 — `@/` for the script-file API (deferred, §11.1)
+### Phase 1 — `@/` for the script-file API (§11.1). **Shipped.**
 
 Widen `CustomResolver` and `nessemble-script`'s public `run`/`run_with_inputs` to
 carry an optional project root, in the additive shape plan 011 used when it added
 `run_with_inputs` alongside `run`. Every one of `read_blob`, `decode_png_file`,
 `parse_xml_file`, `parse_json_file` gains `@/` support in the same change, so no
-function is left inconsistent with another.
+function is left inconsistent with another. See [§13.2](#132-phase-1) for what
+shipped.
 
-### Phase 2 — source-returning directives (deferred, §6)
+### Phase 2 — source-returning directives (§6). **Shipped.**
 
 `emit_source(text)`, the distinguishing return shape, `nessemble-core` expansion
 of the returned source at the directive's call site, and listing/linter/coverage
-visibility into the expanded lines.
+visibility into the expanded lines. See [§13.3](#133-phase-2) for what shipped.
 
-### Phase 3 — parallel script execution (deferred, §7)
+### Phase 3 — parallel script execution (§7). **Shipped.**
 
 A concurrency-safe cache (`nessemble-cli/src/cache.rs`'s `get`/`put`), and a
 prewarm step that runs independent invocations concurrently ahead of the
-sequential emission passes.
+sequential emission passes. See [§13.4](#134-phase-3) for what shipped.
 
-### Phase 4 — operation limits and `--time-scripts` (deferred, §8)
+### Phase 4 — operation limits and `--time-scripts` (§8). **Shipped.**
 
 A settable `max_operations`, documented; per-directive timing aggregated and
-reported via a new CLI flag.
+reported via a new CLI flag. See [§13.5](#135-phase-4) for what shipped.
 
 ## 13. As built
 
@@ -523,3 +538,331 @@ reported via a new CLI flag.
   dependency tracking through both a direct call and a nested one
   (`records_every_route_from_a_path_to_a_file`,
   `a_nested_parse_xml_file_call_is_recorded_too`).
+
+### 13.2 Phase 1
+
+- **`CustomResolver` itself widened to a fifth argument** (`Option<&Path>`,
+  the project root), rather than a parallel `_with_root` type as one reading of
+  §12's "additive" framing might suggest. §11.1 already called for exactly this
+  ("widening `CustomResolver`… for all five path-taking script functions at
+  once"), and every one of its nine construction sites (`default_custom_resolver`,
+  `lenient_custom_resolver`, `nessemble-cli`'s two `build_resolver*` functions,
+  `nessemble-wasm`'s, and four test helpers) lives inside this workspace, so the
+  "breaking" edge of the change is entirely internal — nothing outside the repo
+  constructs a `CustomResolver` by hand. What stayed additive, as §12 specifies,
+  is `nessemble-script`'s own public API: `run`/`run_with_inputs` are untouched
+  (they still exist, still take four arguments, still mean "no project root"),
+  and `run_with_root`/`run_with_inputs_and_root` are new siblings alongside them
+  — an embedder of `nessemble-script` directly (not through `CustomResolver`)
+  sees no breaking change at all.
+- **`nessemble-script` gained a dependency on `nessemble-core`** to resolve
+  `@/`, rather than reimplementing the prefix/escape-check logic locally. There
+  is no cycle (`nessemble-core` does not depend on `nessemble-script`, unlike
+  `nessemble-rc`'s situation in plan 012 §4, which is why *that* plan
+  duplicated its marker-list logic instead), and reusing
+  `nessemble_core::resolve_path_arg` means the two crates cannot drift on the
+  one thing that actually matters here: the Windows-safe, component-wise escape
+  check (plan 012 §13.3) that a from-scratch reimplementation would risk
+  getting subtly wrong.
+- **The on-disk cache key gained a `root` field** (`nessemble-cli/src/cache.rs`
+  `Key`, `FORMAT` bumped `1` → `2`) — not called out in §11.1 or §12, but a
+  direct consequence of the caching architecture in §3: once a script can
+  resolve `@/` itself, two builds sharing a `base_dir` but disagreeing on the
+  project root (say, a `.nessemblerc` added between them, or two `--root`
+  flags) could otherwise read a stale entry keyed on inputs recorded under a
+  *different* root's resolution of the same `@/`-prefixed name. Covered by
+  `the_project_root_is_part_of_the_key` (unit) and
+  `a_different_project_root_is_not_served_from_the_others_cache_entry` (CLI
+  end-to-end).
+- **`nessemble-script`'s `resolve` became fallible** (`Result<PathBuf, String>`
+  rather than a bare `PathBuf`), since `@/` introduces two new failure modes
+  (no root, or a path that escapes it) that plain relative/absolute resolution
+  never had. Every one of the five registrations that call it —
+  `path` (rhai-fs's own path hook, so `open_file("@/…")` gains `@/` too),
+  `read_blob`, `decode_png_file`, `parse_xml_file`, `parse_json_file` — prefixes
+  the resulting message with its own name, matching the existing
+  `"<fn>: cannot read …"` convention rather than introducing a new one.
+- **`coverage::run_with_coverage` gained the same `root` parameter**, even
+  though neither §11.1 nor §12 names it. Leaving it out would have meant
+  `nessemble coverage --scripts` resolving `@/` differently from an ordinary
+  build — exactly the "one function inconsistent with another" outcome §11.1
+  is about.
+- Every acceptance criterion Phase 1 is testable against has a regression
+  test: `@/` resolving from the root rather than `base_dir`
+  (`a_root_relative_path_resolves_from_the_project_root_not_base_dir`), every
+  path-taking function agreeing
+  (`every_path_taking_function_honors_at_slash`), the no-root and
+  escapes-the-root error cases, and the CLI end-to-end case
+  (`custom_pseudo_script_resolves_at_slash_against_the_root_flag`) alongside the
+  cache-key case above.
+
+### 13.3 Phase 2
+
+- **The distinguishing marker is `Dynamic::tag`, not a wrapper type.** §6's
+  sketch proposed `emit_source(text)` returning "a tagged handle" without
+  committing to a mechanism; Rhai's own `Dynamic::tag()`/`set_tag()` (used
+  elsewhere in the ecosystem for exactly "same shape, different meaning")
+  turned out to be a closer fit than inventing a wrapper struct and
+  registering it as an engine type (the way `Image`/`xml_node` are): no new
+  type, no `register_type_with_name`, and `dynamic_to_output` (renamed from
+  `dynamic_to_bytes`, which it now wraps) checks the tag before falling
+  through to the existing string/blob/array/int cases unchanged.
+- **`CustomResolver`'s Ok type widened to `CustomOutput` (`Bytes(Vec<u8>)` /
+  `Source(String)`)**, touching the same nine construction sites Phase 1's
+  root parameter did — the same reasoning applies: every one lives inside this
+  workspace, so the "breaking" edge is entirely internal.
+  `nessemble_script::run`/`run_with_root`/`run_with_inputs`/
+  `run_with_inputs_and_root` changed their success payload from `Vec<u8>` to
+  `CustomOutput` for the same reason Phase 1 widened `CustomResolver` itself
+  rather than adding parallel `_with_output` entry points: an embedder that
+  never calls `emit_source` still gets `CustomOutput::Bytes` back, so a
+  second, bytes-only API would only have added surface area nobody needed.
+  `nessemble-wasm`'s resolver needed **no change at all** — `nessemble_script::run`
+  already returns the right type, so `emit_source` works under wasm for free
+  (it has no filesystem dependency, unlike the `fs`-gated path functions).
+- **`emit_source` output is never written to the on-disk cache**, decided in
+  §6.1 rather than the `--pseudo` design (which predates this feature): the
+  assembler must re-expand the source on every build regardless (assembly-time
+  side effects — symbols, byte emission — a cache cannot replay), so caching
+  it would only ever have saved the comparatively cheap expansion step, not
+  the script's own execution. Concretely, `RunOutcome::cacheable` is `false`
+  whenever `output` is `Source`, independent of the existing purity scan —
+  which also means `nessemble-cli/src/cache.rs`'s on-disk schema needed **no
+  change**: only `Bytes` outcomes are ever written, so a cache hit is always
+  `CustomOutput::Bytes` by construction and `Cache::get`'s return type stayed
+  `Option<Vec<u8>>`.
+- **Expansion is lex → parse → `exec_stmt`, with `cur_file`/`cur_line` left
+  untouched.** `Assembler::exec_emitted_source` calls the crate's own
+  (crate-private, not `pub`, but visible from `assemble.rs` as a descendant of
+  the module that declares them) `lexer::Lexer`/`parse::parse` directly on the
+  returned string, then runs each resulting statement through the existing
+  `exec_stmt` dispatch — deliberately **not** repointing `cur_file`/`cur_line`
+  at a position inside the emitted text first, so every diagnostic, symbol,
+  and byte the expansion produces is attributed to the directive's own call
+  site. This is what makes the listing/coverage impact §6 worried about much
+  smaller than expected (next bullet) and directly reuses §2.6's reasoning
+  ("no second squiggle in a file the editor never opens") for generated source
+  instead of a parsed document.
+- **Listing, linter, and coverage needed far less new work than §6 predicted**,
+  once actually investigated: the list file (`-l`) renders symbols only (no
+  byte listing exists to update), so a label the expansion defines just needs
+  the right `from_macro`-style flag (below) to behave correctly; the linter is
+  purely textual and never runs scripts, so an `emit_source` directive is
+  already conservatively treated as "unknown effects", identically to any
+  other custom pseudo-op or macro invocation, with no code change; and
+  coverage is keyed by `(file, line)` spans, which pinning `cur_file`/
+  `cur_line` to the call site (previous bullet) satisfies automatically —
+  there is no synthetic file for `nessemble-cli`'s ignore-directive scan
+  (`std::fs::read_to_string`) to fail to find.
+- **A label or constant the expansion defines is flagged like one from a
+  `.macro` body**, reusing `Line::from_macro`/`ListSymbol::from_macro` rather
+  than adding a third state. `exec_emitted_source` sets
+  `Assembler::cur_from_macro = true` for the duration of the expansion (saved
+  and restored around it, since it is ordinary mutable assembler state, not
+  scoped to the call) — an emitted label is invisible in the `-l` list file
+  unless `--mlist`, matching a macro-defined one exactly, which is the
+  documented, deliberate behavior (`docs/src/extending.md`), not an
+  accidental reuse.
+- **`.include`, `.inestrn`, `.macro`, and `.macrodef` are rejected by a
+  pre-execution scan of every parsed statement**, before any of them run —
+  not caught ad hoc during dispatch. `.include`/`.macro`/`.macrodef` have no
+  `Pseudo` variant at all (they exist only as preprocessor-level constructs,
+  consumed by `Pre` before `parse::parse` ever sees them), so a bare parse of
+  `.include` in emitted source would otherwise fall through to
+  `Pseudo::Custom("include", …)` and fail as "unknown custom pseudo-op
+  `.include`" — a genuinely confusing error for a directive that obviously
+  exists. `.inestrn` **does** have a real `Pseudo::InesTrn` variant (it is
+  usable standalone outside `Pre`), but executing it without the preprocessor
+  splicing the actual trainer bytes in would only set the iNES trainer flag
+  with no trainer content — silently wrong rather than obviously broken — so
+  it is rejected too, for consistency with the other three rather than because
+  parsing itself fails.
+- **A depth guard (`MAX_EMIT_SOURCE_DEPTH = 10`) bounds recursive
+  `emit_source`** — emitted source that itself invokes a directive which emits
+  source again — mirroring `preprocess.rs`'s `MAX_INCLUDE_DEPTH` for
+  `.include`/`.macro` recursion. Not called for explicitly in §6, but the same
+  risk (a pathological script recursing until the process stack overflows,
+  which Rust cannot catch) applies here and gets the same fix.
+- New i18n messages (`emit-source-parse-error`, `emit-source-unsupported-directive`,
+  `emit-source-too-deep`) follow the existing `en-US.ftl` convention rather
+  than reusing `unsupported-directive` (already taken, and worded for a
+  built-in directive not yet implemented — a different situation from one that
+  will never be implemented in this context).
+- Tests: `nessemble-core/tests/emit_source.rs` (assembler-side mechanics, via a
+  hand-written `CustomResolver` — no Rhai involved) covers byte emission at the
+  call site, a label defined in emitted source usable immediately after it
+  (and flagged `from_macro`), nested custom-directive dispatch inside emitted
+  source, a parse error naming the directive and its own line, each of the
+  four rejected directives, the recursion-depth guard, and source-map
+  attribution. `nessemble-script/src/lib.rs`'s own tests cover the
+  `emit_source`/`dynamic_to_output` tagging and the never-cacheable rule.
+
+### 13.4 Phase 3
+
+- **A scan-ahead prewarm, not a scan-ahead prepass or a widened `CustomResolver`.**
+  §7 sketched two options ("a scan-ahead prepass restricted to arguments that
+  are safe to know early, or a 'parallel prewarm' step … *before* the
+  sequential emission passes read from it"); the shipped shape is the second,
+  and it turned out **not** to need `CustomResolver`, `Assembler`, or the
+  `Fn` bound on the resolver trait object to change at all. The insight that
+  made this possible: prewarming does not need to run *through* the injected
+  `CustomResolver` closure concurrently (which would have required widening it
+  to `Send + Sync`, rippling into `nessemble_script::coverage::SharedCoverage`
+  — currently `Rc<RefCell<…>>`, not thread-safe — for a resolver variant that
+  would never actually use it). It only needs to populate the **on-disk**
+  cache before the real, sequential resolver call reads from it, and that
+  on-disk cache is `nessemble-cli`'s own `Resolver`/`cache::Cache`, entirely
+  independent of `nessemble_core::CustomResolver`'s type.
+- **The scan lives in `nessemble-core`, not `nessemble-cli`**, as two new
+  public entry points, `prewarm_candidates_file`/`prewarm_candidates`,
+  mirroring `assemble_file_with`/`assemble_with`'s own preprocess-then-parse
+  shape but stopping before constructing an `Assembler` at all. The
+  alternative — reimplementing preprocessing/parsing in `nessemble-cli` to
+  avoid growing `nessemble-core`'s public surface — was rejected outright:
+  `mod lexer`/`mod parse`/`mod preprocess` are crate-private specifically so
+  there is exactly one implementation of them, and duplicating a second one
+  in the CLI crate is precisely the kind of drift risk plan 011/013 have
+  avoided everywhere else. Best-effort by design: a preprocessing or parse
+  failure here yields **no candidates**, never an error — the real assemble
+  call that follows is left as the sole authority on reporting it, since
+  reporting the same problem twice (once from a scan that exists purely as an
+  optimization) would be worse than staying quiet.
+- **A candidate is "safe" if every string argument resolves the same way
+  `exec_custom` resolves it, and every integer argument is `literal_eval`-able**
+  — no `Symbol`, `LocalForward`/`LocalBackward`, or `Bank` reference anywhere
+  in the expression tree. This is deliberately narrower than "safe to know
+  early" could be (a forward reference to an *already-defined* constant is
+  technically knowable without a second pass, for instance) — the chosen rule
+  costs nothing to prove correct (no assembler state involved at all) and
+  covers the case §7 was written for (asset-conversion directives with
+  literal or file-path arguments), which was judged worth more than a cleverer
+  heuristic with a larger correctness surface to get right. `resolve_str_arg`,
+  extracted out of `Assembler::exec_custom`, is shared by both so the scan and
+  the real pass cannot resolve a declared argument two different ways.
+- **A script that would not be cached is never prewarmed, not merely never
+  cached.** This is the one real correctness gap the naive version of this
+  phase had: prewarming happens *before* the real `Assembler` exists, so it
+  cannot go through `custom_memo` (the once-per-call-site memoization
+  `Assembler::exec_custom` already provides across a run's two passes) —
+  meaning a script that writes a file, draws randomness, or does anything
+  else on the [never-cached list](../docs/src/extending.md#what-is-never-cached)
+  would otherwise run once from prewarm *and again* from the sequential pass
+  that follows, a real duplicated side effect rather than merely wasted work.
+  Caught by writing `an_impure_script_with_literal_arguments_runs_exactly_once`-style
+  test coverage before trusting the design, not found by a fuzzer.
+  `nessemble_script::is_pure(source)` — new, and the fix — answers the
+  purity question by compiling the script and running the existing
+  `purity::impurity` AST scan **without calling `custom()`**, so the check
+  itself never risks the side effect it exists to prevent one extra
+  occurrence of.
+- **The on-disk cache schema needed no change**, despite `cache.rs`'s `get`/
+  `put` being genuinely unsafe under concurrent access before this phase (see
+  next bullet): because an uncacheable outcome is never written to disk
+  (previous bullet) and a `CustomOutput::Source` outcome is likewise never
+  written (`plans/013-structured-data-parsing.md` §13.3), *only* `Bytes`
+  outcomes are ever stored — so `Cache::get`'s return type stays
+  `Option<Vec<u8>>`, and a prewarmed hit is wrapped `CustomOutput::Bytes(...)`
+  at the one call site that reads it back.
+- **`write_atomic`'s tmp file needed a real fix, not just a design note.**
+  §7 flagged "cache reads/writes are not currently safe under concurrent
+  access" as a prerequisite; the specific bug was `write_atomic`'s temp
+  filename being unique per *process* (`std::process::id()`) but not per
+  *call* — two threads racing to write different cache entries (or, less
+  likely but still possible, the same one) could collide on the same temp
+  path and corrupt one or both. Fixed with a process-id-plus-atomic-counter
+  suffix. `concurrent_puts_to_distinct_keys_do_not_corrupt_each_other` and
+  `concurrent_puts_to_the_same_key_leave_a_consistent_entry`
+  (`nessemble-cli/src/cache.rs`) are regression tests for exactly this,
+  verified (by temporarily reverting the fix) to fail intermittently without
+  it and pass reliably with it.
+- **`rayon` is a direct dependency of `nessemble-cli` only**, not a workspace
+  dependency — confirmed absent from `Cargo.lock` before this phase, per §7's
+  own note. `nessemble-core` and `nessemble-script` gained no new dependency
+  and no new feature flag; wasm is unaffected since the parallelism lives
+  entirely in the CLI's own prewarm step, which nothing in the wasm build path
+  calls.
+- **Candidates are deduplicated before dispatch.** Two call sites can
+  legitimately share identical arguments (`custom_memo.rs`'s own
+  `separate_call_sites_resolve_separately`), which would otherwise mean two
+  threads racing to compute and write the same cache entry — wasted work,
+  not a correctness problem once the tmp-file fix above landed, but avoided
+  anyway since it costs only a `HashSet` over `PrewarmCandidate`, which
+  derives `Hash`/`Eq` for exactly this.
+- Tests: `nessemble-core/tests/prewarm.rs` covers the scan in isolation
+  (literal/symbol/bank arguments, declared-argument resolution matching the
+  real pass, macro-expanded invocations, best-effort failure handling).
+  `nessemble-cli/src/cache.rs` covers the concurrency fix directly.
+  `nessemble-cli/tests/cli.rs` covers the end-to-end outcome — many
+  literal-argument directives prewarming to the right bytes in the right
+  order with every entry cached, a symbol-dependent directive falling back to
+  the sequential path untouched, `--no-cache` skipping prewarming cleanly,
+  and the impure-script-runs-exactly-once regression above.
+
+### 13.5 Phase 4
+
+- **`RunOptions`, not a second `_with_x`-suffixed pair of entry points.** §8
+  sketched "a new `Options`-shaped parameter threaded through
+  `run`/`run_with_inputs`/the `CustomResolver` chain, mirroring how
+  `Options::project_root` was added in plan 012" — plan 012's own shape was
+  one additional function per knob (`run` → `run_with_root`). `max_operations`
+  would have made that `run_with_root_and_max_operations`, so the second knob
+  is what actually forced the refactor: `run`/`run_with_root` and
+  `run_with_inputs`/`run_with_inputs_and_root` became thin wrappers over a new
+  `run_with_options`/`run_with_inputs_and_options` pair taking a `RunOptions {
+  root, max_operations }` struct, with every existing call site (including
+  `nessemble-wasm`'s, which only ever calls plain `run`) untouched.
+- **`max_operations: Option<u64>` reuses Rhai's own unlimited-at-`0`
+  convention** rather than inventing a second one: `None` keeps the
+  10,000,000-operation built-in default, `Some(0)` is unlimited (passed
+  straight through to `Engine::set_max_operations`, which already treats `0`
+  that way), `Some(n)` caps it. The CLI flag (`--max-operations <n>`) needed no
+  translation layer as a result — `clap`'s `Option<u64>` parse output is the
+  option's value, verbatim.
+- **`coverage::run_with_coverage` also grew a `RunOptions` parameter, not a
+  ninth positional `max_operations` argument** — it was already at seven
+  (`clippy::too_many_arguments`'s default limit) before this phase, and an
+  eighth tripped the lint immediately. Taking `&RunOptions` instead of
+  `root: Option<&Path>` dropped it back to seven while giving the coverage
+  path the same cap every other entry point now has.
+- **Timing lives in `nessemble-cli`, not `nessemble-script`, exactly where §8
+  placed it** (`Resolver::resolve`, which already sees a cache hit/miss and a
+  directive's identity). The collector is `Arc<Mutex<Vec<ScriptTiming>>>`
+  (`custom::Timings`), not the `Rc<RefCell<_>>` the rest of the crate
+  otherwise favors, because `Resolver::prewarm` (Phase 3, §13.4) calls
+  `resolve` from several `rayon` worker threads at once — the same reasoning
+  that kept `SharedCoverage` out of the parallel path entirely now requires
+  the *opposite* choice for timing, since timing this phase deliberately
+  wants those concurrent calls counted, not excluded.
+- **A prewarmed call is a timed call.** `--time-scripts`'s report is meant to
+  answer "where did this build's wall time go", and a prewarm-warmed cache
+  entry is real work the build actually did, just moved earlier — leaving it
+  out of the total would make the report cheaper-looking than the build
+  actually was. The consequence, visible in the CLI regression test: a
+  directive called at three source lines with two distinct argument sets logs
+  five entries, not three — two cache-miss prewarm runs plus three cache-hit
+  calls from the sequential passes (`custom_memo`, Phase 0, still collapses
+  each *call site* to one resolver call per pass-pair; prewarm's calls are
+  additional, not a replacement for any of those three).
+- **`nessemble coverage`'s resolver also takes `--max-operations`, but not
+  `--time-scripts`.** The operation cap is cheap to thread everywhere a
+  `Resolver` is built and there is no reason coverage runs should be exempt
+  from a runaway-script guard the assemble path has; timing was left assemble-only
+  since §8's own motivating example (the §2.1 hand-timed-shell-wrapper table)
+  is about a normal build, and coverage's resolver bypasses the cache
+  entirely already (`build_resolver_with_coverage`'s doc comment), making a
+  hit/miss breakdown less meaningful there.
+- **The report prints to stderr, unconditionally on success, before the
+  `--check` early return** — never stdout, since assemble mode's default
+  output (`-o` omitted) is the assembled ROM on stdout, and a text report
+  interleaved with binary output would corrupt it. It is skipped entirely (no
+  empty header) when `--time-scripts` was not given, so a build that never
+  asks pays not even a locked-mutex check per resolve — the field is `Option`
+  and the `Instant::now()` call is gated on it being `Some`.
+- Tests: `nessemble-script/src/lib.rs` covers `RunOptions.max_operations`
+  directly — a cap low enough to abort a loop, one high enough to let it
+  finish, and `None` still honoring the 10,000,000 default.
+  `nessemble-cli/tests/cli.rs` covers the CLI flag end-to-end (a script that
+  exceeds a small `--max-operations` cap fails the build; a larger cap lets
+  the same script finish) and `--time-scripts`'s report (call/hit/miss counts
+  match the prewarm-plus-sequential arithmetic above; the header is absent
+  without the flag).

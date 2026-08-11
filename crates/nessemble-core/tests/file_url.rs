@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use nessemble_core::{assemble_file_with, strip_file_url, CustomResolver, Options};
+use nessemble_core::{assemble_file_with, strip_file_url, CustomOutput, CustomResolver, Options};
 
 /// A throwaway directory tree, removed on drop.
 struct TempTree {
@@ -49,9 +49,9 @@ impl Drop for TempTree {
 fn recording_resolver() -> (CustomResolver, Rc<RefCell<Vec<Vec<String>>>>) {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let log = Rc::clone(&seen);
-    let resolver: CustomResolver = Box::new(move |_name, _ints, texts, _base| {
+    let resolver: CustomResolver = Box::new(move |_name, _ints, texts, _base, _root| {
         log.borrow_mut().push(texts.to_vec());
-        Ok(vec![0x42])
+        Ok(CustomOutput::Bytes(vec![0x42]))
     });
     (resolver, seen)
 }

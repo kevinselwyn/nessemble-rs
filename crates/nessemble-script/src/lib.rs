@@ -71,6 +71,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use nessemble_core::CustomOutput;
 #[cfg(any(feature = "fs", feature = "rand"))]
 use rhai::packages::Package;
 use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
@@ -87,20 +88,98 @@ mod xml;
 
 use xml::XmlNode;
 
-/// Run `source`'s `custom(ints, texts)` function and return the emitted bytes,
-/// or a human-readable error message (a thrown string, or an engine error).
+/// Run `source`'s `custom(ints, texts)` function and return what the directive
+/// resolves to — bytes to emit, or (via `emit_source`) a string of assembly
+/// source for the assembler to expand at the call site
+/// (`plans/013-structured-data-parsing.md` §6) — or a human-readable error
+/// message (a thrown string, or an engine error).
 ///
 /// A relative path opened by the script (via rhai-fs's `open_file`) resolves
 /// against `base_dir` — the directory of the source file that contains the
 /// directive — matching how `.include` and the `.inc*` importers resolve paths.
-/// Absolute paths are used as-is.
+/// Absolute paths are used as-is. A `@/`-prefixed path is an error (no project
+/// root); use [`run_with_root`] to give scripts `@/` support.
 pub fn run(
     source: &str,
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
-) -> Result<Vec<u8>, String> {
-    run_impl(source, ints, texts, base_dir, None, false).map(|(bytes, _)| bytes)
+) -> Result<CustomOutput, String> {
+    run_with_options(source, ints, texts, base_dir, &RunOptions::default())
+}
+
+/// Like [`run`], but a `@/`-prefixed path the script resolves itself (via
+/// `read_blob`, `decode_png_file`, `parse_xml_file`, `parse_json_file`, or
+/// rhai-fs's `open_file`) joins against `root` instead of erroring — the same
+/// resolution every other path-taking argument gets
+/// (`plans/013-structured-data-parsing.md` §11.1). `root` is `None` where no
+/// project root could be determined, in which case a `@/` path is still an
+/// error, exactly as [`run`] leaves it.
+pub fn run_with_root(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    root: Option<&Path>,
+) -> Result<CustomOutput, String> {
+    run_with_options(
+        source,
+        ints,
+        texts,
+        base_dir,
+        &RunOptions {
+            root: root.map(Path::to_path_buf),
+            ..RunOptions::default()
+        },
+    )
+}
+
+/// The knobs beyond a script's own arguments and base directory: gathered
+/// into one struct, rather than one more `_with_x`-suffixed entry point per
+/// knob, once there was a second one to add alongside `root`
+/// (`plans/013-structured-data-parsing.md` §8). `Default` matches what
+/// [`run`]/[`run_with_inputs`] already do: no project root, the engine's
+/// built-in operation limit.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// See [`run_with_root`].
+    pub root: Option<PathBuf>,
+    /// Overrides the engine's runaway-script guard
+    /// (`Engine::set_max_operations`, hardcoded to 10,000,000 otherwise).
+    /// `None` keeps the built-in default; `Some(0)` means unlimited, matching
+    /// `set_max_operations`'s own convention for the value `0`.
+    pub max_operations: Option<u64>,
+}
+
+/// Like [`run`]/[`run_with_root`], with every knob [`RunOptions`] carries.
+pub fn run_with_options(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    options: &RunOptions,
+) -> Result<CustomOutput, String> {
+    run_impl(source, ints, texts, base_dir, options, None, false).map(|(output, _)| output)
+}
+
+/// Whether `source` is safe to run more than once for the same arguments —
+/// the same test [`run_with_inputs`]'s `cacheable` flag applies
+/// ([`purity::impurity`]), checked **without running the script**, so a
+/// caller can decide whether running it is safe *before* paying for the
+/// execution. Used to keep a prewarm step
+/// (`plans/013-structured-data-parsing.md` §7) from running a script an
+/// extra, uncounted time when that script does something — writing a file,
+/// drawing randomness — that must happen exactly as many times as the
+/// sequential emission passes actually call it. A script this crate cannot
+/// even compile is conservatively impure (`false`): if it can't be scanned,
+/// it can't be judged safe to duplicate.
+#[must_use]
+pub fn is_pure(source: &str) -> bool {
+    let engine = Engine::new();
+    let Ok(ast) = engine.compile(source) else {
+        return false;
+    };
+    purity::impurity(&ast).is_none()
 }
 
 /// The paths a script resolved through the host's file API, in sorted order.
@@ -112,14 +191,20 @@ type Recorder = Rc<RefCell<BTreeSet<PathBuf>>>;
 /// actually resolved through the host's file API on *this* invocation, so a cache
 /// can check those files for changes rather than guessing at a dependency set.
 /// `cacheable` is `false` when the script did something whose result must not be
-/// reused — see [`purity`].
+/// reused (see [`purity`]) **or** when `output` is
+/// [`CustomOutput::Source`] — the assembler must expand it fresh on every
+/// invocation regardless (it has assembly-time side effects: symbols, byte
+/// emission), so caching only ever saved the script's own execution, and an
+/// on-disk cache that could hand back a `Source` string would need the
+/// assembler to re-expand *that*, an added layer of trust in stored text this
+/// plan does not add. A script that emits source is therefore always re-run.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
-    /// The bytes the directive emits.
-    pub bytes: Vec<u8>,
+    /// What the directive resolves to.
+    pub output: CustomOutput,
     /// Absolute paths the script resolved through the host's file API.
     pub inputs: Vec<PathBuf>,
-    /// Whether these bytes may be reused on a later build.
+    /// Whether this outcome may be reused on a later build.
     pub cacheable: bool,
     /// Why the run is not cacheable, when it is not.
     pub impurity: Option<purity::Impurity>,
@@ -133,13 +218,53 @@ pub fn run_with_inputs(
     texts: &[String],
     base_dir: &Path,
 ) -> Result<RunOutcome, String> {
+    run_with_inputs_and_root(source, ints, texts, base_dir, None)
+}
+
+/// Like [`run_with_inputs`], with [`run_with_root`]'s `@/` support.
+pub fn run_with_inputs_and_root(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    root: Option<&Path>,
+) -> Result<RunOutcome, String> {
+    run_with_inputs_and_options(
+        source,
+        ints,
+        texts,
+        base_dir,
+        &RunOptions {
+            root: root.map(Path::to_path_buf),
+            ..RunOptions::default()
+        },
+    )
+}
+
+/// Like [`run_with_inputs`], with every knob [`RunOptions`] carries.
+pub fn run_with_inputs_and_options(
+    source: &str,
+    ints: &[i64],
+    texts: &[String],
+    base_dir: &Path,
+    options: &RunOptions,
+) -> Result<RunOutcome, String> {
     let recorder = Recorder::default();
-    let (bytes, impurity) = run_impl(source, ints, texts, base_dir, Some(&recorder), true)?;
+    let (output, impurity) = run_impl(
+        source,
+        ints,
+        texts,
+        base_dir,
+        options,
+        Some(&recorder),
+        true,
+    )?;
     let inputs: Vec<PathBuf> = recorder.borrow().iter().cloned().collect();
+    let cacheable = impurity.is_none() && matches!(output, CustomOutput::Bytes(_));
     Ok(RunOutcome {
-        bytes,
+        output,
         inputs,
-        cacheable: impurity.is_none(),
+        cacheable,
         impurity,
     })
 }
@@ -151,10 +276,16 @@ fn run_impl(
     ints: &[i64],
     texts: &[String],
     base_dir: &Path,
+    options: &RunOptions,
     recorder: Option<&Recorder>,
     scan: bool,
-) -> Result<(Vec<u8>, Option<purity::Impurity>), String> {
-    let engine = engine_recording(base_dir, recorder);
+) -> Result<(CustomOutput, Option<purity::Impurity>), String> {
+    let engine = engine_recording(
+        base_dir,
+        options.root.as_deref(),
+        options.max_operations,
+        recorder,
+    );
     let ast = engine.compile(source).map_err(|e| e.to_string())?;
     let impurity = if scan { purity::impurity(&ast) } else { None };
 
@@ -166,7 +297,7 @@ fn run_impl(
         .call_fn(&mut scope, &ast, "custom", (int_arr, text_arr))
         .map_err(|e| error_message(&e))?;
 
-    Ok((dynamic_to_bytes(result)?, impurity))
+    Ok((dynamic_to_output(result)?, impurity))
 }
 
 /// A resource-guarded engine with filesystem access.
@@ -179,8 +310,8 @@ fn run_impl(
 /// **filesystem access means scripts are no longer sandboxed** — a directive can
 /// touch any path the assembler process can. Only run pseudo-op scripts you
 /// trust, the same as any build tooling.
-fn engine(base_dir: &Path) -> Engine {
-    engine_recording(base_dir, None)
+fn engine(base_dir: &Path, root: Option<&Path>, max_operations: Option<u64>) -> Engine {
+    engine_recording(base_dir, root, max_operations, None)
 }
 
 /// [`engine`], optionally recording every path the script resolves through the
@@ -196,9 +327,20 @@ fn engine(base_dir: &Path) -> Engine {
 /// the entire correctness argument for the on-disk cache
 /// (`plans/011-pseudo-op-caching.md`, `plans/013-structured-data-parsing.md`
 /// §3), and there is no separate check that catches an omission.
-fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
+///
+/// `root` is the project root a `@/`-prefixed path resolves against
+/// (`plans/013-structured-data-parsing.md` §11.1); `None` where none could be
+/// determined, in which case `@/` in a script-resolved path is an error.
+/// `max_operations` overrides the runaway-script guard below; `None` keeps
+/// the built-in default (`plans/013-structured-data-parsing.md` §8).
+fn engine_recording(
+    base_dir: &Path,
+    root: Option<&Path>,
+    max_operations: Option<u64>,
+    recorder: Option<&Recorder>,
+) -> Engine {
     let mut engine = Engine::new();
-    engine.set_max_operations(10_000_000);
+    engine.set_max_operations(max_operations.unwrap_or(10_000_000));
     engine.set_max_call_levels(64);
     // Leave the string/array size limits unbounded (0): rhai-fs's `read_string`
     // / `read_blob` (with no explicit length) fill a buffer sized to these
@@ -220,20 +362,29 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // rhai-fs turns a path string into a `PathBuf` via this `path` function,
         // so redefining it reroutes every relative `open_file`/`open_dir`.
         let base = base_dir.to_path_buf();
+        let root_buf = root.map(Path::to_path_buf);
         let rec = recorder.cloned();
         engine.register_fn("path", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
-            move |p: &str| -> PathBuf { record(rec.as_ref(), resolve(&base, p)) }
+            move |p: &str| -> Result<PathBuf, Box<EvalAltResult>> {
+                let full = resolve(&base, root.as_deref(), p)
+                    .map_err(|e| -> Box<EvalAltResult> { e.into() })?;
+                Ok(record(rec.as_ref(), full))
+            }
         });
         // `read_blob(path)` — read a whole file as a blob, resolving relative
         // paths against the source directory (same rooting as `open_file`). Saves
         // the `open_file(path, "r").read_blob()` handle/mode ceremony.
         engine.register_fn("read_blob", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
             move |p: &str| -> Result<Blob, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full = resolve(&base, root.as_deref(), p)
+                    .map_err(|e| -> Box<EvalAltResult> { format!("read_blob: {e}").into() })?;
+                let full = record(rec.as_ref(), full);
                 std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("read_blob: cannot read {}: {e}", full.display()).into()
                 })
@@ -243,9 +394,14 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // (`decode_png(read_blob(path))`).
         engine.register_fn("decode_png_file", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
             move |p: &str| -> Result<Image, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full =
+                    resolve(&base, root.as_deref(), p).map_err(|e| -> Box<EvalAltResult> {
+                        format!("decode_png_file: {e}").into()
+                    })?;
+                let full = record(rec.as_ref(), full);
                 let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("decode_png_file: cannot read {}: {e}", full.display()).into()
                 })?;
@@ -256,9 +412,12 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // (`parse_xml(read_blob(path).as_string())`, roughly).
         engine.register_fn("parse_xml_file", {
             let base = base.clone();
+            let root = root_buf.clone();
             let rec = rec.clone();
             move |p: &str| -> Result<XmlNode, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full = resolve(&base, root.as_deref(), p)
+                    .map_err(|e| -> Box<EvalAltResult> { format!("parse_xml_file: {e}").into() })?;
+                let full = record(rec.as_ref(), full);
                 let bytes = std::fs::read(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("parse_xml_file: cannot read {}: {e}", full.display()).into()
                 })?;
@@ -273,8 +432,14 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
         // `parse_json_file(path)` — read and parse a JSON document in one call.
         engine.register_fn("parse_json_file", {
             let base = base.clone();
+            let root = root_buf.clone();
+            let rec = rec.clone();
             move |p: &str| -> Result<Dynamic, Box<EvalAltResult>> {
-                let full = record(rec.as_ref(), resolve(&base, p));
+                let full =
+                    resolve(&base, root.as_deref(), p).map_err(|e| -> Box<EvalAltResult> {
+                        format!("parse_json_file: {e}").into()
+                    })?;
+                let full = record(rec.as_ref(), full);
                 let text = std::fs::read_to_string(&full).map_err(|e| -> Box<EvalAltResult> {
                     format!("parse_json_file: cannot read {}: {e}", full.display()).into()
                 })?;
@@ -287,6 +452,7 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
     #[cfg(not(feature = "fs"))]
     {
         let _ = base_dir;
+        let _ = root;
         let _ = recorder;
     }
 
@@ -357,6 +523,17 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
     engine.register_fn("trimmed", trimmed);
     engine.register_fn("format_hex", format_hex);
 
+    // `emit_source(text)` — return `text` as assembly source for the
+    // assembler to expand inline at the directive's own call site, rather
+    // than as bytes (`plans/013-structured-data-parsing.md` §6). A plain
+    // returned string already means "emit these bytes" (`dynamic_to_output`,
+    // matching the reference Lua host), so the distinguishing marker cannot
+    // itself be "the return value is a string" — `emit_source` tags the
+    // string with [`EMIT_SOURCE_TAG`] instead of wrapping it in a new type,
+    // since `Dynamic`'s own tag is exactly Rhai's mechanism for "this value's
+    // shape is ordinary, but its meaning here is not".
+    engine.register_fn("emit_source", emit_source);
+
     // Random-number functions (`rand`, `rand(min, max)`, `rand_float`,
     // `rand_bool`, and array `shuffle`/`sample`) for scripts that need
     // procedural noise or randomized data tables. Compiled out on targets
@@ -407,16 +584,16 @@ fn engine_recording(base_dir: &Path, recorder: Option<&Recorder>) -> Engine {
     engine
 }
 
-/// Resolve a script-supplied path against the directive's source directory:
-/// relative paths join `base`, absolute paths are used as-is.
+/// Resolve a script-supplied path against the directive's source directory,
+/// or — for a `@/`-prefixed path — the project root: the same rule
+/// [`nessemble_core::resolve_path_arg`] applies to every other path-taking
+/// argument (`plans/013-structured-data-parsing.md` §11.1,
+/// `plans/012-project-root-paths.md`). `root` is `None` where no project root
+/// could be determined, in which case a `@/` path is an error naming the sigil
+/// rather than a silent fallback, matching [`nessemble_core::PathArgError`].
 #[cfg(feature = "fs")]
-fn resolve(base: &Path, p: &str) -> PathBuf {
-    let path = PathBuf::from(p);
-    if path.is_relative() {
-        base.join(path)
-    } else {
-        path
-    }
+fn resolve(base: &Path, root: Option<&Path>, p: &str) -> Result<PathBuf, String> {
+    nessemble_core::resolve_path_arg(root, base, p).map_err(|e| e.message(p))
 }
 
 /// A decoded image, as scripts see it.
@@ -863,6 +1040,34 @@ fn format_hex(value: i64, width: i64) -> Result<String, Box<EvalAltResult>> {
     Ok(format!("${:0w$X}", (value as u64) & mask, w = w))
 }
 
+/// The [`Dynamic`] tag [`emit_source`] sets, so [`dynamic_to_output`] can tell
+/// its string apart from an ordinary returned one (which already means "emit
+/// these bytes" — [`dynamic_to_bytes`]). An arbitrary value, private to this
+/// module; nothing outside it inspects a `Dynamic`'s tag. `i32` matches
+/// `Dynamic`'s own tag type on the 64-bit targets this crate builds for
+/// (`rhai::types::dynamic::Tag`, not re-exported at the crate root).
+const EMIT_SOURCE_TAG: i32 = 1;
+
+/// `emit_source(text)` — tag `text` so [`dynamic_to_output`] treats it as
+/// assembly source to expand rather than bytes to emit.
+fn emit_source(text: &str) -> Dynamic {
+    let mut value = Dynamic::from(text.to_string());
+    value.set_tag(EMIT_SOURCE_TAG);
+    value
+}
+
+/// Convert a script's return value into what the directive resolves to:
+/// [`CustomOutput::Source`] for an `emit_source`-tagged string,
+/// [`CustomOutput::Bytes`] otherwise ([`dynamic_to_bytes`]).
+fn dynamic_to_output(value: Dynamic) -> Result<CustomOutput, String> {
+    if value.tag() == EMIT_SOURCE_TAG && value.is_string() {
+        return Ok(CustomOutput::Source(
+            value.into_string().unwrap_or_default(),
+        ));
+    }
+    dynamic_to_bytes(value).map(CustomOutput::Bytes)
+}
+
 /// Convert a script's return value into emitted bytes.
 fn dynamic_to_bytes(value: Dynamic) -> Result<Vec<u8>, String> {
     if value.is_unit() {
@@ -926,10 +1131,21 @@ mod tests {
         Path::new(".")
     }
 
+    /// Unwrap a `run`/`run_with_root` result down to plain bytes, for the many
+    /// existing tests that predate `emit_source` and don't care about the
+    /// distinction. Panics (loudly, not silently) if the script emitted source
+    /// instead — none of these tests do.
+    fn bytes(result: Result<CustomOutput, String>) -> Result<Vec<u8>, String> {
+        result.map(|output| match output {
+            CustomOutput::Bytes(b) => b,
+            CustomOutput::Source(s) => panic!("expected bytes, got emit_source({s:?})"),
+        })
+    }
+
     #[test]
     fn sums_integer_arguments() {
         let src = "fn custom(ints, texts) { let s = 0; for i in ints { s += i; } [s % 256] }";
-        assert_eq!(run(src, &[1, 2, 3], &[], cwd()).unwrap(), vec![6]);
+        assert_eq!(bytes(run(src, &[1, 2, 3], &[], cwd())).unwrap(), vec![6]);
     }
 
     #[test]
@@ -939,7 +1155,7 @@ mod tests {
                    let t = ints[0].to_float() / ints[1].to_float(); \
                    [(t * 16.0).floor().to_int() % 256] }";
         // (3 / 4) * 16 = 12
-        assert_eq!(run(src, &[3, 4], &[], cwd()).unwrap(), vec![12]);
+        assert_eq!(bytes(run(src, &[3, 4], &[], cwd())).unwrap(), vec![12]);
     }
 
     #[test]
@@ -951,7 +1167,10 @@ mod tests {
     #[test]
     fn receives_string_arguments() {
         let src = "fn custom(ints, texts) { texts[0].to_blob() }";
-        assert_eq!(run(src, &[], &["Hi".to_string()], cwd()).unwrap(), b"Hi");
+        assert_eq!(
+            bytes(run(src, &[], &["Hi".to_string()], cwd())).unwrap(),
+            b"Hi"
+        );
     }
 
     /// A unique, freshly-created directory in the OS temp area, removed on drop.
@@ -984,7 +1203,10 @@ mod tests {
         let dir = TempDir::new("read");
         std::fs::write(dir.0.join("asset.bin"), b"\x01\x02\x03NES").unwrap();
         let src = r#"fn custom(ints, texts) { open_file("asset.bin", "r").read_blob() }"#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), b"\x01\x02\x03NES");
+        assert_eq!(
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
+            b"\x01\x02\x03NES"
+        );
     }
 
     #[test]
@@ -993,7 +1215,7 @@ mod tests {
         std::fs::write(dir.0.join("note.txt"), b"hello").unwrap();
         let src = r#"fn custom(ints, texts) { open_file(texts[0], "r").read_string().to_blob() }"#;
         assert_eq!(
-            run(src, &[], &["note.txt".to_string()], &dir.0).unwrap(),
+            bytes(run(src, &[], &["note.txt".to_string()], &dir.0)).unwrap(),
             b"hello"
         );
     }
@@ -1004,7 +1226,7 @@ mod tests {
         // or truncating), and `File#write` persists the bytes.
         let dir = TempDir::new("write");
         let src = r#"fn custom(ints, texts) { open_file("out.bin").write("ok"); () }"#;
-        let out = run(src, &[], &[], &dir.0).unwrap();
+        let out = bytes(run(src, &[], &[], &dir.0)).unwrap();
         assert_eq!(out, Vec::<u8>::new());
         assert_eq!(std::fs::read(dir.0.join("out.bin")).unwrap(), b"ok");
     }
@@ -1017,12 +1239,12 @@ mod tests {
         std::fs::write(&file, b"ABS").unwrap();
         let src = r#"fn custom(ints, texts) { open_file(texts[0], "r").read_blob() }"#;
         // `base_dir` is an unrelated directory; the absolute path still resolves.
-        let out = run(
+        let out = bytes(run(
             src,
             &[],
             &[file.to_string_lossy().into_owned()],
             Path::new("/nonexistent-base"),
-        );
+        ));
         assert_eq!(out.unwrap(), b"ABS");
     }
 
@@ -1054,7 +1276,7 @@ mod tests {
         "#;
         // width, height, then the two pixels' RGBA bytes.
         assert_eq!(
-            run(src, &[], &[], &dir.0).unwrap(),
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
             vec![2, 1, 10, 20, 30, 40, 50, 60, 70, 80]
         );
     }
@@ -1077,7 +1299,7 @@ mod tests {
 
         // read_blob(path) == open_file(path, "r").read_blob()
         let src = r#"fn custom(ints, texts) { read_blob("asset.bin") }"#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), b"\x01\x02\x03");
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), b"\x01\x02\x03");
 
         // decode_png_file(path) == decode_png(read_blob(path))
         let src = r#"
@@ -1086,7 +1308,7 @@ mod tests {
                 [img.width, img.height, img.r(0, 0)]
             }
         "#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![1, 1, 9]);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), vec![1, 1, 9]);
     }
 
     #[test]
@@ -1110,7 +1332,7 @@ mod tests {
             }
         "#;
         assert_eq!(
-            run(src, &[], &[], &dir.0).unwrap(),
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
             vec![20, 20, 20, 255, 30, 10, 20, 30, 40]
         );
     }
@@ -1186,7 +1408,7 @@ mod tests {
                 out
             }
         "#;
-        let out = run(src, &[], &[], &dir.0).unwrap();
+        let out = bytes(run(src, &[], &[], &dir.0)).unwrap();
         // Cell (0,0) matches bank cells 0 and 2 — the lowest index wins; (1,0)
         // matches cell 1; (0,1) matches cell 3; (1,1) matches nothing (-1 → 0).
         assert_eq!(out, vec![1, 1, 2, 2, 4, 4, 0, 0]);
@@ -1209,7 +1431,10 @@ mod tests {
             }
         "#;
         // Cells 0 and 2 are the all-dark cell; 4 and -1 are outside the bank.
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![1, 0, 1, 0, 0, 0]);
+        assert_eq!(
+            bytes(run(src, &[], &[], &dir.0)).unwrap(),
+            vec![1, 0, 1, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -1227,7 +1452,7 @@ mod tests {
         "#;
         // The unmatched cell is mid-gray (shade 1): distance 4 to the all-dark
         // cells 0/2, 6 to cell 3, 8 to the all-light cell 1 — so cell 0.
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![0, 1]);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), vec![0, 1]);
     }
 
     #[test]
@@ -1255,7 +1480,7 @@ mod tests {
         "#;
         // Two whole cells (the third column and third row are partial): the
         // light cell is index 1, and index 2 is out of range.
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), vec![2, 0]);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), vec![2, 0]);
     }
 
     #[test]
@@ -1337,7 +1562,7 @@ mod tests {
             }
         "#;
         let started = std::time::Instant::now();
-        let out = run(src, &[], &[], &dir.0).unwrap();
+        let out = bytes(run(src, &[], &[], &dir.0)).unwrap();
         let elapsed = started.elapsed();
         let expected: i64 = (0..20000).map(|x: i64| (x % 512) % 256).sum();
         assert_eq!(out, vec![(expected % 256) as u8]);
@@ -1359,7 +1584,7 @@ mod tests {
             }
         ";
         assert_eq!(
-            run(src, &[], &[], cwd()).unwrap(),
+            bytes(run(src, &[], &[], cwd())).unwrap(),
             vec![0, 1, 2, 3, 1, 0, 1, 2, 3]
         );
     }
@@ -1381,7 +1606,7 @@ mod tests {
                 out
             }
         ";
-        let out = run(src, &[], &[], cwd()).unwrap();
+        let out = bytes(run(src, &[], &[], cwd())).unwrap();
         assert_eq!(out.len(), 9);
         for &b in &out[..8] {
             assert!(
@@ -1409,7 +1634,7 @@ mod tests {
             }
         "#;
         assert_eq!(
-            run(src, &[], &[], cwd()).unwrap(),
+            bytes(run(src, &[], &[], cwd())).unwrap(),
             vec![1, 2, 3, 8, 7, 4, 66]
         );
     }
@@ -1448,8 +1673,91 @@ mod tests {
         assert_eq!(names, ["a.bin", "b.bin", "c.png", "d.xml", "e.json"]);
         // Absolute, so a recorded path means the same thing from anywhere.
         assert!(out.inputs.iter().all(|p| p.is_absolute()));
-        assert_eq!(out.bytes, b"ab");
+        assert_eq!(out.output, CustomOutput::Bytes(b"ab".to_vec()));
         assert!(out.cacheable);
+    }
+
+    // ---- `@/` project-root resolution (plan 013 §11.1) ---------------------
+
+    #[test]
+    fn a_root_relative_path_resolves_from_the_project_root_not_base_dir() {
+        // `@/`-prefixed paths a script resolves itself join the project root,
+        // not `base_dir` — the same rule `.incbin`/a declared `file://`
+        // argument already follow (plan 012, plan 013 §11.1).
+        let dir = TempDir::new("at-slash-root");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/logo.bin"), b"logo").unwrap();
+        let sub = root.join("src/gfx");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let src = r#"fn custom(ints, texts) { read_blob("@/assets/logo.bin") }"#;
+        let out = bytes(run_with_root(src, &[], &[], &sub, Some(&root))).unwrap();
+        assert_eq!(out, b"logo");
+    }
+
+    #[test]
+    fn every_path_taking_function_honors_at_slash() {
+        // read_blob, decode_png_file, parse_xml_file, parse_json_file, and
+        // rhai-fs's own open_file (via the `path` hook) all resolve `@/`
+        // identically — no function is left inconsistent with another.
+        let dir = TempDir::new("at-slash-every-fn");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.bin"), b"a").unwrap();
+        write_png_1x1(&root.join("b.png"));
+        std::fs::write(root.join("c.xml"), b"<r/>").unwrap();
+        std::fs::write(root.join("d.json"), b"1").unwrap();
+        std::fs::write(root.join("e.txt"), b"e").unwrap();
+        let src = r#"
+            fn custom(ints, texts) {
+                let a = read_blob("@/a.bin");
+                let img = decode_png_file("@/b.png");
+                let doc = parse_xml_file("@/c.xml");
+                let j = parse_json_file("@/d.json");
+                let e = open_file("@/e.txt", "r").read_blob();
+                a + e
+            }
+        "#;
+        let out = bytes(run_with_root(src, &[], &[], &root, Some(&root))).unwrap();
+        assert_eq!(out, b"ae");
+    }
+
+    #[test]
+    fn a_root_relative_path_is_recorded_as_its_resolved_absolute_path() {
+        let dir = TempDir::new("at-slash-record");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        let asset = root.join("assets/logo.bin");
+        std::fs::write(&asset, b"logo").unwrap();
+
+        let src = r#"fn custom(ints, texts) { read_blob("@/assets/logo.bin") }"#;
+        let out = run_with_inputs_and_root(src, &[], &[], &root, Some(&root)).unwrap();
+        assert_eq!(out.inputs, vec![asset]);
+    }
+
+    #[test]
+    fn a_root_relative_path_without_a_root_names_the_sigil() {
+        // No project root could be determined (e.g. `run`'s plain, root-less
+        // form) — a hard error, not a silent fallback to `base_dir`.
+        let dir = TempDir::new("at-slash-no-root");
+        let src = r#"fn custom(ints, texts) { read_blob("@/assets/logo.bin") }"#;
+        let err = run(src, &[], &[], &dir.0).unwrap_err();
+        assert!(err.contains("@/assets/logo.bin"), "unexpected error: {err}");
+        assert!(err.contains("no project root"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_root_relative_path_that_escapes_the_root_is_an_error() {
+        let dir = TempDir::new("at-slash-escape");
+        let root = dir.0.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = r#"fn custom(ints, texts) { read_blob("@/../secret.bin") }"#;
+        let err = run_with_root(src, &[], &[], &root, Some(&root)).unwrap_err();
+        assert!(
+            err.contains("outside the project root"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1475,7 +1783,7 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, ["inner.xml", "outer.xml"]);
-        assert_eq!(out.bytes, b"inner");
+        assert_eq!(out.output, CustomOutput::Bytes(b"inner".to_vec()));
         assert!(out.cacheable);
     }
 
@@ -1537,6 +1845,24 @@ mod tests {
     }
 
     #[test]
+    fn is_pure_agrees_with_run_with_inputs_cacheable_without_running_anything() {
+        // A file-writing script: `is_pure` must say `false` *before* the
+        // write happens, not after — a prewarm step relies on being able to
+        // ask without paying for (or risking) the execution
+        // (`plans/013-structured-data-parsing.md` §7).
+        let src = r#"fn custom(ints, texts) { open_file("out.bin").write("ok"); () }"#;
+        assert!(!is_pure(src));
+
+        let pure_src = "fn custom(ints, texts) { [ints[0]] }";
+        assert!(is_pure(pure_src));
+    }
+
+    #[test]
+    fn is_pure_is_false_for_a_script_that_does_not_even_compile() {
+        assert!(!is_pure("fn custom(ints texts) { ["));
+    }
+
+    #[test]
     fn a_read_mode_open_stays_cacheable() {
         let dir = TempDir::new("purity-read");
         std::fs::write(dir.0.join("a.bin"), b"a").unwrap();
@@ -1590,16 +1916,65 @@ mod tests {
         // sees it, and code that cannot run cannot make the result vary.)
         let src = "fn custom(ints, texts) { if ints[0] == 0 { [7] } else { [rand(0, 9)] } }";
         let out = run_with_inputs(src, &[0], &[], cwd()).unwrap();
-        assert_eq!(out.bytes, vec![7]);
+        assert_eq!(out.output, CustomOutput::Bytes(vec![7]));
         assert!(!out.cacheable);
     }
 
     #[test]
-    fn run_still_returns_only_bytes() {
-        // The original entry point is unchanged, so `nessemble-wasm` and every
-        // existing caller keep working.
+    fn run_still_returns_bytes_for_an_ordinary_script() {
+        // `run`'s signature is unchanged (still four arguments, still
+        // fallible), so `nessemble-wasm` and every existing caller keep
+        // working; only the success payload widened from `Vec<u8>` to
+        // `CustomOutput` to also carry `emit_source`'s shape (§6 below).
         let src = "fn custom(ints, texts) { [1, 2] }";
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![1, 2]);
+        assert_eq!(
+            run(src, &[], &[], cwd()).unwrap(),
+            CustomOutput::Bytes(vec![1, 2])
+        );
+    }
+
+    // ---- operation limit (plan 013, Phase 4) -------------------------------
+
+    #[test]
+    fn max_operations_aborts_a_script_that_exceeds_the_cap() {
+        let src = r"
+            fn custom(ints, texts) {
+                let x = 0;
+                for i in range(0, 100_000) {
+                    x += 1;
+                }
+                [x]
+            }
+        ";
+        let options = RunOptions {
+            max_operations: Some(50),
+            ..RunOptions::default()
+        };
+        assert!(run_with_options(src, &[], &[], cwd(), &options).is_err());
+    }
+
+    #[test]
+    fn max_operations_high_enough_still_lets_the_script_finish() {
+        let src = "fn custom(ints, texts) { let x = 0; for i in range(0, 100) { x += 1; } [x] }";
+        let options = RunOptions {
+            max_operations: Some(1_000_000),
+            ..RunOptions::default()
+        };
+        assert_eq!(
+            run_with_options(src, &[], &[], cwd(), &options).unwrap(),
+            CustomOutput::Bytes(vec![100])
+        );
+    }
+
+    #[test]
+    fn max_operations_none_keeps_the_built_in_default() {
+        // A script well within the hardcoded 10,000,000-operation default
+        // still runs when no cap is given, matching `run`'s own behavior.
+        let src = "fn custom(ints, texts) { let x = 0; for i in range(0, 200) { x += 1; } [x] }";
+        assert_eq!(
+            run_with_options(src, &[], &[], cwd(), &RunOptions::default()).unwrap(),
+            CustomOutput::Bytes(vec![200])
+        );
     }
 
     // ---- structured data parsing (plan 013) --------------------------------
@@ -1616,7 +1991,10 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 1, 2, 3, 4]);
+        assert_eq!(
+            bytes(run(src, &[], &[], cwd())).unwrap(),
+            vec![2, 1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -1656,7 +2034,7 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], &dir.0).unwrap(), expected);
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), expected);
     }
 
     #[test]
@@ -1704,7 +2082,10 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 1, 2, 3, 4]);
+        assert_eq!(
+            bytes(run(src, &[], &[], cwd())).unwrap(),
+            vec![2, 1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -1713,7 +2094,7 @@ mod tests {
         std::fs::write(dir.0.join("d.json"), br#"{"v": 7}"#).unwrap();
         let src = r#"fn custom(ints, texts) { [parse_json_file("d.json").v] }"#;
         let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
-        assert_eq!(out.bytes, vec![7]);
+        assert_eq!(out.output, CustomOutput::Bytes(vec![7]));
         assert_eq!(out.inputs.len(), 1);
         assert!(out.inputs[0].ends_with("d.json"));
     }
@@ -1740,7 +2121,10 @@ mod tests {
                 out
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![1, 2, 3, 255, 26]);
+        assert_eq!(
+            bytes(run(src, &[], &[], cwd())).unwrap(),
+            vec![1, 2, 3, 255, 26]
+        );
     }
 
     #[test]
@@ -1761,7 +2145,7 @@ mod tests {
             }
         "#;
         // "HI" (2) + "padded" (6) + "$FF$FF$001A" (11)
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![2, 6, 11]);
+        assert_eq!(bytes(run(src, &[], &[], cwd())).unwrap(), vec![2, 6, 11]);
     }
 
     #[test]
@@ -1773,7 +2157,7 @@ mod tests {
                 [s.len(), t.len()]
             }
         "#;
-        assert_eq!(run(src, &[], &[], cwd()).unwrap(), vec![6, 2]);
+        assert_eq!(bytes(run(src, &[], &[], cwd())).unwrap(), vec![6, 2]);
     }
 
     #[test]
@@ -1789,9 +2173,45 @@ mod tests {
             }
         "#;
         assert_eq!(
-            run(src, &[], &["hi".to_string()], cwd()).unwrap(),
+            bytes(run(src, &[], &["hi".to_string()], cwd())).unwrap(),
             vec![26, 2]
         );
+    }
+
+    // ---- source-returning directives (plan 013 §6) -------------------------
+
+    #[test]
+    fn emit_source_is_distinguished_from_a_plain_returned_string() {
+        // A plain string still means "emit these bytes" (`dynamic_to_bytes`,
+        // the reference Lua host's convention); `emit_source` tags the same
+        // shape to mean something else instead.
+        let plain = "fn custom(ints, texts) { \"AB\" }";
+        assert_eq!(
+            run(plain, &[], &[], cwd()).unwrap(),
+            CustomOutput::Bytes(b"AB".to_vec())
+        );
+
+        let emitted = r#"fn custom(ints, texts) { emit_source(".db $41, $42") }"#;
+        assert_eq!(
+            run(emitted, &[], &[], cwd()).unwrap(),
+            CustomOutput::Source(".db $41, $42".to_string())
+        );
+    }
+
+    #[test]
+    fn emit_source_output_is_never_cacheable() {
+        // The assembler must re-expand the source on every invocation
+        // regardless (it has assembly-time side effects: symbols, byte
+        // emission), so caching it would only ever save the (comparatively
+        // cheap) expansion step, not the script's own execution — and would
+        // need the on-disk cache to trust stored text as a re-expansion input,
+        // which this plan does not add. A script this simple would otherwise
+        // read as pure (no file access, no randomness) and be cached.
+        let src = r#"fn custom(ints, texts) { emit_source(".db 1") }"#;
+        let outcome = run_with_inputs(src, &[], &[], cwd()).unwrap();
+        assert_eq!(outcome.output, CustomOutput::Source(".db 1".to_string()));
+        assert!(!outcome.cacheable, "a Source outcome must never be cached");
+        assert!(outcome.impurity.is_none(), "the script itself is pure");
     }
 
     /// Write a minimal 1×1 grayscale PNG that `decode_png` accepts.
