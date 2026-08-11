@@ -1043,10 +1043,19 @@ fn format_hex(value: i64, width: i64) -> Result<String, Box<EvalAltResult>> {
 /// The [`Dynamic`] tag [`emit_source`] sets, so [`dynamic_to_output`] can tell
 /// its string apart from an ordinary returned one (which already means "emit
 /// these bytes" — [`dynamic_to_bytes`]). An arbitrary value, private to this
-/// module; nothing outside it inspects a `Dynamic`'s tag. `i32` matches
-/// `Dynamic`'s own tag type on the 64-bit targets this crate builds for
-/// (`rhai::types::dynamic::Tag`, not re-exported at the crate root).
+/// module; nothing outside it inspects a `Dynamic`'s tag.
+///
+/// `Dynamic`'s own tag type (`rhai::types::dynamic::Tag`) is private to the
+/// `rhai` crate and is not simply `i32`: rhai defines it as `i32` on 64-bit
+/// targets but `i16` on 32-bit ones (`rhai-1.25.1/src/types/dynamic.rs`), and
+/// `set_tag`/`tag()` are typed in terms of it directly, so a hardcoded `i32`
+/// here does not merely misbehave on a 32-bit target (wasm32, i686) — it
+/// fails to *compile* there. Defined with the same `cfg` rhai itself uses so
+/// the two can never disagree.
+#[cfg(target_pointer_width = "64")]
 const EMIT_SOURCE_TAG: i32 = 1;
+#[cfg(target_pointer_width = "32")]
+const EMIT_SOURCE_TAG: i16 = 1;
 
 /// `emit_source(text)` — tag `text` so [`dynamic_to_output`] treats it as
 /// assembly source to expand rather than bytes to emit.
