@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.24.0 - 2026-08-11
+
+### Minor changes
+
+- Custom-directive invocations whose arguments are already known (literal numbers, resolvable file paths) are now resolved concurrently ahead of assembly, warming the pseudo-op cache before the sequential passes read from it — a real speedup on script-heavy builds with no script changes required.
+- Custom pseudo-op scripts can now resolve `@/`-prefixed project-root paths themselves (`read_blob`, `decode_png_file`, `parse_xml_file`, `parse_json_file`, and `open_file`), matching every other path-taking argument.
+- Custom pseudo-op scripts can parse XML (`parse_xml`/`parse_xml_file`) and JSON (`parse_json`/`parse_json_file`) natively, decode delimited numeric columns in bulk (`parse_int_list`), and use new string helpers (`to_char`, `trimmed`, `format_hex`) — see the new "Parsing structured data" section in the extending guide.
+- Custom pseudo-op scripts can return `emit_source(text)` to have the assembler expand assembly source inline at the directive's call site, rather than only bytes — labels and constants the emitted source defines become real symbols usable right after it.
+- Pseudo-op scripts' runaway-operation guard is now settable with --max-operations, and --time-scripts reports each directive's call count, cache hits/misses, and wall time after assembly.
+
 ## 2.23.1 - 2026-08-10
 
 ### Patch changes
