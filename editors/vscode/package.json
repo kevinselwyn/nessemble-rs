@@ -31,7 +31,8 @@
   },
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:nessemble"
+    "onLanguage:nessemble",
+    "onLanguage:rhai"
   ],
   "contributes": {
     "languages": [
@@ -46,6 +47,15 @@
           ".s"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "rhai",
+        "aliases": [
+          "Rhai"
+        ],
+        "extensions": [
+          ".rhai"
+        ]
       }
     ],
     "configuration": {
