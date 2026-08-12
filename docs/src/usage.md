@@ -186,9 +186,23 @@ anything, so the next build recomputes what it needs.
 ### reference [&lt;category&gt;] [&lt;term&gt;]
 
 Prints reference information from locally bundled data. With no arguments it
-lists the categories (`instructions`, `directives`); with a category it lists
-its entries; with a term it prints the details (e.g. `reference instructions
-LDA`).
+lists the categories (`instructions`, `directives`, `script`); with a category it
+lists its entries; with a term it prints the details (e.g. `reference
+instructions LDA`).
+
+The `script` category is the host API a [custom pseudo-op
+script](extending.md) can call, grouped by domain:
+
+```text
+nessemble reference script              # every function, method, and property
+nessemble reference script nes_shade    # signature, summary, and a docs link
+```
+
+A name catalogued more than once prints each meaning — `read_blob` is both a
+method on an open file handle and a one-call function — and an entry that needs
+a build feature says so, since the WebAssembly build has neither
+[filesystem access](extending.md#filesystem-access) nor [random
+numbers](extending.md#random-numbers).
 
 ### format [&lt;opt&gt; ...] &lt;path&gt; ...
 

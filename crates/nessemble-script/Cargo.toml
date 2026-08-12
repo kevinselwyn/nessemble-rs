@@ -44,6 +44,10 @@ coverage = ["rhai/debugging"]
 [dev-dependencies]
 # Encodes small PNGs for the `decode_png` tests.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The host API catalog, held against this crate's own registrations by
+# `tests/api_catalog.rs`. A dev-dependency, not a dependency: the catalog reads
+# the engine, never the other way round.
+nessemble-script-api.workspace = true
 
 [lints]
 workspace = true

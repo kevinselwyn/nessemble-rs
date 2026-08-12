@@ -1,6 +1,7 @@
 # nessemble-rs: A Plan for Scripting Documentation and Tooling
 
-> Status: **Proposed.** This document treats the host functions a pseudo-op
+> Status: **Phase 0 shipped** ([§9](#9-phased-plan); as built,
+> [§12.1](#121-phase-0)). This document treats the host functions a pseudo-op
 > script can call as what they actually are — **a public API** — and gives them
 > the three things every public API in this repo already has and this one does
 > not: a **reference table of contents**, grouped by domain, in the
@@ -533,7 +534,7 @@ nothing to do with the ROM, and the single summary line
 Phases 0–3 are the catalog track and are ordered; Phase 4 is independent and can
 land at any point.
 
-### Phase 0 — the catalog
+### Phase 0 — the catalog. **Shipped ([§12.1](#121-phase-0)).**
 
 `nessemble-script-api` with the full table, `Domain`/`ApiKind`/`Availability`,
 and the drift test in `nessemble-script` ([§3](#3-the-catalog-one-table-four-consumers)).
@@ -620,6 +621,66 @@ writing ([§4.2](#42-generated-not-hand-written)).
 
 ## 12. As built
 
-*(Filled in per phase as the work lands, in the manner of
-[plan 013](013-structured-data-parsing.md) §13 — one subsection per phase,
-recording where the build deviated from this document and why.)*
+*(One subsection per phase, in the manner of
+[plan 013](013-structured-data-parsing.md) §13, recording where the build
+deviated from this document and why.)*
+
+### 12.1 Phase 0
+
+**42 entries, and the count is the interesting part.** The catalog holds 42
+entries across the seven domains of [§4.1](#41-the-domains) — 32 registered by
+`engine()`, 9 curated from the `rhai-fs` and `rhai-rand` packages, and `custom`
+itself. Thirty-two is also exactly the number of distinct names `engine()`
+registers, minus one. Nothing was discovered missing from the docs and nothing
+was found documented that no longer exists: the prose was accurate. What it was
+not was *enumerable*, which is the whole complaint.
+
+**`Origin` is a field §3.1 did not have.** The plan's struct carried
+`availability` alone and left the drift test to exempt "package-registered"
+entries by feature — which conflates two different things. `read_blob(path)` is
+`Feature("fs")` *and* registered by `engine()`; `file.read_blob()` is
+`Feature("fs")` and registered by `rhai-fs`. Only the first can be held against
+the engine's source. So origin (`Host` / `Package(name)` / `Script`) and
+availability (`Always` / `Feature(name)`) are separate axes, and the drift test
+keys on origin. The `Script` variant exists for `custom`, which is defined by the
+script rather than the host and is otherwise a permanent false positive.
+
+**The name collision is real and had to be designed for, not avoided.**
+`read_blob` is two different functions — a method on an open file handle and a
+one-call free function — and both are documented. So `lookup` returns an
+iterator rather than an `Option`, `reference script read_blob` prints both, and
+the third drift test needed a carve-out: a `Package` entry whose name *is*
+registered is only misfiled when no `Host` entry shares that name. That was
+found by the test failing, which is the right way round.
+
+**The scan is generic over `.register_*`, not a list of methods.** §3.3 named
+`register_fn` / `register_get` / `register_type_with_name`. Hard-coding three
+method names means a future `register_indexer_get` silently escapes the gate, so
+the scanner instead finds every `.register_`, walks to the opening paren, and
+takes the first string literal if there is one. Calls with no name literal —
+`FilesystemPackage::new().register_into_engine(&mut engine)` — contribute
+nothing, which is correct: those are precisely the `Origin::Package` entries.
+The scan is bounded to the source above `#[cfg(test)]` and skips comment lines.
+
+Three guards keep the gate from going quiet: a floor on how many registrations
+the scan must find (a scanner that matches nothing would otherwise pass
+vacuously), a spot-check naming each registration *shape* the source uses, and a
+negative control run by hand — renaming one catalog entry fails both directions
+with the expected messages.
+
+**`path` is the one registered name deliberately absent.** It is `rhai-fs`'s
+path-conversion hook, redefined so relative paths reroot to the directive's
+source directory; a script never calls it. It sits in a `NOT_SCRIPT_FACING`
+constant in the test with that reasoning, rather than becoming a catalog entry
+documenting an internal.
+
+**`reference script` wraps its second column.** `DIRECTIVES` summaries are three
+or four words and align in one pass; these are whole sentences against
+signatures up to 44 characters wide, which ran to ~140 columns. The listing
+wraps the summary to a 96-column target with a hanging indent. Twenty lines,
+worth it.
+
+**§3.2's argument was verified, not asserted.** `cargo build -p nessemble-cli
+--no-default-features` — no `scripting`, no `lsp` — builds, and
+`nessemble reference script nes_shade` answers from it. That is the property the
+whole crate exists for, and Phase 2 depends on it.
