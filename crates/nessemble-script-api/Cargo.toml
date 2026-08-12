@@ -1,0 +1,19 @@
+[package]
+name = "nessemble-script-api"
+description = "Catalog of the host API available to nessemble-rs custom pseudo-op scripts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Data only, and deliberately dependency-free — including of the scripting host
+# itself. The language server has to complete and document this API in builds
+# that carry no Rhai at all (`nessemble-cli --no-default-features --features
+# lsp`), which is the whole reason the catalog is not a module inside
+# `nessemble-script`. See `plans/014-scripting-docs-and-tooling.md` §3.2.
+[dependencies]
+
+[lints]
+workspace = true

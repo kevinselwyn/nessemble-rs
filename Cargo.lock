@@ -616,6 +616,7 @@ dependencies = [
  "nessemble-lsp",
  "nessemble-rc",
  "nessemble-script",
+ "nessemble-script-api",
  "rayon",
  "serde",
  "serde_json",
@@ -679,11 +680,16 @@ dependencies = [
  "image",
  "nessemble-core",
  "nessemble-media",
+ "nessemble-script-api",
  "rhai",
  "rhai-fs",
  "rhai-rand",
  "serde_json",
 ]
+
+[[package]]
+name = "nessemble-script-api"
+version = "2.24.0"
 
 [[package]]
 name = "nessemble-wasm"
