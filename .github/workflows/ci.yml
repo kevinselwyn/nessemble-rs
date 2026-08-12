@@ -50,6 +50,21 @@ jobs:
       - name: Package extension
         run: cargo run -p xtask -- vsix
 
+  # -------------------------------------------------------------------- Docs
+  #
+  # The host-API table of contents in docs/src/extending.md is generated from
+  # the nessemble-script-api catalog; `--check` fails when they've drifted
+  # (see plans/014-scripting-docs-and-tooling.md §4.2).
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Script API TOC up to date
+        run: cargo run -p xtask -- script-api --check
+
   # ------------------------------------------------------------- Changeset gate
   #
   # Every PR that changes shipped behavior must add a changeset under

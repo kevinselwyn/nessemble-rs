@@ -5,6 +5,7 @@
 #
 # This mirrors .github/workflows/ci.yml:
 #   * the `check` job   -> cargo fmt / clippy / test / changeset check
+#   * the `docs` job    -> the script-api host API TOC is up to date
 #   * the `changeset`   -> a PR must add a changeset under .changeset/
 #
 # On any failure the hook writes an explanation to stderr and exits 2, which
@@ -61,6 +62,9 @@ run "Format"           "cargo fmt --all"                                   -- ca
 run "Clippy"           "cargo clippy --all-targets --all-features -- -D warnings" -- cargo clippy --all-targets --all-features -- -D warnings
 run "Test"             "cargo test --all-features"                          -- cargo test --all-features
 run "Changeset validate" "cargo run -p xtask -- changeset check"            -- cargo run -p xtask -- changeset check
+
+# --- `docs` job: the generated host-API TOC is up to date ---------------------
+run "Script API TOC up to date" "cargo run -p xtask -- script-api"          -- cargo run -p xtask -- script-api --check
 
 # --- `changeset` job: a PR must add a changeset (unless opted out) -------------
 if [ "${NESSEMBLE_NO_CHANGESET:-}" != "1" ]; then

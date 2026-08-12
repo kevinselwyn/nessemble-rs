@@ -15,6 +15,7 @@ It mirrors both CI jobs:
 | Clippy                                                 | `cargo clippy --all-targets --all-features -- -D warnings` |
 | Test                                                  | `cargo test --all-features` |
 | Changeset validate                                    | `cargo run -p xtask -- changeset check` |
+| `docs` job (script-api TOC up to date)                 | `cargo run -p xtask -- script-api --check` |
 | `changeset` job (PR must add a changeset)             | checks for a new `.changeset/*.md` on the branch |
 
 On failure the hook writes the failing check and its output to stderr and exits

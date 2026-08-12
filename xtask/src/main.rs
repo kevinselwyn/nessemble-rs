@@ -4,6 +4,7 @@
 //!   wasm                    Build the WebAssembly assembler bundle (wasm-bindgen).
 //!   vsix                    Package the VS Code extension (editors/vscode) as a .vsix.
 //!   dist                    Build the GitHub Pages site (website + mdBook docs + llms.txt).
+//!   script-api [--check]    Render the host API TOC into docs/src/extending.md.
 //!   changeset <sub>         Changeset-driven release versioning (add/check/status/version).
 //!   help                    Show this help.
 //!
@@ -34,6 +35,7 @@ fn main() -> std::process::ExitCode {
         "wasm" => wasm(),
         "vsix" => vsix(),
         "dist" => dist(),
+        "script-api" => script_api(rest),
         "changeset" => changeset::run(rest),
         "help" | "-h" | "--help" => {
             print_help();
@@ -60,6 +62,7 @@ fn print_help() {
          \x20 wasm                    Build the WebAssembly assembler bundle (needs the wasm32 target + wasm-bindgen)\n\
          \x20 vsix                    Package the VS Code extension as nessemble_<version>.vsix (needs npm + npx)\n\
          \x20 dist                    Build the GitHub Pages site (website + mdBook docs + llms.txt)\n\
+         \x20 script-api [--check]    Render the host API TOC into docs/src/extending.md (--check: verify, don't write)\n\
          \x20 changeset <sub>         Changeset-driven release versioning: add | check | status | version\n\
          \x20 help                    Show this help"
     );
@@ -265,6 +268,107 @@ fn dist() -> Result<(), String> {
 
     println!("Built site at {}", site.display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// script-api — the host API table of contents in docs/src/extending.md
+// ---------------------------------------------------------------------------
+
+use nessemble_script_api::{Availability, Domain, SCRIPT_API};
+
+/// Marks the region of `docs/src/extending.md` this command owns. Everything
+/// between the two lines is regenerated from [`SCRIPT_API`]; everything
+/// outside them is hand-written prose (see
+/// `plans/014-scripting-docs-and-tooling.md` §4.2).
+const SCRIPT_API_BEGIN_MARKER: &str =
+    "<!-- BEGIN generated: script-api-toc — edit crates/nessemble-script-api, not this block -->";
+const SCRIPT_API_END_MARKER: &str = "<!-- END generated: script-api-toc -->";
+
+/// Render the catalog into `docs/src/extending.md`'s marked block.
+/// `cargo run -p xtask -- script-api` writes; `--check` re-renders and diffs
+/// without writing, exiting non-zero when the committed page has drifted from
+/// the catalog (wired into the `docs` CI job).
+fn script_api(args: &[String]) -> Result<(), String> {
+    let check_only = match args.first().map(String::as_str) {
+        None => false,
+        Some("--check") => true,
+        Some(other) => return Err(format!("script-api: unknown flag `{other}` (try --check)")),
+    };
+
+    let path = repo_root().join("docs/src/extending.md");
+    let current =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let rendered = update_script_api_block(&current, &render_script_api_toc())?;
+
+    if check_only {
+        if current == rendered {
+            println!("{} is up to date", path.display());
+            Ok(())
+        } else {
+            Err(format!(
+                "{} is out of date — run `cargo run -p xtask -- script-api` and commit the result",
+                path.display()
+            ))
+        }
+    } else {
+        if current == rendered {
+            println!("{} is already up to date", path.display());
+        } else {
+            std::fs::write(&path, rendered)
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            println!("Wrote {}", path.display());
+        }
+        Ok(())
+    }
+}
+
+/// Splice `generated` between the marker lines in `text`, leaving everything
+/// else untouched. Errors if either marker is missing.
+fn update_script_api_block(text: &str, generated: &str) -> Result<String, String> {
+    let begin = text
+        .find(SCRIPT_API_BEGIN_MARKER)
+        .ok_or_else(|| format!("docs/src/extending.md: no `{SCRIPT_API_BEGIN_MARKER}` marker"))?;
+    let after_begin = begin + SCRIPT_API_BEGIN_MARKER.len();
+    let end = text[after_begin..]
+        .find(SCRIPT_API_END_MARKER)
+        .map(|p| p + after_begin)
+        .ok_or_else(|| format!("docs/src/extending.md: no `{SCRIPT_API_END_MARKER}` marker"))?;
+    Ok(format!(
+        "{}\n\n{}\n\n{}",
+        &text[..after_begin],
+        generated.trim_end(),
+        &text[end..]
+    ))
+}
+
+/// Render every domain of [`SCRIPT_API`] as a heading, one line of
+/// orientation, and a table of signature / summary / availability — the body
+/// of the marked block, without the marker lines themselves.
+fn render_script_api_toc() -> String {
+    let mut sections = Vec::with_capacity(Domain::ALL.len());
+    for domain in Domain::ALL {
+        let mut s = String::new();
+        let _ = writeln!(s, "### {}\n", domain.title());
+        let _ = writeln!(s, "{}\n", domain.blurb());
+        let _ = writeln!(s, "| Signature | Summary | Availability |");
+        let _ = writeln!(s, "| --- | --- | --- |");
+        for entry in SCRIPT_API.iter().filter(|e| e.domain == *domain) {
+            let availability = match entry.availability {
+                Availability::Always => "—".to_string(),
+                Availability::Feature(_) => entry
+                    .availability
+                    .note()
+                    .map_or_else(|| "—".to_string(), ToString::to_string),
+            };
+            let _ = writeln!(
+                s,
+                "| [`{}`](#{}) | {} | {availability} |",
+                entry.signature, entry.anchor, entry.summary
+            );
+        }
+        sections.push(s.trim_end().to_string());
+    }
+    sections.join("\n\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +941,50 @@ fn run_tool(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_api_toc_groups_by_domain_and_names_every_entry() {
+        let out = render_script_api_toc();
+        for domain in Domain::ALL {
+            assert!(out.contains(&format!("### {}", domain.title())), "{out}");
+        }
+        for entry in SCRIPT_API {
+            assert!(
+                out.contains(&format!("[`{}`](#{})", entry.signature, entry.anchor)),
+                "missing entry: {}",
+                entry.signature
+            );
+        }
+        // A feature-gated entry names its feature; an always-present one doesn't.
+        assert!(out.contains("needs `fs`"), "{out}");
+        assert!(out.contains("needs `rand`"), "{out}");
+    }
+
+    #[test]
+    fn update_script_api_block_splices_between_markers() {
+        let text = format!(
+            "# Extending\n\nprose\n\n{SCRIPT_API_BEGIN_MARKER}\nstale\n{SCRIPT_API_END_MARKER}\n\nmore prose\n"
+        );
+        let out = update_script_api_block(&text, "fresh content").unwrap();
+        assert!(out.contains("fresh content"));
+        assert!(!out.contains("stale"));
+        assert!(out.starts_with("# Extending\n\nprose\n\n"));
+        assert!(out.ends_with(&format!("{SCRIPT_API_END_MARKER}\n\nmore prose\n")));
+    }
+
+    #[test]
+    fn update_script_api_block_is_idempotent() {
+        let generated = render_script_api_toc();
+        let text = format!("{SCRIPT_API_BEGIN_MARKER}\n\n{generated}\n\n{SCRIPT_API_END_MARKER}\n");
+        let out = update_script_api_block(&text, &generated).unwrap();
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn update_script_api_block_errors_on_missing_markers() {
+        assert!(update_script_api_block("no markers here", "x").is_err());
+        assert!(update_script_api_block(SCRIPT_API_BEGIN_MARKER, "x").is_err());
+    }
 
     #[test]
     fn book_meta_reads_title_and_description() {

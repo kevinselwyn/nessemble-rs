@@ -1282,6 +1282,7 @@ version = "2.24.0"
 dependencies = [
  "changesets",
  "nessemble-core",
+ "nessemble-script-api",
 ]
 
 [[package]]
