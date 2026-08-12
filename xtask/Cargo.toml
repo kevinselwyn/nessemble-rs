@@ -13,6 +13,10 @@ publish = false
 # The shared lexer/classifier, so the docs' static code blocks highlight through
 # the exact same tokenizer as the editor and the LSP.
 nessemble-core.workspace = true
+# The host API catalog, rendered into the `script-api-toc` block of
+# docs/src/extending.md by the `script-api` command; see
+# plans/014-scripting-docs-and-tooling.md §4.
+nessemble-script-api.workspace = true
 # Parses/validates changeset files for the `changeset` command group (the
 # release-orchestration tooling); see plans/004-release-orchestration.md.
 changesets = "0.4"

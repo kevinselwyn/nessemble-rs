@@ -1,7 +1,7 @@
 # nessemble-rs: A Plan for Scripting Documentation and Tooling
 
-> Status: **Phase 0 shipped** ([§9](#9-phased-plan); as built,
-> [§12.1](#121-phase-0)). This document treats the host functions a pseudo-op
+> Status: **Phases 0–1 shipped** ([§9](#9-phased-plan); as built,
+> [§12.1](#121-phase-0), [§12.2](#122-phase-1)). This document treats the host functions a pseudo-op
 > script can call as what they actually are — **a public API** — and gives them
 > the three things every public API in this repo already has and this one does
 > not: a **reference table of contents**, grouped by domain, in the
@@ -542,7 +542,7 @@ Consumed by nothing yet. Ships with `nessemble reference script`
 ([§4.4](#44-a-third-reference-category)) as its first reader, because a table with
 no reader is a table nobody checks.
 
-### Phase 1 — the docs TOC
+### Phase 1 — the docs TOC. **Shipped ([§12.2](#122-phase-1)).**
 
 `xtask script-api` (`--write` / `--check`), the marked block in `extending.md`,
 the CI wiring, and the prose repairs of [§4.3](#43-what-else-the-page-gains).
@@ -684,3 +684,47 @@ worth it.
 --no-default-features` — no `scripting`, no `lsp` — builds, and
 `nessemble reference script nes_shade` answers from it. That is the property the
 whole crate exists for, and Phase 2 depends on it.
+
+### 12.2 Phase 1
+
+**`--write` doesn't exist; bare `script-api` is the write mode.** §5's own body
+already said this ("rendered by `cargo run -p xtask -- script-api`"), and the
+top-of-plan summary calling it `--write` / `--check` was the stray. `xtask`'s
+existing commands (`wasm`, `vsix`, `dist`) all default to *doing the thing*
+with no flag, and a `--write` nobody would type differently from no flag at
+all is a flag for its own sake. `script-api` takes zero or one argument:
+nothing writes, `--check` diffs without writing and exits non-zero on drift.
+
+**The TOC lives at the top of the page, not appended to it.** Placed as a new
+`## Host API reference` section right after the trust-warning intro and before
+`## Macros or scripts?` — the tutorial content §2.1 describes as reading top to
+bottom starts exactly where it always did, just after a reference table a
+returning author can stop at instead of scrolling past. The section heading and
+its one-sentence lead are hand-written; the marked block holds only the
+per-domain headings and tables the catalog renders.
+
+**The splice is marker-relative, not line-relative.** `update_script_api_block`
+finds the two marker strings and rewrites only the text between them,
+preserving everything before and after byte-for-byte. That makes `--check`
+trivially precise (an exact string comparison after re-rendering) and the
+regeneration idempotent by construction — a property a dedicated test checks
+directly, alongside one that fails a missing marker rather than silently
+no-op-ing.
+
+**Two of §4.3's three doc gaps were already closed.** Re-reading the shipped
+page before editing: `read_blob(path)` already had its own bullet in
+"Filesystem access", and `.attr`/`.find`/`.find_all`'s return conventions were
+already spelled out (both landed with plan 013, after §4.3 was written against
+an earlier draft of the page). `emit_source` having no listed signature is now
+moot — the generated table lists every entry's signature, including its, so no
+prose edit was needed there either. The one gap that was real: nothing said
+`custom` runs without the script's top-level statements ever executing. That
+became "Execution model", a short subsection under "Writing a script" with the
+plan's own `SCALE` example, landed verbatim as the reproduction case.
+
+**The `docs` CI job didn't exist yet.** §4.2 says the check "joins the `docs`
+job in CI" as though one were already there; `ci.yml` had no such job. Phase 1
+adds it — one step, `cargo run -p xtask -- script-api --check` — and extends
+the Claude Code stop hook and its README table the same way `changeset check`
+already was, so a local turn fails the same way CI would before either reaches
+GitHub.

@@ -5,6 +5,109 @@
 read and write files (see [Filesystem access](#filesystem-access)), so run only
 scripts you trust.
 
+## Host API reference
+
+Every function, method, property, and type a script can call, grouped by what
+it's for. Each signature links to the section below that explains it — this
+table is an index, not a replacement for reading that section the first time
+you use something.
+
+<!-- BEGIN generated: script-api-toc — edit crates/nessemble-script-api, not this block -->
+
+### Entry point and output
+
+What every script defines, and the three ways it can answer with output.
+
+| Signature | Summary | Availability |
+| --- | --- | --- |
+| [`fn custom(ints, texts)`](#writing-a-script) | the entry point every script defines: the directive's integer and string arguments, returning the bytes to emit | — |
+| [`emit_source(text)`](#emitting-assembly-source) | return `text` as assembly source for the assembler to expand at the call site, rather than as bytes | — |
+
+### Files and paths
+
+Reading assets from disk. Relative paths resolve against the source file's directory; `@/` resolves from the project root.
+
+| Signature | Summary | Availability |
+| --- | --- | --- |
+| [`open_file(path[, mode])`](#filesystem-access) | open a file — `"r"` to read, no mode to read and write, creating or truncating it | needs `fs` (absent in the WebAssembly build) |
+| [`file.read_blob([n])`](#filesystem-access) | read the whole file, or `n` bytes, as a blob | needs `fs` (absent in the WebAssembly build) |
+| [`file.read_string([n])`](#filesystem-access) | read the whole file, or `n` bytes, as a string | needs `fs` (absent in the WebAssembly build) |
+| [`file.write(data)`](#filesystem-access) | write a blob or string to the file, returning the byte count | needs `fs` (absent in the WebAssembly build) |
+| [`file.seek(pos)`](#filesystem-access) | move the file's read/write cursor | needs `fs` (absent in the WebAssembly build) |
+| [`read_blob(path)`](#filesystem-access) | read a whole file as a blob in one call | needs `fs` (absent in the WebAssembly build) |
+
+### Images (PNG)
+
+Decoding a PNG once, then reading it by pixel, by tile, or by matching whole cells against a bank.
+
+| Signature | Summary | Availability |
+| --- | --- | --- |
+| [`decode_png(blob)`](#decoding-pngs) | decode PNG bytes into an image handle | — |
+| [`decode_png_file(path)`](#decoding-pngs) | read and decode a PNG in one call | needs `fs` (absent in the WebAssembly build) |
+| [`image`](#decoding-pngs) | a decoded image; a shared handle, so passing it around copies nothing | — |
+| [`img.width`](#decoding-pngs) | the image width in pixels | — |
+| [`img.height`](#decoding-pngs) | the image height in pixels | — |
+| [`img.pixels`](#decoding-pngs) | every channel as a flat `R, G, B, A` array, row-major — built fresh on each read, so prefer the accessors | — |
+| [`img.r(x, y)`](#pixel-accessors) | the red channel of a pixel — its shade, for the grayscale images scripts use | — |
+| [`img.pixel(x, y)`](#pixel-accessors) | a whole pixel as `[r, g, b, a]` | — |
+| [`img.tile(col, row, w, h)`](#pixel-accessors) | a `w`×`h` block's red channels, row-major, at grid position `(col, row)` | — |
+| [`bank.find_cell(src, col, row, w, h)`](#cell-matching) | the index of the bank cell drawing the same thing as that cell of `src`, or `-1` | — |
+| [`bank.cell_equals(index, src, col, row, w, h)`](#cell-matching) | whether bank cell `index` draws that cell of `src` | — |
+| [`bank.nearest_cell(src, col, row, w, h)`](#cell-matching) | the closest bank cell by summed shade difference — never `-1` | — |
+
+### Palette
+
+Turning shade values into fixed-palette indices.
+
+| Signature | Summary | Availability |
+| --- | --- | --- |
+| [`quantize(value, thresholds)`](#palette-quantization) | snap a value — or a whole array of them — to a palette index by counting the ascending `thresholds` it reaches | — |
+| [`nes_shade(value)`](#palette-quantization) | the NES four-shade case of `quantize` (thresholds `[43, 128, 213]`), returning `0`–`3`; also takes an array | — |
+
+### Structured data
+
+The host parses the document; the script walks it. Rhai is fast enough to orchestrate a parse and far too slow to be one.
+
+| Signature | Summary | Availability |
+| --- | --- | --- |
+| [`parse_xml(source)`](#xml) | parse an XML document held in a string, returning its root element | — |
+| [`parse_xml_file(path)`](#xml) | read and parse an XML document in one call | needs `fs` (absent in the WebAssembly build) |
+| [`xml_node`](#xml) | a parsed XML element; a shared handle, like an image | — |
+| [`node.name`](#xml) | the element's name, verbatim | — |
+| [`node.attrs`](#xml) | every attribute as a name → value map, sorted by name rather than document order | — |
+| [`node.attr(name)`](#xml) | one attribute's value, or `()` when it is not set | — |
+| [`node.children`](#xml) | the child elements, as an array — text is not a child | — |
+| [`node.text`](#xml) | the element's own text with entities decoded, or `()` when it has none | — |
+| [`node.find(name)`](#xml) | the first child element with that name, or `()` | — |
+| [`node.find_all(name)`](#xml) | every child element with that name, as an array | — |
+| [`parse_json(source)`](#json) | parse a JSON document held in a string into native maps, arrays, and scalars | — |
+| [`parse_json_file(path)`](#json) | read and parse a JSON document in one call | needs `fs` (absent in the WebAssembly build) |
+
+### Numbers, strings, and blobs
+
+Decoding delimited numbers in one native call, and the small string and blob gaps Rhai's standard library leaves.
+
+| Signature | Summary | Availability |
+| --- | --- | --- |
+| [`parse_int_list(text, delim[, radix])`](#bulk-numeric-decoding) | decode a whole delimited column of integers in one native call, skipping empty fields | — |
+| [`to_char(value)`](#string-and-hex-helpers) | a one-character string for a Unicode scalar, for building strings out of bytes | — |
+| [`s.trimmed()`](#string-and-hex-helpers) | a trimmed copy of a string — the non-mutating form of `trim()`, which returns `()` | — |
+| [`format_hex(value, width)`](#string-and-hex-helpers) | assembly's own hex spelling: `$`-prefixed and zero-padded to `width` | — |
+
+### Randomness
+
+Procedural noise and randomized tables. A script that draws random values is never cached, and never reproducible.
+
+| Signature | Summary | Availability |
+| --- | --- | --- |
+| [`rand([min, max])`](#random-numbers) | a random integer, or one in the inclusive range `min..=max` | needs `rand` (absent in the WebAssembly build) |
+| [`rand_float()`](#random-numbers) | a random float in `0.0..1.0` | needs `rand` (absent in the WebAssembly build) |
+| [`rand_bool([p])`](#random-numbers) | a random `true`/`false`, or `true` with probability `p` | needs `rand` (absent in the WebAssembly build) |
+| [`array.shuffle()`](#random-numbers) | shuffle an array in place | needs `rand` (absent in the WebAssembly build) |
+| [`array.sample([n])`](#random-numbers) | one random element, or `n` of them | needs `rand` (absent in the WebAssembly build) |
+
+<!-- END generated: script-api-toc -->
+
 ## Macros or scripts?
 
 `nessemble` offers two ways to generate code and data from your own logic:
@@ -88,6 +191,26 @@ fn custom(ints, texts) {
   nothing. Wrap a string in [`emit_source(...)`](#emitting-assembly-source)
   instead to return assembly *source* for the assembler to expand, rather than
   bytes.
+
+### Execution model
+
+`custom` is called directly; the host never evaluates the rest of the script
+first. That means a statement sitting outside any `fn` never runs:
+
+```rust,ignore
+const SCALE = 3;
+
+fn custom(ints, texts) {
+    let out = [];
+    for i in ints { out.push(i * SCALE); }
+    out
+}
+```
+
+fails at build time with `Variable not found: SCALE` — on the line inside
+`custom` that reads it, not on the `const` line, because the `const` line
+never executes. Put anything a script needs at call time inside `custom`
+itself (or a `fn` it calls), not at the top level.
 
 ### Example
 
