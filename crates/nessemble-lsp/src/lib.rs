@@ -44,7 +44,7 @@ use lsp_types::notification::{
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
     Formatting, GotoDefinition, HoverRequest, InlayHintRequest, References, Rename, Request as _,
-    SemanticTokensFullRequest,
+    SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -59,8 +59,9 @@ use lsp_types::{
     Position, PublishDiagnosticsParams, Range, ReferenceParams, RenameParams, SemanticToken,
     SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureHelpParams, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 
 use nessemble_core::tooling::{self, LexKind, RuleSeverity};
@@ -70,6 +71,10 @@ use nessemble_core::{
     PROJECT_ROOT_PREFIX,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
+
+mod api;
+#[cfg(feature = "scripting")]
+mod scripting;
 
 /// Semantic-token type legend. Each emitted token's `token_type` is the shared
 /// `TokenClass::wire_id`, so this array is ordered by that id: index `i` is the
@@ -98,6 +103,31 @@ const MODIFIER_DOCUMENTATION: u32 = 1 << 0;
 type LspError = Box<dyn std::error::Error + Sync + Send>;
 type LspResult<T> = Result<T, LspError>;
 
+/// What kind of document a buffer is — decides which whole family of request
+/// handlers applies. Assembly features must never run over a `.rhai` buffer
+/// (confident nonsense in the editor is worse than a missing feature — see
+/// `plans/014-scripting-docs-and-tooling.md` §5.1), so every handler branches
+/// on this first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DocKind {
+    #[default]
+    Asm,
+    Rhai,
+}
+
+/// The kind of a document opened at `uri`, from its extension — `.rhai` is
+/// [`DocKind::Rhai`], everything else [`DocKind::Asm`] — cross-checked against
+/// the `didOpen` notification's `languageId` only for an extensionless
+/// buffer. `didChange` carries no `languageId`, so the extension is the
+/// authority and the id is a tiebreak used at open time only.
+fn doc_kind(uri: &Url, language_id: &str) -> DocKind {
+    match uri_to_path(uri).extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("rhai") => DocKind::Rhai,
+        None if language_id == "rhai" => DocKind::Rhai,
+        Some(_) | None => DocKind::Asm,
+    }
+}
+
 /// Per-document state: the current buffer text plus the user-defined symbols
 /// (labels/constants, with their resolved values) from the last successful
 /// assembly, used for completion and hover.
@@ -105,6 +135,7 @@ type LspResult<T> = Result<T, LspError>;
 struct Document {
     text: String,
     symbols: Vec<ListSymbol>,
+    kind: DocKind,
 }
 
 /// In-memory server state: every open document, keyed by URI, kept in sync with
@@ -149,11 +180,13 @@ impl Server {
                     return Vec::new();
                 };
                 let uri = p.text_document.uri;
+                let kind = doc_kind(&uri, &p.text_document.language_id);
                 self.documents.insert(
                     uri.clone(),
                     Document {
                         text: p.text_document.text,
                         symbols: Vec::new(),
+                        kind,
                     },
                 );
                 self.analyze_and_publish(&uri)
@@ -224,7 +257,12 @@ impl Server {
     fn with_lint(&self, mut results: DiagResults) -> DiagResults {
         for (uri, diags) in &mut results.per_file {
             if let Some(doc) = self.documents.get(uri) {
-                diags.extend(lint_diagnostics(uri, &doc.text));
+                // The assembly lint rules (register discipline, comment
+                // directives, …) have no meaning against Rhai source; a
+                // `.rhai` buffer's own findings come from `compute_diagnostics`.
+                if doc.kind == DocKind::Asm {
+                    diags.extend(lint_diagnostics(uri, &doc.text));
+                }
             }
         }
         results
@@ -271,9 +309,13 @@ impl Server {
     /// any root is never flagged. Otherwise it falls back to single-file
     /// analysis of the changed buffer.
     fn compute_diagnostics(&self, changed: &Url) -> DiagResults {
-        let Some(text) = self.documents.get(changed).map(|d| d.text.as_str()) else {
+        let Some(doc) = self.documents.get(changed) else {
             return DiagResults::default();
         };
+        if doc.kind == DocKind::Rhai {
+            return self.compute_diagnostics_rhai(changed, &doc.text);
+        }
+        let text = doc.text.as_str();
         let changed_path = normalize(&uri_to_path(changed));
 
         // Custom pseudo-ops declared in the workspace's `--pseudo` mapping files,
@@ -300,7 +342,7 @@ impl Server {
         // extractor, so an unchanged disk file is stat'd, not re-read.
         let candidates = scan_source_files(&self.workspace_roots)
             .into_iter()
-            .chain(self.documents.keys().map(uri_to_path));
+            .chain(self.asm_document_paths());
         let graph = build_include_graph(candidates, &|file| {
             self.raw_include_targets(&overlay_map, file)
         });
@@ -358,6 +400,45 @@ impl Server {
         }
     }
 
+    /// The paths of every open [`DocKind::Asm`] document — the assembly-only
+    /// counterpart of `self.documents.keys().map(uri_to_path)`, used to seed
+    /// the `.include` graph so an open `.rhai` buffer never becomes a
+    /// candidate node in it (`plans/014-scripting-docs-and-tooling.md` §5.1).
+    fn asm_document_paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.documents
+            .iter()
+            .filter(|(_, d)| d.kind == DocKind::Asm)
+            .map(|(u, _)| uri_to_path(u))
+    }
+
+    /// Diagnostics for a `.rhai` buffer: single-document, never project-wide
+    /// (a script has no `.include` graph of its own). `is_mapped` — whether
+    /// some workspace `pseudo.txt` maps a directive at this exact script path
+    /// — feeds the `missing-custom` lint. Without the `scripting` feature
+    /// this compiles nothing and reports nothing, matching §5.8.
+    #[cfg_attr(not(feature = "scripting"), allow(clippy::unused_self))]
+    fn compute_diagnostics_rhai(&self, changed: &Url, text: &str) -> DiagResults {
+        let mut per_file = HashMap::new();
+        #[cfg(feature = "scripting")]
+        {
+            let changed_path = normalize(&uri_to_path(changed));
+            let is_mapped = self
+                .custom_scripts()
+                .values()
+                .any(|script| normalize(script) == changed_path);
+            per_file.insert(changed.clone(), scripting::diagnostics(text, is_mapped));
+        }
+        #[cfg(not(feature = "scripting"))]
+        {
+            let _ = text;
+            per_file.insert(changed.clone(), Vec::new());
+        }
+        DiagResults {
+            per_file,
+            changed_symbols: Vec::new(),
+        }
+    }
+
     /// Custom pseudo-op scripts declared in the workspace's `--pseudo`-style
     /// mapping files: directive name (without the dot) → resolved script path.
     ///
@@ -399,6 +480,9 @@ impl Server {
             items.extend(directive_items());
             return items;
         };
+        if doc.kind == DocKind::Rhai {
+            return api::completions(&doc.text);
+        }
         // Inside a comment, code completions are noise — offer the comment
         // directives instead, which are otherwise undiscoverable.
         if in_comment(&doc.text, pos) {
@@ -421,10 +505,27 @@ impl Server {
         items
     }
 
+    /// Signature help for the call enclosing `pos` in the `.rhai` document at
+    /// `uri`: parameters parsed from the catalog entry's signature, with the
+    /// active parameter tracked across commas (§5.4). `None` for anything
+    /// else — assembly has no call-with-arguments syntax to offer this for.
+    fn signature_help(&self, uri: &Url, pos: Position) -> Option<SignatureHelp> {
+        let doc = self.documents.get(uri)?;
+        if doc.kind != DocKind::Rhai {
+            return None;
+        }
+        api::signature_help(&doc.text, pos)
+    }
+
     /// Produce a whole-document formatting edit for `uri`, or `None` if the
     /// document is unknown. An already-formatted document yields no edits.
     fn format_document(&self, uri: &Url) -> Option<Vec<TextEdit>> {
-        let text = &self.documents.get(uri)?.text;
+        let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            // Out of scope (§7): nessemble has no opinion about Rhai layout.
+            return None;
+        }
+        let text = &doc.text;
         let formatted = tooling::format(text);
         if formatted == *text {
             return Some(Vec::new());
@@ -435,19 +536,30 @@ impl Server {
         }])
     }
 
-    /// Full-document semantic tokens for `uri`, or `None` if it is unknown.
+    /// Full-document semantic tokens for `uri`, or `None` if it is unknown —
+    /// or if it is a `.rhai` document, out of scope like formatting (§7): the
+    /// Rhai community extension already highlights it.
     fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokensResult> {
-        let text = &self.documents.get(uri)?.text;
+        let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            return None;
+        }
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
-            data: semantic_tokens(text),
+            data: semantic_tokens(&doc.text),
         }))
     }
 
     /// An outline of the document at `uri`: every label, constant, and macro
-    /// defined in the buffer, with its name range. `None` if `uri` is unknown.
+    /// defined in the buffer, with its name range — or, for a `.rhai`
+    /// document, every script-local `fn`, `custom` first (§5.5). `None` if
+    /// `uri` is unknown.
     fn document_symbols(&self, uri: &Url) -> Option<Vec<DocumentSymbol>> {
-        let text = &self.documents.get(uri)?.text;
+        let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            return Some(rhai_document_symbols(&doc.text));
+        }
+        let text = &doc.text;
         let signatures = tooling::resolve_signatures(text);
         Some(
             definitions(text)
@@ -464,9 +576,17 @@ impl Server {
     /// `uri`. A custom pseudo-op (`.foo`) jumps to its script file; a symbol
     /// jumps to its defining label/constant/macro — found in the current buffer
     /// first, then (with a workspace open) across the `.include` project, so
-    /// cmd/ctrl-click reaches a definition in a sibling or parent file.
+    /// cmd/ctrl-click reaches a definition in a sibling or parent file. In a
+    /// `.rhai` document, jumps to the script-local `fn` under the cursor
+    /// (§5.5; needs the `scripting` feature).
     fn goto_definition(&self, uri: &Url, pos: Position) -> Option<Location> {
-        let token = token_at(&self.documents.get(uri)?.text, pos)?;
+        let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            let (name, _) = api::identifier_at(&doc.text, pos)?;
+            let range = rhai_local_definition(&doc.text, &name)?;
+            return Some(Location::new(uri.clone(), range));
+        }
+        let token = token_at(&doc.text, pos)?;
         let name = token.text.to_string();
         match token.kind {
             LexKind::Directive => {
@@ -481,6 +601,24 @@ impl Server {
             LexKind::Ident => self.definition_location(uri, &name),
             _ => None,
         }
+    }
+
+    /// Hover markdown for a custom pseudo-op directive (`.foo`): the script it
+    /// resolves to, plus the doc comment (a run of `//` lines) immediately
+    /// above its `custom` function, the same "comment run above the
+    /// definition" convention [`preceding_doc`] uses for assembly symbols
+    /// (`plans/014-scripting-docs-and-tooling.md` §5.6). `None` when `name`
+    /// isn't a directive any workspace `pseudo.txt` maps.
+    fn custom_directive_hover(&self, name: &str) -> Option<String> {
+        let script = self.custom_scripts().remove(name.trim_start_matches('.'))?;
+        let mut md = format!("**{name}** (custom pseudo-op) → `{}`", script.display());
+        if let Ok(text) = std::fs::read_to_string(&script) {
+            if let Some(doc) = rhai_doc_comment_above_custom(&text) {
+                md.push_str("\n\n");
+                md.push_str(&doc);
+            }
+        }
+        Some(md)
     }
 
     /// The definition of `name` for the document at `uri`: the local definition
@@ -509,7 +647,7 @@ impl Server {
         };
         let candidates = scan_source_files(&self.workspace_roots)
             .into_iter()
-            .chain(self.documents.keys().map(uri_to_path));
+            .chain(self.asm_document_paths());
         let graph = build_include_graph(candidates, &|file| {
             self.raw_include_targets(&overlay_map, file)
         });
@@ -542,7 +680,18 @@ impl Server {
         pos: Position,
         include_declaration: bool,
     ) -> Option<Vec<Location>> {
-        let text = &self.documents.get(uri)?.text;
+        let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            let (name, _) = api::identifier_at(&doc.text, pos)?;
+            let def_range = rhai_local_definition(&doc.text, &name);
+            let locations = rhai_local_references(&doc.text, &name)
+                .into_iter()
+                .filter(|r| include_declaration || Some(*r) != def_range)
+                .map(|r| Location::new(uri.clone(), r))
+                .collect();
+            return Some(locations);
+        }
+        let text = &doc.text;
         let name = word_at(text, pos)?;
         let defs = definitions(text);
         let locations = located_lexemes(text)
@@ -561,6 +710,17 @@ impl Server {
     /// or the resolved value for a defined symbol.
     fn hover(&self, uri: &Url, pos: Position) -> Option<Hover> {
         let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            let (name, range) = api::identifier_at(&doc.text, pos)?;
+            let markdown = api::hover(&name).or_else(|| rhai_local_fn_hover(&doc.text, &name))?;
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                }),
+                range: Some(range),
+            });
+        }
         // `.color` previews the palette it maps to, on the directive and on each
         // of its arguments, ahead of the generic directive/symbol hovers.
         if let Some(hover) = color_hover(&doc.text, pos, &doc.symbols) {
@@ -568,7 +728,12 @@ impl Server {
         }
         let token = token_at(&doc.text, pos)?;
         let markdown = match token.kind {
-            LexKind::Directive => directive_hover(token.text)?,
+            // A custom pseudo-op directive shows the script it maps to (and
+            // its `custom` function's doc comment, if any); a built-in
+            // directive shows its own description.
+            LexKind::Directive => {
+                directive_hover(token.text).or_else(|| self.custom_directive_hover(token.text))?
+            }
             // A filename argument reports where it resolved to and what is there.
             LexKind::String => {
                 let base = Self::base_dir(uri)?;
@@ -635,6 +800,9 @@ impl Server {
     /// nothing is worse than no link.
     fn document_links(&self, uri: &Url) -> Option<Vec<DocumentLink>> {
         let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            return Some(Vec::new());
+        }
         let base = Self::base_dir(uri)?;
         let root = self.root_dir(uri);
         let links = path_args(&doc.text)
@@ -748,6 +916,9 @@ impl Server {
         let Some(doc) = self.documents.get(uri) else {
             return Vec::new();
         };
+        if doc.kind == DocKind::Rhai {
+            return Vec::new();
+        }
         let mut hints = Vec::new();
         for (idx, line) in doc.text.lines().enumerate() {
             let line_no = idx as u32;
@@ -801,22 +972,36 @@ impl Server {
 
     /// Foldable regions in the document at `uri`: macro and conditional blocks,
     /// subroutine bodies (a label down to the first blank line), and runs of
-    /// consecutive line comments. `None` if `uri` is unknown.
+    /// consecutive line comments — or, for a `.rhai` document, each `fn`'s body
+    /// and its own comment runs (§5.5). `None` if `uri` is unknown.
     fn folding_ranges(&self, uri: &Url) -> Option<Vec<FoldingRange>> {
-        Some(folding_ranges(&self.documents.get(uri)?.text))
+        let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            return Some(rhai_folding_ranges(&doc.text));
+        }
+        Some(folding_ranges(&doc.text))
     }
 
     /// Rename the symbol under `pos` in the document at `uri` to `new_name`,
-    /// across every open document (nessemble symbols share one global scope).
-    /// `None` if the cursor isn't on an identifier or `new_name` is not a legal
-    /// identifier.
+    /// across every open **assembly** document (nessemble symbols share one
+    /// global scope; renaming inside `.rhai` scripts is out of scope, like
+    /// formatting — §7). `None` if the cursor isn't on an identifier or
+    /// `new_name` is not a legal identifier.
     fn rename(&self, uri: &Url, pos: Position, new_name: &str) -> Option<WorkspaceEdit> {
-        let name = word_at(&self.documents.get(uri)?.text, pos)?;
+        let doc = self.documents.get(uri)?;
+        if doc.kind == DocKind::Rhai {
+            return None;
+        }
+        let name = word_at(&doc.text, pos)?;
         if !is_identifier(new_name) {
             return None;
         }
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        for (doc_uri, doc) in &self.documents {
+        for (doc_uri, doc) in self
+            .documents
+            .iter()
+            .filter(|(_, d)| d.kind == DocKind::Asm)
+        {
             let edits: Vec<TextEdit> = located_lexemes(&doc.text)
                 .into_iter()
                 .filter(|t| t.kind == LexKind::Ident && t.text == name)
@@ -842,6 +1027,9 @@ impl Server {
         let Some(doc) = self.documents.get(uri) else {
             return Vec::new();
         };
+        if doc.kind == DocKind::Rhai {
+            return Vec::new();
+        }
         // A deprecated directive on the requested line gets a rename fix; it is
         // what makes the deprecation actionable rather than nagging.
         let fixes = deprecated_directive_fixes(uri, &doc.text, range);
@@ -879,6 +1067,64 @@ impl Server {
     pub fn document_text(&self, uri: &Url) -> Option<&str> {
         self.documents.get(uri).map(|d| d.text.as_str())
     }
+}
+
+/// The compiled-AST half of `.rhai` editor support ([`scripting`]) reduced to
+/// six free functions with an empty fallback when the `scripting` feature is
+/// off — kept as plain functions, not `Server` methods, since none of them
+/// touch server state.
+#[cfg(feature = "scripting")]
+fn rhai_document_symbols(text: &str) -> Vec<DocumentSymbol> {
+    scripting::document_symbols(text)
+}
+#[cfg(not(feature = "scripting"))]
+fn rhai_document_symbols(_text: &str) -> Vec<DocumentSymbol> {
+    Vec::new()
+}
+
+#[cfg(feature = "scripting")]
+fn rhai_local_definition(text: &str, name: &str) -> Option<Range> {
+    scripting::local_definition(text, name)
+}
+#[cfg(not(feature = "scripting"))]
+fn rhai_local_definition(_text: &str, _name: &str) -> Option<Range> {
+    None
+}
+
+#[cfg(feature = "scripting")]
+fn rhai_local_references(text: &str, name: &str) -> Vec<Range> {
+    scripting::local_references(text, name)
+}
+#[cfg(not(feature = "scripting"))]
+fn rhai_local_references(_text: &str, _name: &str) -> Vec<Range> {
+    Vec::new()
+}
+
+#[cfg(feature = "scripting")]
+fn rhai_local_fn_hover(text: &str, name: &str) -> Option<String> {
+    scripting::local_fn_hover(text, name)
+}
+#[cfg(not(feature = "scripting"))]
+fn rhai_local_fn_hover(_text: &str, _name: &str) -> Option<String> {
+    None
+}
+
+#[cfg(feature = "scripting")]
+fn rhai_doc_comment_above_custom(text: &str) -> Option<String> {
+    scripting::doc_comment_above_custom(text)
+}
+#[cfg(not(feature = "scripting"))]
+fn rhai_doc_comment_above_custom(_text: &str) -> Option<String> {
+    None
+}
+
+#[cfg(feature = "scripting")]
+fn rhai_folding_ranges(text: &str) -> Vec<FoldingRange> {
+    scripting::folding_ranges(text)
+}
+#[cfg(not(feature = "scripting"))]
+fn rhai_folding_ranges(_text: &str) -> Vec<FoldingRange> {
+    Vec::new()
 }
 
 /// The outcome of a diagnostic scan of a buffer for the language server.
@@ -3048,6 +3294,13 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
+        // `.rhai` call signature help (§5.4): re-triggers on `,` as the author
+        // moves between arguments.
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: None,
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
@@ -3197,6 +3450,15 @@ fn main_loop(connection: &Connection, workspace_roots: Vec<PathBuf>) -> LspResul
                             .and_then(|p| {
                                 let tdp = p.text_document_position_params;
                                 server.hover(&tdp.text_document.uri, tdp.position)
+                            });
+                        Response::new_ok(req.id, result)
+                    }
+                    SignatureHelpRequest::METHOD => {
+                        let result = serde_json::from_value::<SignatureHelpParams>(req.params)
+                            .ok()
+                            .and_then(|p| {
+                                let tdp = p.text_document_position_params;
+                                server.signature_help(&tdp.text_document.uri, tdp.position)
                             });
                         Response::new_ok(req.id, result)
                     }
@@ -3905,7 +4167,14 @@ mod tests {
         path: &Path,
     ) -> Option<&'a Vec<Diagnostic>> {
         let uri = Url::from_file_path(path).unwrap();
-        pubs.iter().find(|p| p.uri == uri).map(|p| &p.diagnostics)
+        diags_for_uri(pubs, &uri)
+    }
+
+    fn diags_for_uri<'a>(
+        pubs: &'a [PublishDiagnosticsParams],
+        uri: &Url,
+    ) -> Option<&'a Vec<Diagnostic>> {
+        pubs.iter().find(|p| &p.uri == uri).map(|p| &p.diagnostics)
     }
 
     #[test]
@@ -4261,6 +4530,177 @@ mod tests {
         assert!(!d.is_empty(), "unknown custom pseudo-op should be flagged");
 
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    // ─── `.rhai` documents (plan 014, Phases 2–3) ──────────────────────────────
+
+    /// A `.rhai` buffer is never analyzed as assembly: opening one whose text
+    /// would be a pile of assembler errors (and is also invalid Rhai) must not
+    /// yield `source: "nessemble"` diagnostics, and every assembly-only
+    /// surface must answer with nothing rather than confident nonsense
+    /// (`plans/014-scripting-docs-and-tooling.md` §5.1, Risks table).
+    #[test]
+    fn rhai_document_is_never_analyzed_as_assembly() {
+        let mut server = Server::default();
+        let uri = Url::parse("file:///script.rhai").unwrap();
+        let text = "!!! not valid rhai or asm {{{ .foo bar";
+        let pubs =
+            server.apply_notification(DidOpenTextDocument::METHOD, open_params(uri.as_str(), text));
+        let diags = diags_for_uri(&pubs, &uri).expect("published");
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.source.as_deref() != Some("nessemble")),
+            "an assembly diagnostic leaked into a `.rhai` buffer: {diags:?}"
+        );
+        assert!(diags
+            .iter()
+            .all(|d| d.source.as_deref() != Some("nessemble-lint")));
+
+        assert!(server.format_document(&uri).is_none_or(|e| e.is_empty()));
+        assert!(server.semantic_tokens(&uri).is_none());
+        assert!(server.code_actions(&uri, Range::default()).is_empty());
+        assert!(server
+            .inlay_hints(&uri, Range::new(Position::new(0, 0), Position::new(10, 0)))
+            .is_empty());
+        assert!(server
+            .rename(&uri, Position::new(0, 0), "renamed")
+            .is_none());
+        assert!(server.document_links(&uri).is_none_or(|l| l.is_empty()));
+    }
+
+    /// `.rhai` detection also works for an extensionless buffer, from the
+    /// `didOpen` notification's `languageId` (§5.1).
+    #[test]
+    fn rhai_kind_falls_back_to_the_language_id_for_an_extensionless_buffer() {
+        let uri = Url::parse("file:///untitled:Untitled-1").unwrap();
+        assert_eq!(doc_kind(&uri, "rhai"), DocKind::Rhai);
+        assert_eq!(doc_kind(&uri, "nessemble"), DocKind::Asm);
+    }
+
+    #[test]
+    fn rhai_completion_offers_the_host_api_catalog() {
+        let mut server = Server::default();
+        let uri = Url::parse("file:///c.rhai").unwrap();
+        server.apply_notification(
+            DidOpenTextDocument::METHOD,
+            open_params(uri.as_str(), "fn custom(ints, texts) { [] }\n"),
+        );
+        let items = server.complete(&uri, Position::new(0, 0));
+        assert!(items.iter().any(|i| i.label == "nes_shade"));
+        assert!(items.iter().any(|i| i.label == "custom"));
+    }
+
+    #[test]
+    fn rhai_hover_shows_the_catalog_entry() {
+        let mut server = Server::default();
+        let uri = Url::parse("file:///h.rhai").unwrap();
+        let text = "fn custom(ints, texts) { nes_shade(ints[0]) }\n";
+        server.apply_notification(DidOpenTextDocument::METHOD, open_params(uri.as_str(), text));
+        let hover = server
+            .hover(&uri, Position::new(0, 27))
+            .expect("hovering `nes_shade`");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markdown hover");
+        };
+        assert!(md.value.contains("nes_shade(value)"));
+    }
+
+    #[test]
+    fn rhai_signature_help_reaches_the_editor() {
+        let mut server = Server::default();
+        let uri = Url::parse("file:///s.rhai").unwrap();
+        let text = "fn custom(ints, texts) { format_hex(255,";
+        server.apply_notification(DidOpenTextDocument::METHOD, open_params(uri.as_str(), text));
+        let help = server
+            .signature_help(&uri, Position::new(0, text.chars().count() as u32))
+            .expect("inside a call");
+        assert_eq!(help.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn signature_help_is_none_for_an_assembly_document() {
+        let mut server = Server::default();
+        let uri = Url::parse("file:///s.asm").unwrap();
+        server.apply_notification(
+            DidOpenTextDocument::METHOD,
+            open_params(uri.as_str(), "  lda #$00\n"),
+        );
+        assert!(server.signature_help(&uri, Position::new(0, 5)).is_none());
+    }
+
+    #[test]
+    fn custom_directive_hover_shows_the_scripts_path_and_doc_comment() {
+        let w = workspace("hover-custom");
+        write(&w, "pseudo.txt", ".double = double.rhai\n");
+        write(
+            &w,
+            "double.rhai",
+            "// Doubles the first integer argument.\nfn custom(ints, texts) { [ints[0] * 2] }\n",
+        );
+        let main = w.join("main.asm");
+        let text = "  .double 5\n";
+        write(&w, "main.asm", text);
+
+        let mut server = server_for(&w);
+        did_open(&mut server, &main, text);
+        let main_uri = Url::from_file_path(&main).unwrap();
+        let hover = server
+            .hover(&main_uri, Position::new(0, 4))
+            .expect("hovering `.double`");
+        let HoverContents::Markup(md) = hover.contents else {
+            panic!("expected markdown hover");
+        };
+        assert!(md.value.contains("double.rhai"));
+        // The doc comment is part of the compiled-AST half (§5.8): gated
+        // behind `scripting` by design, even though reading it is a text
+        // scan. The path half above holds either way.
+        #[cfg(feature = "scripting")]
+        assert!(md.value.contains("Doubles the first integer argument."));
+
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn rhai_lints_reach_the_editor() {
+        let mut server = Server::default();
+        let uri = Url::parse("file:///l.rhai").unwrap();
+        let text = "const SCALE = 3;\nfn custom(ints, texts) { [SCALE] }\n";
+        let pubs =
+            server.apply_notification(DidOpenTextDocument::METHOD, open_params(uri.as_str(), text));
+        let diags = diags_for_uri(&pubs, &uri).expect("published");
+        assert!(diags
+            .iter()
+            .any(|d| d.code == Some(NumberOrString::String("top-level-statement".to_string()))));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn rhai_document_symbols_and_folding_and_local_navigation() {
+        let mut server = Server::default();
+        let uri = Url::parse("file:///n.rhai").unwrap();
+        let text = "fn helper(x) { x }\nfn custom(ints, texts) { helper(ints[0]) }\n";
+        server.apply_notification(DidOpenTextDocument::METHOD, open_params(uri.as_str(), text));
+
+        let syms = server.document_symbols(&uri).expect("known document");
+        assert_eq!(syms.len(), 2);
+        assert_eq!(syms[0].name, "custom");
+
+        let folds = server.folding_ranges(&uri).expect("known document");
+        assert!(folds.is_empty(), "no fn body spans more than one line here");
+
+        // `helper` on the `custom` call site (line 1, inside `helper(...)`).
+        let call_pos = Position::new(1, 27);
+        let def = server
+            .goto_definition(&uri, call_pos)
+            .expect("jumps to the script-local fn");
+        assert_eq!(def.range.start.line, 0);
+
+        let refs = server
+            .references(&uri, call_pos, true)
+            .expect("known document");
+        assert_eq!(refs.len(), 2);
     }
 
     // ─── Lint diagnostics ─────────────────────────────────────────────────────

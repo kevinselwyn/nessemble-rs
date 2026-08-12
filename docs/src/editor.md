@@ -127,8 +127,47 @@ Once connected, the server provides:
   call is visible without hovering. Editors toggle inlay hints on and off with
   their own setting.
 - **Custom pseudo-instructions** — directives declared in a `--pseudo`-style
-  mapping file in the workspace are recognized, so they aren't flagged as unknown,
-  and cmd/ctrl-click on one opens the script that implements it.
+  mapping file in the workspace are recognized, so they aren't flagged as unknown;
+  cmd/ctrl-click on one opens the script that implements it, and hovering it shows
+  the script's path and the doc comment above its `custom` function, if any.
+
+## Pseudo-op scripts (`.rhai`)
+
+The server also understands the [Rhai](https://rhai.rs) scripts a `--pseudo`
+mapping's directives run — the host API those scripts call is documented once,
+in the [Extending](extending.md#host-api-reference) page's reference table, and
+served here as completion and hover so a script author doesn't have to keep
+that page open in another tab. Opening a `.rhai` file gets:
+
+- **Completion, hover, and signature help** for every function, method, and
+  property a script can call — signature, one-line summary, an availability
+  note when a build doesn't have it (a script running in the browser assembler
+  has no filesystem or random-number functions), and a link to the docs
+  section that explains it. This half needs no scripting host at all, so it
+  works even in a build made with `--no-default-features --features lsp`.
+- **Syntax diagnostics** from the same compiler the assembler runs the script
+  through, plus four lints that catch mistakes Rhai's own dynamic dispatch
+  would otherwise defer to a build that reaches the directive: a script a
+  `pseudo.txt` maps that defines no `custom(ints, texts)` function; `custom`
+  declared with other than two parameters; a statement written outside every
+  `fn` (it never runs — `custom` is called without evaluating the script body
+  first, so a top-level `const` is `Variable not found` the moment a `.if`
+  branch that used to skip the call stops skipping it); and a call that
+  resolves to no script-local function and no host function, when it is a
+  near-miss of one that is (`decode_png_fil` is flagged; an unrelated Rhai
+  built-in this catalog doesn't list is not).
+- **An outline** of the script's functions (`custom` first), and **folding**
+  of each function's body and of comment runs.
+- **Go-to-definition and find-all-references** for a script-local function.
+
+Diagnostics, the lints, the outline, folding, and script-local navigation need
+the `scripting` feature (on by default; see [Notes](#notes)).
+
+Editors other than VS Code need `.rhai` routed to the server the same way
+`.asm`/`.s` is — add the `rhai` language id alongside `nessemble` in the
+client's document selector. A Rhai syntax-highlighting extension, if you have
+one, keeps working: coloring and this server's diagnostics/completion are
+independent providers for the same language id.
 
 ## Editor setup
 
@@ -171,10 +210,11 @@ extension. `nessemble` ships one, built and attached to every release as
 model, so the same `.vsix` installs there.)
 
 The extension is a thin client: it registers a `nessemble` language for `.asm`
-and `.s` files and runs `nessemble lsp`. Every feature listed above comes from
-the server, so the editor can't drift from the assembler or the CLI. It carries
-no copy of `nessemble` — one universal `.vsix` serves every platform, and the
-executable it drives is the one you installed.
+and `.s` files, a `rhai` language for `.rhai` files, and runs `nessemble lsp`.
+Every feature listed above comes from the server, so the editor can't drift
+from the assembler or the CLI. It carries no copy of `nessemble` — one
+universal `.vsix` serves every platform, and the executable it drives is the
+one you installed.
 
 1. Make sure `nessemble` is on your `PATH` (`nessemble --version` should print
    `2.5.0` or newer). If it lives somewhere off `PATH`, point the
@@ -195,6 +235,8 @@ executable it drives is the one you installed.
 4. Open a `.asm` file. Diagnostics, lint hints, completion, hover, formatting,
    semantic highlighting, outline, go-to-definition, and rename all work
    immediately; the server starts on the first `nessemble` file you open.
+   Opening a `.rhai` script a `--pseudo` mapping refers to gets the
+   [pseudo-op script features](#pseudo-op-scripts-rhai) the same way.
 
 If the executable can't be found, the extension says so and offers to open the
 installation docs or the setting — it does not fail silently.
@@ -284,5 +326,11 @@ works the same way.
   existing scripts — the same mapping you pass to the CLI's `--pseudo`. Their
   scripts are **not** executed during analysis, so the bytes they emit aren't
   modeled; addresses after a custom pseudo-op may be approximate.
+- A `.rhai` script's completion, hover, and signature help are compiled in
+  unconditionally — even a build with no scripting host at all serves them.
+  Its diagnostics, lints, outline, folding, and script-local
+  definition/references need the `scripting` feature, which is also on by
+  default; `--no-default-features --features lsp` drops them the same way it
+  drops `lsp`'s own features from a build with no `scripting`.
 
 [lsp]: https://microsoft.github.io/language-server-protocol/

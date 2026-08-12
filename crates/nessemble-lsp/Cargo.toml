@@ -8,13 +8,34 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# `.rhai` script support: completing, hovering, and giving signature help for
+# the host API from `nessemble-script-api` works with no Rhai dependency at
+# all (see `nessemble-script-api`'s own doc comment) — that half is always on.
+# This feature adds the half that needs a compiled script: syntax diagnostics,
+# the script-specific lints, document symbols, folding, and script-local
+# definition/references (`plans/014-scripting-docs-and-tooling.md` §5.8).
+# `nessemble-cli` wires its own `scripting` feature to this one, so a default
+# build gets everything and `--features lsp` alone still builds.
+scripting = ["dep:rhai"]
+
 [dependencies]
 nessemble-core.workspace = true
 nessemble-isa.workspace = true
 nessemble-rc.workspace = true
+# The host API catalog for completion/hover/signature help. Data only, no
+# Rhai — so, like `nessemble-cli`'s dependency on it, this is unconditional.
+nessemble-script-api.workspace = true
 lsp-server = "0.7"
 lsp-types = "0.95"
 serde_json = "1"
+# Compiling a script and walking its AST for diagnostics/lints/symbols
+# (feature `scripting`). This server never *runs* a script — it only compiles
+# and inspects one — so unlike `nessemble-script` it pulls in neither the
+# `rhai-fs` nor `rhai-rand` package; `internals` alone exposes the AST types
+# the walk needs, the same route `nessemble-script`'s own `purity` module
+# uses (`crates/nessemble-script/src/purity.rs`).
+rhai = { version = "1", default-features = false, features = ["std", "internals"], optional = true }
 
 [lints]
 workspace = true

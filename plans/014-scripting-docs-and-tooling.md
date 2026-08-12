@@ -1,7 +1,8 @@
 # nessemble-rs: A Plan for Scripting Documentation and Tooling
 
-> Status: **Phases 0–1 shipped** ([§9](#9-phased-plan); as built,
-> [§12.1](#121-phase-0), [§12.2](#122-phase-1)). This document treats the host functions a pseudo-op
+> Status: **Phases 0–3 shipped** ([§9](#9-phased-plan); as built,
+> [§12.1](#121-phase-0), [§12.2](#122-phase-1), [§12.3](#123-phase-2),
+> [§12.4](#124-phase-3)). This document treats the host functions a pseudo-op
 > script can call as what they actually are — **a public API** — and gives them
 > the three things every public API in this repo already has and this one does
 > not: a **reference table of contents**, grouped by domain, in the
@@ -548,14 +549,14 @@ no reader is a table nobody checks.
 the CI wiring, and the prose repairs of [§4.3](#43-what-else-the-page-gains).
 **Delivers goal 1 on its own.**
 
-### Phase 2 — LSP, catalog half
+### Phase 2 — LSP, catalog half. **Shipped ([§12.3](#123-phase-2)).**
 
 Document kinds ([§5.1](#51-document-kinds-come-first)) — including the
 must-not-analyze-Rhai-as-assembly guards and their regression tests — then
 completion, hover, and signature help from the catalog, plus `.foo` → script
 navigation ([§5.6](#56-the-link-back-to-assembly)). No Rhai dependency yet.
 
-### Phase 3 — LSP, compiled half
+### Phase 3 — LSP, compiled half. **Shipped ([§12.4](#124-phase-3)).**
 
 `nessemble-lsp/scripting`: syntax diagnostics, the four lints, document symbols,
 folding, script-local definition and references. VS Code manifest and
@@ -728,3 +729,151 @@ adds it — one step, `cargo run -p xtask -- script-api --check` — and extends
 the Claude Code stop hook and its README table the same way `changeset check`
 already was, so a local turn fails the same way CI would before either reaches
 GitHub.
+
+### 12.3 Phase 2
+
+**§5.6's first bullet was already shipped, and not by this plan.** `goto_definition`
+resolving a `.foo` directive to its mapped script (`custom_scripts()`, keyed off
+the same `--pseudo` mapping the diagnostics path already reads) has been in
+`nessemble-lsp` since 2.13.1 — long before plan 014 existed. §5.6 describes it as
+new work ("this is a second reader"); it is really a *third* one, the other two
+being the diagnostics pass and this. Phase 2's actual work on that bullet was
+adding the other half: hovering a `.foo` now shows the script's path and the doc
+comment above its `custom` function (`custom_directive_hover`), the one piece
+that was genuinely missing.
+
+**The catalog-driven half is two new files, not new branches sprinkled through
+`lib.rs`.** `nessemble-lsp/src/api.rs` (completion, hover, signature help — no
+`scripting` gate, per §5.8) and `nessemble-lsp/src/scripting.rs` (Phase 3's
+compiled half) hold every Rhai-specific behavior; `lib.rs` gained a `DocKind`
+enum, a `doc_kind()` classifier, and one `if doc.kind == DocKind::Rhai { … }`
+branch at the top of each handler — `complete`, `hover`, `goto_definition`,
+`references`, `document_symbols`, `folding_ranges`, `signature_help` (new) — plus
+a bare "return nothing" guard in `format_document`, `semantic_tokens`,
+`inlay_hints`, `rename`, `code_actions`, and `document_links`. The include-graph
+candidate lists (`compute_diagnostics`, `definition_location`) were switched from
+`self.documents.keys()` to a new `asm_document_paths()` filter, so an open
+`.rhai` buffer can never become a node in the `.include` graph even though
+nothing in its own scan would have matched it anyway (§5.1's guard is about the
+*document store*, not just the file-extension filters that happened to already
+exclude it).
+
+**Signature help is a capability this server never advertised before.** Nothing
+in the assembly side calls anything with an argument list, so `signatureHelp`
+starts at zero here. It parses the catalog's `signature` field text — no AST,
+matching the "no Rhai dependency" constraint — splitting on top-level commas
+and widening a `[, name]`-bracketed optional tail into a second arity. That
+turned out to be exactly what makes `parse_int_list(text, delim[, radix])` offer
+two signatures (with and without `radix`) without any special-casing: the
+bracket notation §3.1 already used for optional arguments *is* the arity split.
+`quantize`'s two engine-level registrations (scalar and array) don't produce two
+signatures this way — both have the same two-parameter shape in text — which
+is a difference from §5.4's "`parse_int_list` and `quantize` have two registered
+arities each; both are offered" and is fine: the two `quantize` forms read
+identically at a call site, so there is nothing for a second signature to show.
+
+**A real bug, caught by the test written for it:** the first signature-help
+implementation counted top-level commas by depth alone, so
+`parse_int_list(texts[0], ",", )` — the delimiter argument is itself a
+comma — miscounted the active parameter by one. `string_literal_mask` marks
+every char inside a `"…"` literal (honoring `\"`) so the comma/paren scanners
+skip it; caught by `signature_help_offers_both_arities_of_an_optional_argument`
+failing on first run, not by inspection.
+
+**Member narrowing after `.` was simplified to the fallback the plan itself
+names.** §5.4 asks for completions narrowed by the receiver's inferred handle
+type "when the receiver is a local whose assignment is a `decode_png*` or
+`parse_xml*` call — and fall back to all members when it is not." Full
+assignment-tracking type inference was judged not worth its complexity for this
+pass; the implementation always takes the stated fallback (every catalog entry
+offered, unfiltered by kind or inferred type). That is a real instance of the
+rule the plan wrote, not a skipped feature — a wrong narrowing that hides the
+right completion is worse than a broad list, which is the reasoning §5.4 gives
+for the fallback existing at all. Kind-based narrowing (methods/properties only
+after a `.`) was considered and left out for the same reason: it is one more
+guess that can be wrong.
+
+### 12.4 Phase 3
+
+**`nessemble-lsp/scripting` depends on `rhai` directly, not on `nessemble-script`.**
+§5.8's own wording says the feature "depends on `nessemble-script`"; it doesn't,
+and can't usefully: `nessemble-script`'s `engine()` is private, and the crate
+does not re-export `rhai`'s types, so reaching `rhai::Engine`/`AST`/`ASTNode` at
+all requires a direct dependency on `rhai` regardless. Diagnosing a script is
+also a strictly smaller job than running one — `Engine::compile` never resolves
+a function call, so it needs no registered host functions and therefore no
+`rhai-fs`/`rhai-rand` packages either. The dependency line mirrors
+`nessemble-script`'s own (`rhai = { version = "1", default-features = false,
+features = ["std", "internals"] }`, the same `internals` gate `purity.rs` uses)
+so both stay pinned to one resolved version in the workspace's single
+`Cargo.lock`, which is the property §5.8 was actually protecting.
+
+**The default optimizer would have erased the plan's own reproduction case.**
+§2.2's motivating example — a top-level `const SCALE = 3;` used only inside
+`custom` — is exactly what Rhai's `OptimizationLevel::Simple` (the crate
+default) is designed to fold away: constant propagation inlines `SCALE` into
+`custom`'s body and can then treat the now-unreferenced top-level declaration as
+dead code, silently deleting the statement `top-level-statement` exists to find.
+The diagnostics engine sets `OptimizationLevel::None`, keeping the compiled
+`AST` a 1:1 parse tree. Found by writing the plan's own example as a test before
+anything else, not by reasoning about the optimizer in the abstract.
+
+**Positions come from a text scan almost everywhere, by necessity and then by
+choice.** `rhai::ScriptFnMetadata` (from `AST::iter_functions()`) carries no
+source position at all under `internals` — only under the `metadata` feature,
+which §3.3 already recorded as not compiling in this workspace. So a lint or
+hover that needs to point at `fn custom(` has no AST-native way to. A small
+`fn NAME(` line scanner (`fn_def_range`/`fn_name_column`, word-bounded so `fn
+customize(` doesn't match `custom`) fills the gap for `custom-arity`'s range,
+document symbols, folding's per-`fn` brace matching, and local
+definition/hover/references. Once that scanner existed, using it for symbols,
+folding, and local navigation *instead of* a second AST pass was a choice, not
+just an availability accident: a script with a syntax error elsewhere in the
+buffer still gets an accurate outline and still lets you jump to a helper
+function, because none of that machinery requires the file to compile. Only
+`diagnostics()` (parse errors, the four lints, `top-level-statement`, and
+`unknown-host-function`, which does need the compiled call graph) touches the
+AST at all. `unknown-host-function`'s own range recovery is symmetric: a call
+expression's `rhai::Position` is a point, not a span, so `call_name_range`
+widens it to the callee's own length by searching near the reported
+line/column — the same "narrow to the token" move `diagnostic_range` already
+makes for assembler diagnostics.
+
+**The near-miss threshold and edit distance are a plain Levenshtein, no
+dependency.** `EDIT_DISTANCE_THRESHOLD = 2` against every distinct catalog name
+(deduped, since `read_blob` appears twice) — `decode_png_fil` → `decode_png_file`
+is distance 1 and is flagged with a suggestion; a Rhai built-in the catalog
+never lists (`to_string`, `type_of`, …) is far enough from every catalog name
+that it isn't, matching §11.3's "false negatives, never false positives."
+
+**Six small dispatch functions live outside `impl Server`.** Each one
+(`rhai_document_symbols`, `rhai_local_definition`, `rhai_local_references`,
+`rhai_local_fn_hover`, `rhai_doc_comment_above_custom`, `rhai_folding_ranges`)
+either calls into `scripting::` (feature on) or returns the empty value (feature
+off) and touches no server state either way — `clippy::unused_self` said so
+under `--no-default-features`, and free functions were the honest fix rather
+than a blanket `#[allow]`.
+
+**The VS Code manifest gained a second `languages` contribution, not a second
+extension.** `package.json` adds `rhai` (`.rhai`, no grammar of its own —
+VS Code merges contributions for a shared language id, so an installed Rhai
+syntax-highlighting extension keeps its grammar and gains this server) alongside
+the existing `nessemble` entry, plus `onLanguage:rhai` in `activationEvents`.
+`extension.js`'s `documentSelector` gained the matching `{ scheme, language:
+"rhai" }` pair (`file` and `untitled`), and the file-watcher glob picked up
+`*.rhai`. `editor.md` gained a "Pseudo-op scripts (`.rhai`)" section, cross-linked
+from the Extending page's own generated table
+([§4](#4-the-docs-table-of-contents)) so the same host-API sentence is reachable
+from either page.
+
+**Regression coverage follows the Risks table's own prescription.** One test
+(`rhai_document_is_never_analyzed_as_assembly`) opens a `.rhai` buffer whose text
+is deliberately neither valid Rhai nor valid assembly and asserts every
+assembly-only handler — formatting, semantic tokens, code actions, inlay hints,
+rename, document links — answers with nothing, plus that no `source: "nessemble"`
+or `"nessemble-lint"` diagnostic appears; that is the exact test
+[§10](#10-risks)'s first row asks for. Catalog completion/hover/signature-help,
+the four lints, `.rhai` document symbols/folding/local navigation, and the `.foo`
+directive's new hover text each have their own focused test, run under both
+`--features scripting` and `--no-default-features` so the catalog-only build's
+promise (acceptance item 8) is checked, not assumed.

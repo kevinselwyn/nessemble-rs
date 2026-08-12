@@ -18,7 +18,13 @@ path = "src/main.rs"
 # directives report "scripting disabled"; without `lsp`, `nessemble lsp` reports
 # that the build lacks LSP support.
 default = ["scripting", "lsp", "coverage"]
-scripting = ["dep:nessemble-script"]
+# `nessemble-lsp?/scripting` is a weak dependency feature: it only takes effect
+# when `nessemble-lsp` is *also* enabled (by the `lsp` feature below), so
+# `--features scripting` alone still builds with no `lsp` in the graph at all.
+# This is how `nessemble-lsp` gets its compiled-AST half of `.rhai` editor
+# support (diagnostics, lints, symbols, folding, script-local definitions —
+# `plans/014-scripting-docs-and-tooling.md` §5.8) turned on by a default build.
+scripting = ["dep:nessemble-script", "nessemble-lsp?/scripting"]
 lsp = ["dep:nessemble-lsp"]
 # Rhai script coverage for `nessemble coverage --scripts`. Requires `scripting`;
 # turns on the script host's `coverage` feature (Rhai debugger + AST walk). On by

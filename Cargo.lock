@@ -653,6 +653,8 @@ dependencies = [
  "nessemble-core",
  "nessemble-isa",
  "nessemble-rc",
+ "nessemble-script-api",
+ "rhai",
  "serde_json",
 ]
 

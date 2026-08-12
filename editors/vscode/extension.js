@@ -41,16 +41,25 @@ async function start() {
   };
 
   const clientOptions = {
+    // `.rhai` is routed to the same server: it answers with the catalog-driven
+    // completion/hover/signature help of plans/014-scripting-docs-and-tooling.md
+    // §5 for any pseudo-op script, whether or not another extension is also
+    // installed for the `rhai` language id — VS Code merges contributions for a
+    // shared id, so a Rhai syntax-highlighting extension keeps its grammar and
+    // simply gains this server underneath it.
     documentSelector: [
       { scheme: "file", language: "nessemble" },
       { scheme: "untitled", language: "nessemble" },
+      { scheme: "file", language: "rhai" },
+      { scheme: "untitled", language: "rhai" },
     ],
     outputChannelName: "nessemble",
     // The server discovers a project's entry points from the workspace's
-    // `.include` graph, and reads `.nessemblerc` for lint configuration.
+    // `.include` graph, reads `.nessemblerc` for lint configuration, and maps
+    // `.foo` directives to the `.rhai` scripts a `pseudo.txt`-style file names.
     synchronize: {
       fileEvents: workspace.createFileSystemWatcher(
-        "**/{.nessemblerc,*.asm,*.s}",
+        "**/{.nessemblerc,*.asm,*.s,*.rhai}",
       ),
     },
   };
