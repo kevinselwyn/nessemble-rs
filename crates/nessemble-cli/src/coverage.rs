@@ -10,6 +10,13 @@
 //! the two are the same size but bit-incompatible, so the emulator is explicit.
 //! `BizHawk`'s container format is a later phase.
 //!
+//! `--cdl` is optional when `--scripts` is given: `nessemble coverage main.asm
+//! -p pseudo.txt --scripts` (no `--cdl`) reports line coverage for the mapped
+//! Rhai scripts alone, with no ROM assembled in NES mode and no emulator
+//! capture required — the shape a CI job without a playthrough can produce.
+//! `--cdl`, `--scripts`, or both must be given; at least one report half is
+//! required.
+//!
 //! Source may exclude lines from the report with the
 //! `; @nessemble-coverage-ignore-next-line` and
 //! `; @nessemble-coverage-ignore start` / `end` comment directives (`//` in Rhai
@@ -20,10 +27,11 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use nessemble_core::coverage::{
-    build_report_with_ignores, resolve_ignores, CdlSource, CoverageIgnores, FlatMaskCdl,
+    build_report_with_ignores, resolve_ignores, CdlSource, CoverageIgnores, CoverageReport,
+    FileKind, FlatMaskCdl,
 };
 use nessemble_core::tooling;
-use nessemble_core::{assemble_file_with, AssembleError, Options};
+use nessemble_core::{assemble_file_with, AssembleError, Assembly, Options};
 
 use crate::custom;
 use crate::{RETURN_EPERM, RETURN_OK};
@@ -56,8 +64,9 @@ pub struct CoverageArgs {
     #[arg(value_name = "infile.asm")]
     infile: String,
 
-    /// CDL capture to read (repeatable; multiple files are merged by bitwise OR)
-    #[arg(long = "cdl", value_name = "file.cdl", required = true)]
+    /// CDL capture to read (repeatable; multiple files are merged by bitwise
+    /// OR); required unless `--scripts` is given
+    #[arg(long = "cdl", value_name = "file.cdl")]
     cdl: Vec<String>,
 
     /// emulator CDL format
@@ -97,26 +106,51 @@ pub struct CoverageArgs {
 
 /// Run `coverage` with its parsed options, returning the process exit code.
 pub fn run(args: &CoverageArgs) -> u8 {
-    // Assemble in NES mode with source-map recording. Coverage is defined over
-    // PRG/CHR banks, so a non-NES assembly has nothing to report.
+    if args.cdl.is_empty() && !args.scripts {
+        eprintln!("nessemble: coverage requires --cdl, --scripts, or both");
+        return RETURN_EPERM;
+    }
+
     let project_root = match crate::resolve_root_flag(args.root.as_deref()) {
         Ok(root) => root,
         Err(code) => return code,
     };
-    let options = Options {
-        nes: true,
-        source_map: true,
-        project_root,
-        ..Options::default()
+    // Coverage over PRG/CHR banks needs an iNES ROM with a byte-exact source
+    // map; both cost real work, so they are only requested when `--cdl` was
+    // actually given. A `--scripts`-only run assembles in whatever mode the
+    // source already calls for, so a non-NES project with nothing but
+    // pseudo-op scripts to measure isn't forced through NES mode to get there.
+    let want_rom = !args.cdl.is_empty();
+    let options = if want_rom {
+        Options {
+            nes: true,
+            source_map: true,
+            project_root,
+            ..Options::default()
+        }
+    } else {
+        Options {
+            project_root,
+            ..Options::default()
+        }
     };
     // When `--scripts` is requested (and supported), the resolver also records
-    // Rhai line coverage into `scripts_cov`, which outlives the assembly.
+    // Rhai line coverage into `scripts_cov`, which outlives the assembly. Every
+    // script the `-p` mapping names is seeded before assembling, so a directive
+    // a build never reaches still gets an entry — every coverable line, zero
+    // hits — instead of being silently absent from the report.
     #[cfg(feature = "coverage")]
     let scripts_cov = args.scripts.then(|| {
         std::rc::Rc::new(std::cell::RefCell::new(
             nessemble_script::coverage::ScriptCoverage::new(),
         ))
     });
+    #[cfg(feature = "coverage")]
+    if let Some(cov) = &scripts_cov {
+        if let Some(pseudo) = args.pseudo.as_deref() {
+            seed_mapped_scripts(pseudo, cov);
+        }
+    }
     #[cfg(feature = "coverage")]
     let resolver = match &scripts_cov {
         Some(cov) => custom::build_resolver_with_coverage(
@@ -146,53 +180,28 @@ pub fn run(args: &CoverageArgs) -> u8 {
         }
     };
 
-    let Some(source_map) = assembly.source_map else {
-        eprintln!("nessemble: coverage requires an iNES ROM (assemble with `-f nes`)");
-        return RETURN_EPERM;
-    };
-
-    // PRG/CHR sizes come from the assembled iNES header (bytes 4 and 5), which
-    // also fixes the CDL's PRG/CHR boundary and its expected total size.
-    let Some(&prg_banks) = assembly.rom.get(4) else {
-        eprintln!("nessemble: assembled output is not an iNES ROM");
-        return RETURN_EPERM;
-    };
-    let chr_banks = assembly.rom.get(5).copied().unwrap_or(0);
-    let prg_len = prg_banks as usize * PRG_BANK;
-    let chr_len = chr_banks as usize * CHR_BANK;
-
-    let cdl_bytes = match load_and_merge_cdls(&args.cdl, prg_len, chr_len) {
-        Ok(b) => b,
-        Err(code) => return code,
-    };
-
-    let cdl: Box<dyn CdlSource> = match match args.emulator {
-        Emulator::Fceux => FlatMaskCdl::fceux(cdl_bytes, prg_len),
-        Emulator::Mesen => FlatMaskCdl::mesen(cdl_bytes, prg_len),
-    } {
-        Ok(c) => Box::new(c),
-        Err(e) => {
-            eprintln!("nessemble: {e}");
-            return RETURN_EPERM;
+    let mut report = if want_rom {
+        match build_rom_report(&assembly, args) {
+            Ok(r) => r,
+            Err(code) => return code,
         }
-    };
-
-    // Collect the `@nessemble-coverage-ignore…` exclusions from every source
-    // file the assembly actually emitted from. Core does no file I/O, so the
-    // reading and scanning happen here.
-    let ignores = if args.no_ignore {
-        CoverageIgnores::default()
     } else {
-        collect_ignores(&source_map)
+        CoverageReport::default()
     };
-
-    let mut report = build_report_with_ignores(&source_map, cdl.as_ref(), &ignores);
 
     // Fold in Rhai script coverage (each project script as its own file). The
     // same directives apply, written as `//` comments.
     #[cfg(feature = "coverage")]
     if let Some(cov) = &scripts_cov {
         let cov = cov.borrow();
+        if cov.is_empty() {
+            let why = if args.pseudo.is_none() {
+                "no -p/--pseudo mapping was given"
+            } else {
+                "its mapping named no script that could be read and compiled"
+            };
+            eprintln!("nessemble: --scripts requested but instrumented no scripts ({why})");
+        }
         for (path, rows) in cov.files() {
             let display = path.display().to_string();
             let mut script_ignores = CoverageIgnores::default();
@@ -234,6 +243,23 @@ pub fn run(args: &CoverageArgs) -> u8 {
         0.0
     };
     let mut summary = format!("coverage: {}/{} lines ({pct:.1}%)", t.covered(), t.total());
+    let mut clauses = Vec::new();
+    // Once both halves contribute, the single percentage above can move for
+    // reasons that have nothing to do with the ROM, so the split says which
+    // number is which.
+    let has_rom = report.files.iter().any(|f| f.kind == FileKind::Rom);
+    let has_script = report.files.iter().any(|f| f.kind == FileKind::Script);
+    if has_rom && has_script {
+        let rom = report.totals_for(FileKind::Rom);
+        let script = report.totals_for(FileKind::Script);
+        clauses.push(format!(
+            "rom {}/{}, scripts {}/{}",
+            rom.covered(),
+            rom.total(),
+            script.covered(),
+            script.total()
+        ));
+    }
     // Exclusions are reported rather than silently vanishing, so an over-broad
     // ignore region shows up as a jump in this number.
     if t.ignored > 0 || t.ignored_files > 0 {
@@ -248,10 +274,98 @@ pub fn run(args: &CoverageArgs) -> u8 {
                 plural(t.ignored_files)
             ));
         }
-        let _ = write!(summary, " — {} ignored", parts.join(", "));
+        clauses.push(format!("{} ignored", parts.join(", ")));
+    }
+    if !clauses.is_empty() {
+        let _ = write!(summary, " — {}", clauses.join(" — "));
     }
     println!("{summary}");
     RETURN_OK
+}
+
+/// Assemble-time ROM/CDL half of the report: pull the byte-exact source map out
+/// of `assembly`, verify the iNES header, load and merge the `--cdl` files, and
+/// classify every PRG-emitting line against them. Only called when `--cdl` was
+/// given (`want_rom` in [`run`]).
+fn build_rom_report(assembly: &Assembly, args: &CoverageArgs) -> Result<CoverageReport, u8> {
+    let Some(source_map) = &assembly.source_map else {
+        eprintln!("nessemble: coverage requires an iNES ROM (assemble with `-f nes`)");
+        return Err(RETURN_EPERM);
+    };
+
+    // PRG/CHR sizes come from the assembled iNES header (bytes 4 and 5), which
+    // also fixes the CDL's PRG/CHR boundary and its expected total size.
+    let Some(&prg_banks) = assembly.rom.get(4) else {
+        eprintln!("nessemble: assembled output is not an iNES ROM");
+        return Err(RETURN_EPERM);
+    };
+    let chr_banks = assembly.rom.get(5).copied().unwrap_or(0);
+    let prg_len = prg_banks as usize * PRG_BANK;
+    let chr_len = chr_banks as usize * CHR_BANK;
+
+    let cdl_bytes = load_and_merge_cdls(&args.cdl, prg_len, chr_len)?;
+
+    let cdl: Box<dyn CdlSource> = match match args.emulator {
+        Emulator::Fceux => FlatMaskCdl::fceux(cdl_bytes, prg_len),
+        Emulator::Mesen => FlatMaskCdl::mesen(cdl_bytes, prg_len),
+    } {
+        Ok(c) => Box::new(c),
+        Err(e) => {
+            eprintln!("nessemble: {e}");
+            return Err(RETURN_EPERM);
+        }
+    };
+
+    // Collect the `@nessemble-coverage-ignore…` exclusions from every source
+    // file the assembly actually emitted from. Core does no file I/O, so the
+    // reading and scanning happen here.
+    let ignores = if args.no_ignore {
+        CoverageIgnores::default()
+    } else {
+        collect_ignores(source_map)
+    };
+
+    Ok(build_report_with_ignores(
+        source_map,
+        cdl.as_ref(),
+        &ignores,
+    ))
+}
+
+/// Seed `cov` with every script the `-p` mapping refers to, ahead of assembling,
+/// so a directive the build never reaches still appears in the report instead
+/// of being absent from it (`plans/014-scripting-docs-and-tooling.md` §6.1). A
+/// script that cannot be read or does not compile is warned about and skipped —
+/// one bad mapping entry must never block a coverage run.
+#[cfg(feature = "coverage")]
+fn seed_mapped_scripts(pseudo_file: &str, cov: &nessemble_script::coverage::SharedCoverage) {
+    let mut seen = std::collections::HashSet::new();
+    for path in custom::mapped_scripts(pseudo_file) {
+        // The same key `build_resolver_with_coverage` uses, so a seeded entry
+        // and one written by an actual run land on the very same file — and so
+        // two directive names mapped to one script seed (and later report) as
+        // one entry, not two.
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "nessemble: could not read mapped script `{}` for coverage: {e}; skipping",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if let Err(e) = nessemble_script::coverage::seed(&source, &key, cov) {
+            eprintln!(
+                "nessemble: could not seed coverage for `{}`: {e}; skipping",
+                path.display()
+            );
+        }
+    }
 }
 
 fn plural(n: u32) -> &'static str {

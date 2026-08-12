@@ -152,7 +152,7 @@ enum Command {
     Format(format::FormatArgs),
     /// lint assembly source
     Lint(lint::LintArgs),
-    /// report runtime coverage from a CDL capture
+    /// report coverage from a CDL capture, pseudo-op scripts, or both
     Coverage(coverage::CoverageArgs),
     /// inspect or clear the custom pseudo-instruction cache
     Cache {

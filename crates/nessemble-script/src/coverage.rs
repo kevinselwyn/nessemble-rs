@@ -112,16 +112,7 @@ pub fn run_with_coverage(
     }
 
     let ast = engine.compile(source).map_err(|e| e.to_string())?;
-
-    // Coverable lines: every AST node position, including the `custom` function
-    // body (`AST::walk` descends into function bodies).
-    let mut coverable: BTreeSet<u32> = BTreeSet::new();
-    ast.walk(&mut |path: &[ASTNode]| {
-        if let Some(line) = path.last().and_then(|node| node.position().line()) {
-            coverable.insert(line as u32);
-        }
-        true
-    });
+    let coverable = coverable_lines(&ast);
 
     let int_arr: Array = ints.iter().map(|&i| Dynamic::from(i)).collect();
     let text_arr: Array = texts.iter().map(|t| Dynamic::from(t.clone())).collect();
@@ -139,6 +130,42 @@ pub fn run_with_coverage(
         Ok(value) => dynamic_to_output(value),
         Err(err) => Err(error_message(&err)),
     }
+}
+
+/// Every coverable line in a compiled script: each AST node's position
+/// (including the `custom` function body — `AST::walk` descends into function
+/// bodies), so a line that never runs is still counted rather than absent.
+fn coverable_lines(ast: &rhai::AST) -> BTreeSet<u32> {
+    let mut coverable = BTreeSet::new();
+    ast.walk(&mut |path: &[ASTNode]| {
+        if let Some(line) = path.last().and_then(|node| node.position().line()) {
+            coverable.insert(line as u32);
+        }
+        true
+    });
+    coverable
+}
+
+/// Seed `cov` with `script_path`'s coverable lines, all initially un-hit.
+///
+/// [`ScriptCoverage`]'s coverable and hit sets accumulate by union
+/// ([`FileHits`]), so seeding a script that later actually runs is a no-op, and
+/// seeding one that never runs gives it exactly the entry it should have: every
+/// coverable line, zero hits. This is what lets `nessemble coverage --scripts`
+/// report a mapped script whose directive a build never reaches, instead of the
+/// script being silently absent from the report.
+///
+/// # Errors
+/// Returns the compile error message when `source` does not parse.
+pub fn seed(source: &str, script_path: &Path, cov: &SharedCoverage) -> Result<(), String> {
+    let engine = engine(Path::new("."), None, None);
+    let ast = engine.compile(source).map_err(|e| e.to_string())?;
+    let coverable = coverable_lines(&ast);
+
+    let mut cov = cov.borrow_mut();
+    let entry = cov.files.entry(script_path.to_path_buf()).or_default();
+    entry.coverable.extend(coverable);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -232,5 +259,47 @@ mod tests {
         assert_eq!(err, "boom");
         // The lines reached before the throw were still recorded.
         assert!(!cov.borrow().is_empty());
+    }
+
+    #[test]
+    fn seed_records_every_coverable_line_as_unhit() {
+        let cov: SharedCoverage = Rc::new(RefCell::new(ScriptCoverage::new()));
+        seed(SRC, Path::new("never-run.rhai"), &cov).unwrap();
+
+        let cov_ref = cov.borrow();
+        let (path, rows) = cov_ref.files().next().expect("one script recorded");
+        assert_eq!(path, Path::new("never-run.rhai"));
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|&(_, hit)| !hit),
+            "a seeded-only script has no hits: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn seeding_a_script_that_already_ran_does_not_erase_its_hits() {
+        let cov: SharedCoverage = Rc::new(RefCell::new(ScriptCoverage::new()));
+        let path = Path::new("t.rhai");
+        run_with_coverage(
+            SRC,
+            &[1],
+            &[],
+            Path::new("."),
+            &RunOptions::default(),
+            path,
+            &cov,
+        )
+        .unwrap();
+        let before = uncovered(&cov);
+
+        seed(SRC, path, &cov).unwrap();
+        let after = uncovered(&cov);
+        assert_eq!(before, after, "seeding an already-run script is a no-op");
+    }
+
+    #[test]
+    fn seed_rejects_a_script_that_does_not_compile() {
+        let cov: SharedCoverage = Rc::new(RefCell::new(ScriptCoverage::new()));
+        assert!(seed("fn custom(", Path::new("bad.rhai"), &cov).is_err());
     }
 }
