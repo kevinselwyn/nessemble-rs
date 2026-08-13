@@ -1,8 +1,8 @@
 # nessemble-rs: A Plan for Scripting Documentation and Tooling
 
-> Status: **Phases 0–3 shipped** ([§9](#9-phased-plan); as built,
+> Status: **Shipped** ([§9](#9-phased-plan); as built,
 > [§12.1](#121-phase-0), [§12.2](#122-phase-1), [§12.3](#123-phase-2),
-> [§12.4](#124-phase-3)). This document treats the host functions a pseudo-op
+> [§12.4](#124-phase-3), [§12.5](#125-phase-4)). This document treats the host functions a pseudo-op
 > script can call as what they actually are — **a public API** — and gives them
 > the three things every public API in this repo already has and this one does
 > not: a **reference table of contents**, grouped by domain, in the
@@ -562,7 +562,7 @@ navigation ([§5.6](#56-the-link-back-to-assembly)). No Rhai dependency yet.
 folding, script-local definition and references. VS Code manifest and
 `editor.md` ([§5.7](#57-what-the-client-has-to-change)). **Completes goal 2.**
 
-### Phase 4 — coverage
+### Phase 4 — coverage. **Shipped ([§12.5](#125-phase-4)).**
 
 `seed` and `mapped_scripts` ([§6.1](#61-a-script-that-never-runs-is-not-in-the-report)),
 optional `--cdl` ([§6.2](#62---scripts-without-a-cdl)), the summary and JSON
@@ -877,3 +877,66 @@ the four lints, `.rhai` document symbols/folding/local navigation, and the `.foo
 directive's new hover text each have their own focused test, run under both
 `--features scripting` and `--no-default-features` so the catalog-only build's
 promise (acceptance item 8) is checked, not assumed.
+
+### 12.5 Phase 4
+
+**`--cdl` becoming optional stayed a hand-rolled check, not a `clap::ArgGroup`.**
+§6.2 describes the requirement as "a clap group requiring at least one of `--cdl`
+/ `--scripts`"; `coverage.rs` had no `ArgGroup` usage anywhere to extend, and every
+other cross-flag rule in this module (the iNES-header checks, the CDL size guard)
+is already a plain `if` with an `eprintln!` and a return code. Matching that shape
+— `if args.cdl.is_empty() && !args.scripts { … }` at the top of `run` — needed no
+new dependency on clap's group derive attributes and reads the same as every
+other validation already in the file.
+
+**The ROM half became its own function, `build_rom_report`, returning
+`Result<CoverageReport, u8>`.** Before this phase `run` had one straight-line
+path from "assemble" to "write the report"; splitting the CDL loading, iNES
+header reads, and `build_report_with_ignores` call out from `run` — rather than
+threading an `if want_rom { … } else { … }` through the middle of the existing
+function — keeps `run`'s new branch (`want_rom`) a single `if`/`else` producing a
+`CoverageReport` either way, instead of every early `return RETURN_EPERM` inside
+the ROM path also needing to skip the script-coverage folding and summary code
+that now follows it unconditionally.
+
+**Seeding reuses `coverable_lines`, extracted verbatim from `run_with_coverage`
+as §6.1 asks — and that reuse surfaces a pre-existing asymmetry, not a new bug.**
+A script that is only *seeded* (never invoked by a build) can report fewer
+coverable lines than the same script would if it actually ran: Rhai's default
+`OptimizationLevel::Simple` folds a trivial constant body (e.g. a bare `[1]`
+return) into fewer AST nodes than `AST::walk` finds in an unfolded tree, while
+`run_with_coverage`'s `hit` set comes from live debugger events at run time,
+which surface a few extra line positions (a function's own signature and closing
+brace) that the folded AST no longer carries. This asymmetry already existed for
+every *executed* script before this phase — `coverable` and `hit` were always
+unioned, and `hit` routinely contains lines `coverable` alone would have missed —
+Phase 4 is only the first caller that can read `coverable` with no `hit` to
+supplement it (a script whose directive the build never reaches). Confirmed with
+a scratch reproduction, not fixed: the acceptance bar ([§8](#8-acceptance) item 6)
+only asks that an unreached script appear in the report at 0%, which it does
+regardless of exactly how many lines its folded AST exposes.
+
+**Seeding's dedup key is the same canonicalized path the resolver's cache key
+uses, per §6.1's first trap.** `seed_mapped_scripts` (in `nessemble-cli`) resolves
+every mapping entry through `custom::mapped_scripts`, then canonicalizes each
+path before both deduplicating and calling `nessemble_script::coverage::seed` —
+the same `path.canonicalize().unwrap_or(path)` `build_resolver_with_coverage`
+already keyed on. A script mapped under two directive names therefore seeds (and
+later reports) as one file, checked directly by a test that maps `.a` and `.b` to
+one script and asserts the JSON report names it exactly once.
+
+**A silently-empty `--scripts` run now says why.** §6.3's third bullet is a single
+`if cov.is_empty()` check after folding script coverage into the report,
+distinguishing "no `-p`/`--pseudo` mapping was given" from "its mapping named no
+script that could be read and compiled" — the two ways a `--scripts` run can end
+up instrumenting nothing.
+
+**The ROM/script summary split is a `CoverageReport::totals_for(FileKind)`
+method, not an ad hoc filter at the call site.** `FileCoverage` gained a `kind:
+FileKind` field (`Rom` | `Script`), threaded through every constructor
+(`build_report_with_ignores` sets `Rom`; `FileCoverage::from_line_hits_with_ignores`
+— script coverage's only constructor — sets `Script`) and into the JSON output as
+an additive `"kind"` field per file; LCOV is unchanged, exactly as §6.3 specifies.
+`totals_for` filters `self.files` by kind before summing, mirroring `totals`'s own
+shape, so a future JSON/LCOV consumer that wants the same split has a typed
+method to call rather than reimplementing the filter.

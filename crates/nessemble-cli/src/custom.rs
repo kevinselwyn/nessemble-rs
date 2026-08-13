@@ -319,6 +319,27 @@ fn read_mapping(path: impl AsRef<Path>) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+/// Every script path a `-p` mapping refers to, resolved relative to the
+/// mapping file's own directory — the same resolution [`Resolver::locate`]
+/// applies to a pseudo entry. Two directive names may map to the same file, so
+/// entries can repeat; callers that need one entry per file (coverage seeding)
+/// deduplicate themselves, by the same canonicalization the resolver's cache
+/// key uses.
+///
+/// Its only consumer today is `coverage`'s seeding pass, so it stays behind
+/// the same feature that gates that.
+#[cfg(feature = "coverage")]
+pub fn mapped_scripts(pseudo_file: &str) -> Vec<PathBuf> {
+    let dir = Path::new(pseudo_file)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    read_mapping(pseudo_file)
+        .into_values()
+        .map(|rel| dir.join(rel))
+        .collect()
+}
+
 #[cfg(feature = "scripting")]
 fn run_script(
     source: &str,

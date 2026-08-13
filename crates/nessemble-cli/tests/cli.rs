@@ -369,6 +369,230 @@ fn coverage_scripts_reports_an_unexecuted_rhai_branch() {
 }
 
 #[test]
+fn coverage_without_cdl_or_scripts_is_a_usage_error() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covreq-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let asm = dir.join("main.asm");
+    std::fs::write(&asm, "    NOP\n").unwrap();
+
+    let out = bin()
+        .args(["coverage", asm.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--cdl, --scripts, or both"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "coverage")]
+#[test]
+fn coverage_scripts_without_cdl_needs_no_ines_rom() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covnorom-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Not an NES/iNES source at all — `--scripts` alone must not force NES mode
+    // or ask for a CDL.
+    std::fs::write(
+        dir.join("pick.rhai"),
+        "fn custom(ints, texts) {\n    let out = [];\n    if ints[0] > 0 {\n        out += 1;\n    } else {\n        out += 2;\n    }\n    out\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("pseudo.txt"), ".pick = pick.rhai\n").unwrap();
+    std::fs::write(dir.join("main.asm"), "    .pick 5\n    RTS\n").unwrap();
+    let json = dir.join("scripts.json");
+
+    let out = bin()
+        .args([
+            "coverage",
+            dir.join("main.asm").to_str().unwrap(),
+            "-p",
+            dir.join("pseudo.txt").to_str().unwrap(),
+            "--scripts",
+            "--format",
+            "json",
+            "--out",
+            json.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report = std::fs::read_to_string(&json).unwrap();
+    assert!(report.contains("pick.rhai"), "{report}");
+    assert!(report.contains("\"kind\": \"script\""), "{report}");
+    assert!(!report.contains("\"kind\": \"rom\""), "{report}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "coverage")]
+#[test]
+fn coverage_scripts_seeds_a_directive_the_build_never_reaches() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covseed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Two mapped scripts; `main.asm` only ever calls `.used`, so `.unused`'s
+    // script must still show up in the report at 0%, not be silently absent.
+    std::fs::write(
+        dir.join("used.rhai"),
+        "fn custom(ints, texts) {\n    [1]\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("unused.rhai"),
+        "fn custom(ints, texts) {\n    [2]\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pseudo.txt"),
+        ".used = used.rhai\n.unused = unused.rhai\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.asm"), "    .used 1\n    RTS\n").unwrap();
+    let json = dir.join("scripts.json");
+
+    let out = bin()
+        .args([
+            "coverage",
+            dir.join("main.asm").to_str().unwrap(),
+            "-p",
+            dir.join("pseudo.txt").to_str().unwrap(),
+            "--scripts",
+            "--format",
+            "json",
+            "--out",
+            json.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report = std::fs::read_to_string(&json).unwrap();
+    assert!(report.contains("used.rhai"), "{report}");
+    assert!(report.contains("unused.rhai"), "{report}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "coverage")]
+#[test]
+fn coverage_scripts_dedupes_one_file_mapped_under_two_directives() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covdup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shared.rhai"),
+        "fn custom(ints, texts) {\n    [1]\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pseudo.txt"),
+        ".a = shared.rhai\n.b = shared.rhai\n",
+    )
+    .unwrap();
+    // Neither directive is even called — the mapping alone is enough to seed
+    // both names onto the very same file.
+    std::fs::write(dir.join("main.asm"), "    RTS\n").unwrap();
+    let json = dir.join("scripts.json");
+
+    let out = bin()
+        .args([
+            "coverage",
+            dir.join("main.asm").to_str().unwrap(),
+            "-p",
+            dir.join("pseudo.txt").to_str().unwrap(),
+            "--scripts",
+            "--format",
+            "json",
+            "--out",
+            json.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report = std::fs::read_to_string(&json).unwrap();
+    assert_eq!(
+        report.matches("shared.rhai").count(),
+        1,
+        "one directive name maps to the same file as another: exactly one entry, not two\n{report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "coverage")]
+#[test]
+fn coverage_summary_splits_rom_and_scripts_when_both_present() {
+    let dir = std::env::temp_dir().join(format!("nessemble-covsplit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("pick.rhai"),
+        "fn custom(ints, texts) {\n    []\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("pseudo.txt"), ".pick = pick.rhai\n").unwrap();
+    // One PRG + one CHR bank: LDA #$01 (line 3, covered), .pick (line 4, an
+    // executed script call that returns no bytes and so contributes no PRG
+    // span of its own — the ROM half's ratio comes from the LDA alone).
+    std::fs::write(
+        dir.join("main.asm"),
+        ".inesprg 1\n.ineschr 1\n    LDA #$01\n    .pick 1\n",
+    )
+    .unwrap();
+    let mut cdl = vec![0u8; 16384 + 8192];
+    cdl[0] = 0x01;
+    cdl[1] = 0x01;
+    std::fs::write(dir.join("main.cdl"), &cdl).unwrap();
+
+    // No `--out` is given, so the default `coverage.json`/`coverage.lcov` land
+    // in the process's cwd — point that at the scratch dir, not the crate root.
+    let out = bin()
+        .current_dir(&dir)
+        .args([
+            "coverage",
+            dir.join("main.asm").to_str().unwrap(),
+            "--cdl",
+            dir.join("main.cdl").to_str().unwrap(),
+            "-p",
+            dir.join("pseudo.txt").to_str().unwrap(),
+            "--scripts",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    // The `rom` half is the LDA's own file; the `scripts` half is `pick.rhai`'s
+    // own coverable lines — both fully covered here, but tracked separately so
+    // the split says which number is which.
+    assert!(stdout.contains("— rom 1/1, scripts "), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("scripts 0/0"),
+        "the script half must not be empty: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_dropped_in_locale_localizes_output_end_to_end() {
     // A translator drops `~/.nessemble/locales/<lang>.ftl`; selecting it with
     // NESSEMBLE_LANG localizes output, and messages the locale omits fall back

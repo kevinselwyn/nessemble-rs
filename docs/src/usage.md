@@ -44,7 +44,7 @@ The `lsp` command starts the built-in [Language Server](editor.md) for use with
 LSP-capable editors. The `format` command reformats assembly source (§
 [format](#format-opt--path-)) and the `lint` command reports style problems
 without rewriting it (§ [lint](#lint-opt--path-)). The `coverage` command reports
-runtime execution coverage from an emulator CDL capture (§
+coverage from an emulator CDL capture, the `-p` Rhai scripts, or both (§
 [coverage](#coverage-infileasm---cdl-filecdl-)).
 
 ## Options
@@ -357,28 +357,33 @@ The rules are the coverage directives' rules, because it is the same mechanism:
 ### coverage &lt;infile.asm&gt; --cdl &lt;file.cdl&gt; ...
 
 Reports **runtime execution coverage** of an assembled ROM against a **CDL**
-(Code/Data Logger) capture an emulator wrote after running the ROM. It assembles
-the source with a byte-exact source map, classifies each PRG-emitting source line
-against the CDL, and writes machine-readable reports. It never writes a ROM.
+(Code/Data Logger) capture an emulator wrote after running the ROM, **line
+coverage for the `-p` Rhai scripts** a build runs, or both. It never writes a
+ROM.
 
 ```text
 nessemble coverage main.asm --cdl capture.cdl                 # coverage.json + coverage.lcov
 nessemble coverage main.asm --cdl capture.cdl --format lcov --out cov.lcov
 nessemble coverage main.asm --cdl a.cdl --cdl b.cdl --emulator mesen
+nessemble coverage main.asm -p pseudo.txt --scripts           # scripts only, no CDL, no emulator
 ```
 
-Each source line is classified as **code** (executed), **data** (read),
+At least one of `--cdl` or `--scripts` is required.
+
+With `--cdl`, the source assembles with a byte-exact source map and each
+PRG-emitting line is classified as **code** (executed), **data** (read),
 **mixed** (both), or **unaccessed** (present but never touched). Only the PRG
 section is classified; lines that emit only CHR data are omitted.
 
-- `--cdl <file>` — the CDL to read; **required** and repeatable (multiple files
-  are merged by bitwise OR).
+- `--cdl <file>` — the CDL to read; repeatable (multiple files are merged by
+  bitwise OR). Required unless `--scripts` is given.
 - `--emulator <fceux|mesen>` — the CDL format, default `fceux`. FCEUX and Mesen
   flat masks are the same size but bit-incompatible, so there is no auto-detect;
   state the emulator that produced the file. (BizHawk's container format is not
   yet supported.)
 - `--format <json|lcov|all>` — report format, default `all`. **JSON** carries the
-  full four-way class per line; **LCOV** is line hit/not-hit for coverage tools.
+  full four-way class per line, plus a `"kind"` of `"rom"` or `"script"` per
+  file; **LCOV** is line hit/not-hit for coverage tools and has no `kind`.
 - `--out <path>` — output file for a single format, or a directory for `all`
   (`coverage.json` + `coverage.lcov`); defaults to the current directory.
 - `-p`, `--pseudo <pseudo.txt>` — custom pseudo-op mapping, as in assemble mode.
@@ -391,6 +396,15 @@ section is classified; lines that emit only CHR data are omitted.
   project script appears as its own file (each line executed or not); bundled
   `~/.nessemble` scripts are excluded. Available when the binary is built with
   the `coverage` feature (on by default).
+
+  Given without `--cdl`, this reports scripts alone: the source assembles
+  without forcing NES mode or a source map, no CDL is read, and no `--emulator`
+  is consulted — the shape a CI job without an emulator playthrough can produce.
+  Every script the `-p` mapping names is included, even one whose directive the
+  build never reaches (reported at 0%, not omitted); a script mapped under two
+  directive names appears once. A run that instruments no script at all — no
+  `-p` mapping given, or the mapping named nothing readable — prints a warning
+  saying why instead of a silent, unscripted report.
 - `--no-ignore` — report every line, disabling the
   [`@nessemble-coverage-ignore…` directives](#excluding-lines-from-coverage).
 
@@ -401,6 +415,14 @@ dropped:
 
 ```text
 coverage: 812/900 lines (90.2%) — 14 lines, 1 file ignored
+```
+
+When both `--cdl` and `--scripts` contribute files, the single percentage above
+can move for reasons that have nothing to do with the ROM, so the summary also
+splits the two:
+
+```text
+coverage: 812/900 lines (90.2%) — rom 780/840, scripts 32/60
 ```
 
 The CDL must be the same size as this ROM's PRG+CHR (it carries no ROM identity

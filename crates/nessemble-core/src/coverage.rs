@@ -251,12 +251,38 @@ pub struct LineCoverage {
     pub class: CdlClass,
 }
 
+/// Which half of a coverage report a file came from: the CDL/ROM classification
+/// ([`build_report`]) or Rhai `--scripts` line coverage
+/// ([`FileCoverage::from_line_hits`]). Additive — the JSON report gains a
+/// `"kind"` field per file; LCOV has nowhere to put it and is unchanged
+/// (`plans/014-scripting-docs-and-tooling.md` §6.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// Classified against an emulator CDL capture.
+    Rom,
+    /// Rhai line coverage for a pseudo-op script.
+    Script,
+}
+
+impl FileKind {
+    /// The lowercase name used in the JSON report.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileKind::Rom => "rom",
+            FileKind::Script => "script",
+        }
+    }
+}
+
 /// Per-file coverage: every classified (PRG-emitting) line in the file, plus a
 /// count of lines in each class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileCoverage {
     /// Source file display name (as it appears in the [`SourceMap`]).
     pub path: String,
+    /// Which half of the report this file belongs to.
+    pub kind: FileKind,
     /// Classified lines, ascending by line number.
     pub lines: Vec<LineCoverage>,
     /// Number of [`Code`](CdlClass::Code) lines.
@@ -298,6 +324,7 @@ impl FileCoverage {
     ) -> FileCoverage {
         let mut file = FileCoverage {
             path,
+            kind: FileKind::Script,
             lines: Vec::new(),
             code: 0,
             data: 0,
@@ -474,6 +501,7 @@ pub fn build_report_with_ignores(
     for (path, lines) in acc {
         let mut file = FileCoverage {
             path: path.to_string(),
+            kind: FileKind::Rom,
             lines: Vec::with_capacity(lines.len()),
             code: 0,
             data: 0,
@@ -559,6 +587,24 @@ impl CoverageReport {
         t
     }
 
+    /// [`totals`](Self::totals), restricted to files of one [`FileKind`] — the
+    /// ROM/script split a summary line shows when a report contains both
+    /// (`plans/014-scripting-docs-and-tooling.md` §6.3). `ignored_files` is left
+    /// at zero: a fully-excluded file carries no [`FileCoverage`] to read a kind
+    /// from, so that count only ever applies to the whole report.
+    #[must_use]
+    pub fn totals_for(&self, kind: FileKind) -> Totals {
+        let mut t = Totals::default();
+        for f in self.files.iter().filter(|f| f.kind == kind) {
+            t.code += f.code;
+            t.data += f.data;
+            t.mixed += f.mixed;
+            t.unaccessed += f.unaccessed;
+            t.ignored += f.ignored;
+        }
+        t
+    }
+
     /// Render the report as [LCOV](https://github.com/linux-test-project/lcov):
     /// per file an `SF` record, one `DA:line,hits` per classified line (`hits` is
     /// `1` when the line was touched at runtime, else `0`), then `LF`/`LH` line
@@ -593,8 +639,9 @@ impl CoverageReport {
             out.push_str(if fi == 0 { "\n" } else { ",\n" });
             let _ = writeln!(
                 out,
-                "    {{\n      \"path\": \"{}\",",
-                json_escape(&file.path)
+                "    {{\n      \"path\": \"{}\",\n      \"kind\": \"{}\",",
+                json_escape(&file.path),
+                file.kind.as_str()
             );
             let _ = writeln!(
                 out,
@@ -837,6 +884,7 @@ mod tests {
         let json = small_report().to_json();
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(v["files"][0]["path"], "a.asm");
+        assert_eq!(v["files"][0]["kind"], "rom");
         assert_eq!(v["files"][0]["lines"][0]["line"], 3);
         assert_eq!(v["files"][0]["lines"][0]["class"], "code");
         assert_eq!(v["files"][0]["lines"][1]["class"], "unaccessed");
@@ -851,6 +899,7 @@ mod tests {
         let report = CoverageReport {
             files: vec![FileCoverage {
                 path: r#"a"b\c.asm"#.to_string(),
+                kind: FileKind::Rom,
                 lines: Vec::new(),
                 code: 0,
                 data: 0,
@@ -901,6 +950,7 @@ mod tests {
             files: vec![
                 FileCoverage {
                     path: "a".into(),
+                    kind: FileKind::Rom,
                     lines: Vec::new(),
                     code: 2,
                     data: 1,
@@ -910,6 +960,7 @@ mod tests {
                 },
                 FileCoverage {
                     path: "b".into(),
+                    kind: FileKind::Rom,
                     lines: Vec::new(),
                     code: 1,
                     data: 0,
@@ -926,6 +977,43 @@ mod tests {
         assert_eq!(t.total(), 8);
         // Exclusions are tallied separately and never enter covered/total.
         assert_eq!((t.ignored, t.ignored_files), (2, 1));
+    }
+
+    #[test]
+    fn totals_for_splits_by_kind() {
+        let report = CoverageReport {
+            files: vec![
+                FileCoverage {
+                    path: "a.asm".into(),
+                    kind: FileKind::Rom,
+                    lines: Vec::new(),
+                    code: 5,
+                    data: 0,
+                    mixed: 0,
+                    unaccessed: 3,
+                    ignored: 0,
+                },
+                FileCoverage {
+                    path: "s.rhai".into(),
+                    kind: FileKind::Script,
+                    lines: Vec::new(),
+                    code: 2,
+                    data: 0,
+                    mixed: 0,
+                    unaccessed: 1,
+                    ignored: 0,
+                },
+            ],
+            ignored_files: 0,
+        };
+        let rom = report.totals_for(FileKind::Rom);
+        let script = report.totals_for(FileKind::Script);
+        assert_eq!((rom.covered(), rom.total()), (5, 8));
+        assert_eq!((script.covered(), script.total()), (2, 3));
+        // Splits sum back to the whole report's totals.
+        let t = report.totals();
+        assert_eq!(rom.covered() + script.covered(), t.covered());
+        assert_eq!(rom.total() + script.total(), t.total());
     }
 
     // ── Coverage ignore directives ──────────────────────────────────────────
