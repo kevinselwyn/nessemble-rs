@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.25.0 - 2026-08-13
+
+### Minor changes
+
+- `nessemble coverage --scripts` now works without `--cdl`, seeds every mapped script (including ones a build never reaches) so they appear in the report at 0% instead of being absent, dedupes a script mapped under two directive names, and the summary/JSON split ROM coverage from script coverage.
+- `nessemble reference script` lists the host API a custom pseudo-op script can call — every function, method, and property, grouped by domain, with signatures, availability, and a link to its documentation.
+- The language server understands `.rhai` pseudo-op scripts: host-API completion, hover, and signature help work even without a scripting host built in, and syntax diagnostics, four script-specific lints, an outline, folding, and go-to-definition/references for script-local functions are added when the `scripting` feature is on. Hovering a `.foo` directive now also shows the doc comment above the script's `custom` function.
+
+### Patch changes
+
+- Fixed a build break in emit_source on 32-bit targets (wasm32, i686), which hardcoded Rhai's Dynamic tag type as i32 instead of the width Rhai actually uses per target.
+
 ## 2.24.0 - 2026-08-11
 
 ### Minor changes
