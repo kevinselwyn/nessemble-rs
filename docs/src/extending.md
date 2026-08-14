@@ -82,6 +82,13 @@ The host parses the document; the script walks it. Rhai is fast enough to orches
 | [`node.find_all(name)`](#xml) | every child element with that name, as an array | — |
 | [`parse_json(source)`](#json) | parse a JSON document held in a string into native maps, arrays, and scalars | — |
 | [`parse_json_file(path)`](#json) | read and parse a JSON document in one call | needs `fs` (absent in the WebAssembly build) |
+| [`parse_csv(text[, options])`](#csv) | parse a CSV/TSV document held in a string, returning it as a table | — |
+| [`parse_csv_file(path[, options])`](#csv) | read and parse a CSV/TSV document in one call | needs `fs` (absent in the WebAssembly build) |
+| [`csv_table`](#csv) | a parsed CSV/TSV document; a shared handle, like an image | — |
+| [`csv_row`](#csv) | one data row of a csv_table, indexable by column name (row["x"]) or position (row[0]) | — |
+| [`table.headers()`](#csv) | the column names, in file order | — |
+| [`table.rows()`](#csv) | every data row, each indexable by column name or position | — |
+| [`table.len()`](#csv) | the row count | — |
 
 ### Numbers, strings, and blobs
 
@@ -608,6 +615,60 @@ fn custom(ints, texts) {
 ```
 
 A syntax error's message already names its line and column.
+
+#### CSV
+
+`parse_csv_file(path)` (and `parse_csv(text)`, for a string already in hand)
+read row-per-record data the way `parse_xml_file` reads tree-shaped data,
+returning a `csv_table`:
+
+- `table.headers()` — the column names, in file order.
+- `table.rows()` — every data row (the header row is not one), as an array of
+  `csv_row`.
+- `table.len()` — the row count.
+- `for row in table { ... }` — iterates `.rows()`.
+
+Each `csv_row` is indexable **both** by column name and by zero-based
+position:
+
+```rust,ignore
+fn custom(ints, texts) {
+    let table = parse_csv_file(texts[0]);
+    let out = [];
+    for row in table {
+        out.push(parse_int(row["max_speed_x"], 16));  // by column name
+        out.push(parse_int(row[1], 16));               // or by position
+    }
+    out
+}
+```
+
+An unknown column name or an out-of-range position **throws**, rather than
+returning `()` the way `xml_node.attr(name)` does — a CSV row's columns are
+fixed by the table's own header, so a bad index is almost always a typo worth
+catching immediately, not a value a script might legitimately want to check
+for.
+
+Fields are RFC 4180-style: a field starting with `"` is quoted, so it may
+contain embedded delimiters and newlines, and `""` inside one decodes to a
+literal `"`. Blank lines (zero characters between line endings) are skipped
+rather than becoming a row of empty fields. Every field is a plain string —
+no numeric coercion, and **no automatic trimming** (an XML element's `.text`
+is left just as mechanically un-trimmed) — reach for
+[`.trimmed()`](#string-and-hex-helpers) if a field might carry incidental
+whitespace.
+
+The delimiter is `,` by default; pass an options map to use another
+single-character delimiter, e.g. for TSV:
+
+```rust,ignore
+let table = parse_csv_file(texts[0], #{ delimiter: "\t" });
+```
+
+An unrecognized option key is an error, so a typo (`delimeter`) is caught at
+the call site rather than silently parsing as comma-delimited. A row whose
+field count disagrees with the header is a parse-time error naming the file,
+line, and the column it disagrees about.
 
 #### Bulk numeric decoding
 
