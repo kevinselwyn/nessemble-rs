@@ -46,6 +46,14 @@
 //! - `parse_json(source)` / `parse_json_file(path)` (feature `fs` for the file
 //!   form) — parses JSON into native Rhai values (map/array/string/int/float/
 //!   bool/`()`) via [`json`].
+//! - `parse_csv(text)` / `parse_csv_file(path)` (feature `fs` for the file
+//!   form), each also taking an optional `#{ delimiter: "," }`-shaped options
+//!   map — a dependency-free CSV/TSV parser ([`csv`]) returning a `csv_table`
+//!   handle with `.headers()`, `.rows()`, `.len()`, and `for row in table`
+//!   iteration; each `csv_row` is indexable by column name (`row["x"]`) or
+//!   position (`row[0]`). RFC 4180-style quoting, blank lines skipped, no
+//!   field trimming or numeric coercion. See
+//!   `plans/015-csv-parsing.md`.
 //! - `parse_int_list(text, delim)` / `parse_int_list(text, delim, radix)` — bulk
 //!   numeric decoding: split on a literal delimiter, trim, skip empty fields,
 //!   parse each remaining one.
@@ -82,10 +90,12 @@ use rhai_rand::RandomPackage;
 
 #[cfg(feature = "coverage")]
 pub mod coverage;
+mod csv;
 mod json;
 pub mod purity;
 mod xml;
 
+use csv::{CsvRow, CsvTable};
 use xml::XmlNode;
 
 /// Run `source`'s `custom(ints, texts)` function and return what the directive
@@ -448,6 +458,26 @@ fn engine_recording(
                 })
             }
         });
+        // `parse_csv_file(path[, options])` — read and parse a CSV/TSV
+        // document in one call. `options` is `#{ delimiter: "," }`-shaped;
+        // see `csv_delimiter` for what it accepts.
+        engine.register_fn("parse_csv_file", {
+            let base = base.clone();
+            let root = root_buf.clone();
+            let rec = rec.clone();
+            move |p: &str| -> Result<CsvTable, Box<EvalAltResult>> {
+                parse_csv_file_with(&base, root.as_deref(), rec.as_ref(), p, ',')
+            }
+        });
+        engine.register_fn("parse_csv_file", {
+            let base = base.clone();
+            let root = root_buf.clone();
+            let rec = rec.clone();
+            move |p: &str, options: Map| -> Result<CsvTable, Box<EvalAltResult>> {
+                let delimiter = csv_delimiter("parse_csv_file", &options)?;
+                parse_csv_file_with(&base, root.as_deref(), rec.as_ref(), p, delimiter)
+            }
+        });
     }
     #[cfg(not(feature = "fs"))]
     {
@@ -504,6 +534,57 @@ fn engine_recording(
     engine.register_fn("find_all", |n: &mut XmlNode, name: &str| -> Array {
         n.find_all(name).into_iter().map(Dynamic::from).collect()
     });
+
+    // `parse_csv(text[, options])` — parse a CSV/TSV document already in hand
+    // (see `parse_csv_file`, above, for the file-reading form). `options` is
+    // `#{ delimiter: "," }`-shaped; see `csv_delimiter`.
+    engine.register_fn(
+        "parse_csv",
+        |source: &str| -> Result<CsvTable, Box<EvalAltResult>> {
+            csv::parse(source)
+                .map_err(|e| -> Box<EvalAltResult> { format!("parse_csv: {e}").into() })
+        },
+    );
+    engine.register_fn(
+        "parse_csv",
+        |source: &str, options: Map| -> Result<CsvTable, Box<EvalAltResult>> {
+            let delimiter = csv_delimiter("parse_csv", &options)?;
+            csv::parse_with_delimiter(source, delimiter)
+                .map_err(|e| -> Box<EvalAltResult> { format!("parse_csv: {e}").into() })
+        },
+    );
+
+    // `csv_table` — `.headers()`, `.rows()`, `.len()`, and `for row in table`
+    // iteration (`plans/015-csv-parsing.md`). `csv_row` is indexable by
+    // column name or position (`row["x"]` / `row[0]`) via
+    // `register_indexer_get`, which has no script-visible registration name,
+    // so — unlike every method/property above — it needs no
+    // `nessemble-script-api` catalog entry (see the api_catalog drift test's
+    // own `NOT_SCRIPT_FACING` precedent for `path`).
+    engine.register_type_with_name::<CsvTable>("csv_table");
+    engine.register_type_with_name::<CsvRow>("csv_row");
+    engine.register_iterator::<CsvTable>();
+    engine.register_fn("headers", |t: &mut CsvTable| -> Array {
+        t.headers().iter().cloned().map(Dynamic::from).collect()
+    });
+    engine.register_fn("rows", |t: &mut CsvTable| -> Array {
+        t.rows().iter().cloned().map(Dynamic::from).collect()
+    });
+    engine.register_fn("len", |t: &mut CsvTable| -> i64 { t.rows().len() as i64 });
+    engine.register_indexer_get(
+        |r: &mut CsvRow, name: &str| -> Result<String, Box<EvalAltResult>> {
+            r.field_by_name(name)
+                .map(str::to_string)
+                .map_err(|e| -> Box<EvalAltResult> { e.into() })
+        },
+    );
+    engine.register_indexer_get(
+        |r: &mut CsvRow, index: i64| -> Result<String, Box<EvalAltResult>> {
+            r.field_by_index(index)
+                .map(str::to_string)
+                .map_err(|e| -> Box<EvalAltResult> { e.into() })
+        },
+    );
 
     // `parse_int_list(text, delim)` / `parse_int_list(text, delim, radix)` —
     // bulk numeric decoding for the delimited columns structured formats store
@@ -594,6 +675,58 @@ fn engine_recording(
 #[cfg(feature = "fs")]
 fn resolve(base: &Path, root: Option<&Path>, p: &str) -> Result<PathBuf, String> {
     nessemble_core::resolve_path_arg(root, base, p).map_err(|e| e.message(p))
+}
+
+/// The delimiter `parse_csv`/`parse_csv_file` use, from an options map
+/// (`plans/015-csv-parsing.md` §5.4: an unrecognized key, or a `delimiter`
+/// that is not exactly one character, is an error naming the function that
+/// received it, rather than a silent fallback to the comma default).
+fn csv_delimiter(fn_name: &str, options: &Map) -> Result<char, Box<EvalAltResult>> {
+    let mut delimiter = ',';
+    for (key, value) in options {
+        match key.as_str() {
+            "delimiter" => {
+                let s = value
+                    .clone()
+                    .into_string()
+                    .map_err(|_| -> Box<EvalAltResult> {
+                        format!("{fn_name}: option 'delimiter' must be a string").into()
+                    })?;
+                let mut chars = s.chars();
+                let (Some(c), None) = (chars.next(), chars.next()) else {
+                    return Err(format!(
+                        "{fn_name}: option 'delimiter' must be exactly one character, got {s:?}"
+                    )
+                    .into());
+                };
+                delimiter = c;
+            }
+            other => return Err(format!("{fn_name}: unknown option '{other}'").into()),
+        }
+    }
+    Ok(delimiter)
+}
+
+/// `parse_csv_file(path[, options])` — read and parse a CSV/TSV document in
+/// one call, resolving/recording `path` exactly as `parse_xml_file`/
+/// `parse_json_file` do.
+#[cfg(feature = "fs")]
+fn parse_csv_file_with(
+    base: &Path,
+    root: Option<&Path>,
+    rec: Option<&Recorder>,
+    p: &str,
+    delimiter: char,
+) -> Result<CsvTable, Box<EvalAltResult>> {
+    let full = resolve(base, root, p)
+        .map_err(|e| -> Box<EvalAltResult> { format!("parse_csv_file: {e}").into() })?;
+    let full = record(rec, full);
+    let text = std::fs::read_to_string(&full).map_err(|e| -> Box<EvalAltResult> {
+        format!("parse_csv_file: cannot read {}: {e}", full.display()).into()
+    })?;
+    csv::parse_with_delimiter(&text, delimiter).map_err(|e| -> Box<EvalAltResult> {
+        format!("parse_csv_file: {}:{e}", full.display()).into()
+    })
 }
 
 /// A decoded image, as scripts see it.
@@ -1662,6 +1795,7 @@ mod tests {
         write_png_1x1(&dir.0.join("c.png"));
         std::fs::write(dir.0.join("d.xml"), b"<r/>").unwrap();
         std::fs::write(dir.0.join("e.json"), b"1").unwrap();
+        std::fs::write(dir.0.join("f.csv"), b"a\n1\n").unwrap();
         let src = r#"
             fn custom(ints, texts) {
                 let x = open_file("a.bin", "r").read_blob();
@@ -1669,6 +1803,7 @@ mod tests {
                 let img = decode_png_file("c.png");
                 let doc = parse_xml_file("d.xml");
                 let j = parse_json_file("e.json");
+                let t = parse_csv_file("f.csv");
                 x + y
             }
         "#;
@@ -1679,7 +1814,10 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names, ["a.bin", "b.bin", "c.png", "d.xml", "e.json"]);
+        assert_eq!(
+            names,
+            ["a.bin", "b.bin", "c.png", "d.xml", "e.json", "f.csv"]
+        );
         // Absolute, so a recorded path means the same thing from anywhere.
         assert!(out.inputs.iter().all(|p| p.is_absolute()));
         assert_eq!(out.output, CustomOutput::Bytes(b"ab".to_vec()));
@@ -1707,9 +1845,10 @@ mod tests {
 
     #[test]
     fn every_path_taking_function_honors_at_slash() {
-        // read_blob, decode_png_file, parse_xml_file, parse_json_file, and
-        // rhai-fs's own open_file (via the `path` hook) all resolve `@/`
-        // identically — no function is left inconsistent with another.
+        // read_blob, decode_png_file, parse_xml_file, parse_json_file,
+        // parse_csv_file, and rhai-fs's own open_file (via the `path` hook)
+        // all resolve `@/` identically — no function is left inconsistent
+        // with another.
         let dir = TempDir::new("at-slash-every-fn");
         let root = dir.0.join("proj");
         std::fs::create_dir_all(&root).unwrap();
@@ -1718,12 +1857,14 @@ mod tests {
         std::fs::write(root.join("c.xml"), b"<r/>").unwrap();
         std::fs::write(root.join("d.json"), b"1").unwrap();
         std::fs::write(root.join("e.txt"), b"e").unwrap();
+        std::fs::write(root.join("f.csv"), b"a\n1\n").unwrap();
         let src = r#"
             fn custom(ints, texts) {
                 let a = read_blob("@/a.bin");
                 let img = decode_png_file("@/b.png");
                 let doc = parse_xml_file("@/c.xml");
                 let j = parse_json_file("@/d.json");
+                let t = parse_csv_file("@/f.csv");
                 let e = open_file("@/e.txt", "r").read_blob();
                 a + e
             }
@@ -2119,6 +2260,118 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("parse_json"), "{err}");
         assert!(err.contains("line 1"), "{err}");
+    }
+
+    #[test]
+    fn parse_csv_walks_headers_and_rows_by_name_and_position() {
+        let src = r#"
+            fn custom(ints, texts) {
+                let table = parse_csv("name,hp\nslime,10\nbat,5\n");
+                let out = [];
+                for row in table {
+                    out.push(parse_int(row["hp"]));
+                    out.push(parse_int(row[1]));
+                }
+                out
+            }
+        "#;
+        assert_eq!(
+            bytes(run(src, &[], &[], cwd())).unwrap(),
+            vec![10, 10, 5, 5]
+        );
+    }
+
+    #[test]
+    fn parse_csv_file_reproduces_a_compiled_conversion_byte_for_byte() {
+        // Mirrors `parse_xml_file_reproduces_a_compiled_conversion_byte_for_byte`
+        // (plan 013 §10's acceptance criterion, restated for CSV in plan 015 §8).
+        let dir = TempDir::new("csv-table");
+        std::fs::write(
+            dir.0.join("stats.csv"),
+            b"id,hp,speed\n0,10,20\n1,40,50\n2,60,70\n",
+        )
+        .unwrap();
+
+        let doc = csv::parse(&std::fs::read_to_string(dir.0.join("stats.csv")).unwrap()).unwrap();
+        let mut expected = Vec::new();
+        for row in doc.rows() {
+            expected.push(row.field_by_name("id").unwrap().parse::<u8>().unwrap());
+            expected.push(row.field_by_name("hp").unwrap().parse::<u8>().unwrap());
+            expected.push(row.field_by_name("speed").unwrap().parse::<u8>().unwrap());
+        }
+
+        let src = r#"
+            fn custom(ints, texts) {
+                let table = parse_csv_file("stats.csv");
+                let out = [];
+                for row in table {
+                    out.push(parse_int(row["id"]));
+                    out.push(parse_int(row["hp"]));
+                    out.push(parse_int(row["speed"]));
+                }
+                out
+            }
+        "#;
+        assert_eq!(bytes(run(src, &[], &[], &dir.0)).unwrap(), expected);
+    }
+
+    #[test]
+    fn parse_csv_file_reads_and_records_like_read_blob() {
+        let dir = TempDir::new("csv-file");
+        std::fs::write(dir.0.join("d.csv"), b"v\n7\n").unwrap();
+        let src =
+            r#"fn custom(ints, texts) { [parse_int(parse_csv_file("d.csv").rows()[0]["v"])] }"#;
+        let out = run_with_inputs(src, &[], &[], &dir.0).unwrap();
+        assert_eq!(out.output, CustomOutput::Bytes(vec![7]));
+        assert_eq!(out.inputs.len(), 1);
+        assert!(out.inputs[0].ends_with("d.csv"));
+    }
+
+    #[test]
+    fn parse_csv_honors_a_delimiter_option_for_tsv() {
+        let src = r#"
+            fn custom(ints, texts) {
+                let table = parse_csv("a\tb\n1\t2\n", #{ delimiter: "\t" });
+                [parse_int(table.rows()[0]["a"]), parse_int(table.rows()[0]["b"])]
+            }
+        "#;
+        assert_eq!(bytes(run(src, &[], &[], cwd())).unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn parse_csv_rejects_an_unknown_option_key() {
+        let err = run(
+            r#"fn custom(ints, texts) { parse_csv("a\n1\n", #{ delimeter: "," }) }"#,
+            &[],
+            &[],
+            cwd(),
+        )
+        .unwrap_err();
+        assert!(err.contains("delimeter"), "{err}");
+    }
+
+    #[test]
+    fn parse_csv_file_error_names_the_file_and_position() {
+        let dir = TempDir::new("csv-err");
+        std::fs::write(dir.0.join("bad.csv"), b"a,b,c\n1,2\n").unwrap();
+        let src = r#"fn custom(ints, texts) { parse_csv_file("bad.csv") }"#;
+        let err = run(src, &[], &[], &dir.0).unwrap_err();
+        assert!(err.contains("parse_csv_file"), "{err}");
+        assert!(err.contains("bad.csv"), "{err}");
+        // The offending row starts on line 2.
+        assert!(err.contains(":2:"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_row_index_throws_rather_than_returning_unit() {
+        let err = run(
+            r#"fn custom(ints, texts) { parse_csv("a\n1\n").rows()[0]["nope"] }"#,
+            &[],
+            &[],
+            cwd(),
+        )
+        .unwrap_err();
+        assert!(err.contains("nope"), "{err}");
     }
 
     #[test]
