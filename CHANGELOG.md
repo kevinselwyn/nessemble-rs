@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.26.1 - 2026-08-24
+
+### Patch changes
+
+- Redraw the site and documentation favicon as a solid cartridge silhouette that stays legible at 16px, and ship it to the mdBook docs, which previously fell back to mdBook's stock icon.
+
 ## 2.26.0 - 2026-08-14
 
 ### Minor changes
