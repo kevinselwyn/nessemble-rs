@@ -571,12 +571,8 @@ impl Assembler {
     }
 
     fn reset_state(&mut self) {
-        for v in &mut self.prg_offsets {
-            *v = 0;
-        }
-        for v in &mut self.chr_offsets {
-            *v = 0;
-        }
+        self.prg_offsets.fill(0);
+        self.chr_offsets.fill(0);
         self.prg_index = 0;
         self.chr_index = 0;
         self.segment_prg = true;
