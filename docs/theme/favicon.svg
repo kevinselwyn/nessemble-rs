@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!--
+    Nessemble mark: an NES cartridge as a filled silhouette.
+
+    Drawn on a 16x16 grid so the shape lands on whole pixels at favicon sizes —
+    every rect below is one cell of that grid, and favicon.ico / the docs'
+    favicon.png are rendered from these same coordinates. Keep edits on integer
+    boundaries; a half-pixel here is what made the old outline mark smear at
+    16px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1"
+     viewBox="0 0 16 16" width="16" height="16"
+     role="img" aria-label="Nessemble">
+    <title>Nessemble</title>
+    <!-- Cartridge body: squared-off top row, full body, inset foot. -->
+    <g fill="#42DCA3">
+        <rect x="3" y="1" width="10" height="1" />
+        <rect x="2" y="2" width="12" height="10" />
+        <rect x="3" y="12" width="10" height="3" />
+    </g>
+    <!-- Knocked out of the body: the label window and three connector fingers.
+         These stay dark rather than transparent so the mark keeps an anchor on
+         light browser chrome, where the mint alone would wash out. -->
+    <g fill="#1A1D21">
+        <rect x="7" y="3" width="6" height="8" />
+        <rect x="3" y="3" width="3" height="1" />
+        <rect x="3" y="6" width="3" height="1" />
+        <rect x="3" y="9" width="3" height="1" />
+    </g>
+</svg>
