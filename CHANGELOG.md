@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.27.0 - 2026-11-25
+
+### Minor changes
+
+- Add `.for START, END` … `.endfor` unrolled loops: the body is assembled once per counter value (`\i`, with `\j`/`\k` for outer loops), and a name followed by a counter (`row\i:`) defines one label or constant per iteration.
+- The editor now understands `.for` loops: folding, `\i` highlighting and hover, navigation and completion for pasted names like `row\i`, and the formatter and linter read `row\i:` as one label.
+
 ## 2.26.1 - 2026-08-24
 
 ### Patch changes
