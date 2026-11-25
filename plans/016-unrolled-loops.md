@@ -1,6 +1,6 @@
 # nessemble-rs: A Plan for Unrolled Loops (`.for` / `.endfor`)
 
-> Status: **Phase 1 shipped**; Phase 2 in progress. Deviations found while
+> Status: **Shipped, both phases.** Deviations found while
 > building are recorded in [§12](#12-as-built). Every
 > design fork was settled with the maintainer and is recorded in
 > [§11](#11-decisions); those answers are final. The one answer that departs
@@ -474,3 +474,21 @@ Deviations found while building, recorded so the sections above stay readable:
 - **`.macrodef` in a body** is a fatal preprocessor error (one diagnostic),
   because only the preprocessor sees `.macrodef`.
 - **There is no unary minus**, so a negative bound is written `0-1`.
+
+Phase 2 (tooling):
+
+- **The formatter did need a change** (§7 assumed none). It indented
+  `row\i:` and `SLOT\i = …` as if they were instructions. A shared
+  `name_lexemes` helper now reads `ident\i` (no gap) as one name for the
+  label/constant checks. `.for`/`.endfor` follow `indent_directives`, and
+  formatting is idempotent on loop sources.
+- **Counter highlighting** lives in a shared `tooling::is_loop_counter`, used by
+  both the LSP's semantic tokens and the wasm `highlight()`.
+- **Pasted-name resolution is by text, for go-to-definition, hover and
+  completion only.** `references` and `rename` don't treat `row1` and `row\i`
+  as the same symbol. A reference matches only canonical decimal (`row10` is
+  `row` + 10; `row01` matches nothing), and a plain definition anywhere in the
+  project wins over a pasted one.
+- **`require-block-comment` on a pasted label** follows the existing
+  block-entry rule: a `row\i:` directly after the `.for` line counts as an
+  internal target, just as a label directly after code does.
