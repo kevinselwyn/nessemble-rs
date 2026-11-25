@@ -77,6 +77,9 @@ Once connected, the server provides:
   file's register discipline reads at a glance; go-to-definition (cmd/ctrl-click) and find-all-references for symbols.
   With a workspace folder open, go-to-definition follows `.include`s across the
   project, so it reaches a symbol defined in a sibling or parent file.
+  Inside a [`.for` loop](syntax.md#loops), hovering `\i` (or `\j`, `\k`) names the
+  loop it binds to, and a name the loop pastes (`row1` from `row\i:`) resolves
+  to that pasted definition.
 - **Clickable file paths** — every filename argument is a link, so
   cmd/ctrl-clicking the path in `.include "defs.asm"` or `.incpng "hero.png"`
   opens that file. A custom pseudo-instruction's argument becomes clickable when
@@ -112,8 +115,8 @@ Once connected, the server provides:
   [`@/`](syntax.md#project-root-relative-paths) path this doubles as "what root
   did it pick?": a `.nessemblerc` added anywhere above the file changes the
   answer, and this is where that becomes visible without a build.
-- **Folding** — macro (`.macrodef`…`.endm`) and conditional (`.if*`…`.endif`)
-  blocks, and runs of consecutive comments, can be collapsed.
+- **Folding** — macro (`.macrodef`…`.endm`), conditional (`.if*`…`.endif`) and
+  loop (`.for`…`.endfor`) blocks, and runs of consecutive comments, can be collapsed.
 - **Rename** — renaming a symbol updates its definition and every use across the
   open buffers.
 - **Code actions** — convert a numeric literal between hexadecimal, decimal, and
