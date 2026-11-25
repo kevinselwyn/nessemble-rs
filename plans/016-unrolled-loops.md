@@ -355,7 +355,15 @@ Each question lists the option this draft assumes first.
 
 ### Q8. The directive's name
 
-- **(a) `.loop` / `.endloop`** (assumed), as requested.
-- (b) An alias for familiarity from other 6502 assemblers — `.rept` / `.endr`
+- (a) `.loop` / `.endloop` (what this draft is written with), as first
+  requested. The risk: on the 6502, "loop" usually means a runtime loop (a
+  counter and a `BNE`), which is exactly what this directive is *not*
+  ([§10](#10-non-goals)).
+- **(b) `.for` / `.endfor`** (recommended). It describes what the directive
+  does: "for `\i` from `START` to `END`, emit the body". It doesn't suggest a
+  runtime branch. It also fits Q1(b) if counters get names: `.for row, 0, 3`
+  reads naturally, while `.loop row, 0, 3` does not. If this is chosen, the
+  rest of the document is renamed before it is marked settled.
+- (c) An alias for familiarity from other 6502 assemblers — `.rept` / `.endr`
   (asm6, NESASM-style) or `.repeat` / `.endrepeat` (ca65) — accepted alongside
   `.loop`.
