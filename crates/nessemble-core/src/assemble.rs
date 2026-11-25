@@ -283,6 +283,12 @@ pub struct Assembler {
     /// known (undefined, or a local-label reference on pass 1). Reset by the
     /// caller before evaluating a `.for` bound, which must be known on pass 1.
     eval_unknown: Option<String>,
+    /// Each `.for` execution's evaluated (file, line, start, end) in execution
+    /// order, recorded on pass 1 and replayed on pass 2 so the iteration count
+    /// (which sizes everything after the loop) is fixed on pass 1.
+    for_log: Vec<(u32, u32, i64, i64)>,
+    /// Next `for_log` entry pass 2 will replay; reset at the start of a pass.
+    for_cursor: usize,
 
     // iNES trainer redirection (`.inestrn`).
     trainer: Vec<u8>,
@@ -453,6 +459,8 @@ impl Assembler {
             loop_stack: Vec::new(),
             loop_err_seen: std::collections::HashSet::new(),
             eval_unknown: None,
+            for_log: Vec::new(),
+            for_cursor: 0,
             trainer: Vec::new(),
             offset_trainer: 0,
             pass: 1,
@@ -622,6 +630,10 @@ impl Assembler {
         self.if_stack.clear();
         self.loop_stack.clear();
         self.loop_err_seen.clear();
+        if self.pass == 1 {
+            self.for_log.clear();
+        }
+        self.for_cursor = 0;
         self.offset_trainer = 0;
         // Spans are collected fresh on pass 2; clearing here drops any from an
         // earlier pass so the final map reflects only the emitting pass.
@@ -912,8 +924,25 @@ impl Assembler {
             return skip(lines);
         }
         self.eval_unknown = None;
-        let first = self.eval(start);
-        let last = self.eval(end);
+        let replay = if self.pass == 1 {
+            None
+        } else {
+            self.for_log
+                .get(self.for_cursor)
+                .filter(|e| e.0 == self.cur_file && e.1 == self.cur_line)
+                .map(|e| (e.2, e.3))
+        };
+        let (first, last) = if let Some(bounds) = replay {
+            self.for_cursor += 1;
+            bounds
+        } else {
+            let bounds = (self.eval(start), self.eval(end));
+            if self.pass == 1 {
+                self.for_log
+                    .push((self.cur_file, self.cur_line, bounds.0, bounds.1));
+            }
+            bounds
+        };
         let unknown = self.eval_unknown.take();
         // The count decides every later address, so on pass 1 a bound that is
         // not yet known (a forward reference) is an error, not a guess.

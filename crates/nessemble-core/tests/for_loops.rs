@@ -576,3 +576,17 @@ fn source_map_attributes_body_lines_to_their_real_line() {
     assert!(map.spans.iter().all(|s| s.line == 3), "{:?}", map.spans);
     assert_eq!(map.spans.iter().map(|s| s.len).sum::<usize>(), 4);
 }
+
+#[test]
+fn bounds_are_fixed_on_pass_one_even_if_a_constant_is_reassigned_later() {
+    // Pass 2 would read NN = 4 and run 5 iterations, overwriting `end`'s byte.
+    let src = "NN = 2\n.for 0, NN\n  .db $AA\n.endfor\nNN = 4\nend:\n  .db end\n";
+    assert_eq!(bytes(src), vec![0xAA, 0xAA, 0xAA, 0x03]);
+}
+
+#[test]
+fn nested_bounds_are_fixed_on_pass_one_after_a_reassigned_constant() {
+    let src =
+        "NN = 1\n.for 0, NN\n.for 0, NN\n  .db $AA\n.endfor\n.endfor\nNN = 3\nend:\n  .db end\n";
+    assert_eq!(bytes(src), vec![0xAA, 0xAA, 0xAA, 0xAA, 0x04]);
+}
