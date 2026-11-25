@@ -1,10 +1,11 @@
-# nessemble-rs: A Plan for Unrolled Loops (`.loop` / `.endloop`)
+# nessemble-rs: A Plan for Unrolled Loops (`.for` / `.endfor`)
 
 > Status: **Draft — under review.** No code has been written. The design forks
 > that need the maintainer's call are collected in
 > [§11](#11-open-questions); each has a recommended answer that the rest of this
 > document assumes, so the plan reads as one coherent proposal. Once those are
-> settled, §11 becomes "Decisions" and its answers are final.
+> settled, §11 becomes "Decisions" and its answers are final. Settled so far:
+> Q8 (the name is `.for` / `.endfor`).
 
 ---
 
@@ -22,10 +23,10 @@ This plan adds a block pseudo-instruction that repeats its body once per value
 of a counter, with the counter's value available inside the body as `\i`:
 
 ```nessemble
-.loop 0, 2
+.for 0, 2
   LDA src_label+\i
   STA PPUDATA
-.endloop
+.endfor
 ```
 
 assembles exactly as if it had been written:
@@ -42,27 +43,27 @@ assembles exactly as if it had been written:
 ## 2. Syntax
 
 ```text
-.loop START, END
+.for START, END
   body
-.endloop
+.endfor
 ```
 
-- **`START` and `END` are both inclusive** — `.loop 0, 2` runs three times, with
+- **`START` and `END` are both inclusive** — `.for 0, 2` runs three times, with
   `\i` = 0, 1, 2, matching the example above. This reads the way the bounds of
   a table are usually written (`0, LEN-1`), and agrees with the request's
   example ([§11, Q2](#q2-inclusive-end-bound)).
-- **The bounds are expressions**, not just literals: `.loop 0, PALETTE_LEN-1`,
-  `.loop FIRST_SPRITE, FIRST_SPRITE+7`. They must resolve on the first pass —
+- **The bounds are expressions**, not just literals: `.for 0, PALETTE_LEN-1`,
+  `.for FIRST_SPRITE, FIRST_SPRITE+7`. They must resolve on the first pass —
   see [§4](#4-where-the-loop-runs-the-assembler-not-the-preprocessor) and
   [§5.1](#51-bounds-must-be-known-on-pass-1).
 - **`\i` is the counter**, usable anywhere an expression is: `LDA table+\i`,
   `LDA #\i*4`, `.db \i`, `.if \i % 2`. It evaluates to a plain integer, so
   `\i*2` gives a step-of-two sequence without any extra syntax.
-- **`START > END` counts down**: `.loop 7, 0` runs with `\i` = 7, 6, … 0
+- **`START > END` counts down**: `.for 7, 0` runs with `\i` = 7, 6, … 0
   ([§11, Q3](#q3-start--end)). Copying a buffer backwards to the PPU, or
   pushing a table onto the stack in reverse, is common enough that making the
   author write `7-\i` is a needless indirection.
-- **`.loop` and `.endloop` are case-insensitive** and may be indented, like
+- **`.for` and `.endfor` are case-insensitive** and may be indented, like
   every other directive.
 
 ### 2.1 Nesting
@@ -71,16 +72,16 @@ Loops nest. `\i` always names the **innermost** enclosing loop's counter; the
 counters of enclosing loops are `\j` (one level out) and `\k` (two levels out):
 
 ```nessemble
-.loop 0, 3          ; row
-  .loop 0, 7        ; column
+.for 0, 3          ; row
+  .for 0, 7        ; column
     LDA tiles+\j*8+\i
     STA PPUDATA
-  .endloop
-.endloop
+  .endfor
+.endfor
 ```
 
 This is [§11, Q1](#q1-how-nested-loops-name-their-counters) — the biggest open
-question, since the alternatives (named counters) change the syntax of `.loop`
+question, since the alternatives (named counters) change the syntax of `.for`
 itself. A `\j`/`\k` with no loop that many levels out is an error
 ([§6](#6-diagnostics)).
 
@@ -100,12 +101,12 @@ the body were written out N times in place:
   in every iteration unchanged:
 
   ```nessemble
-  .loop 0, 3
+  .for 0, 3
     LDA status+\i
     BEQ :+
     JSR handle
   : NOP
-  .endloop
+  .endfor
   ```
 
 - **`.macro` invocations and `.include`** — expanded once by the preprocessor
@@ -114,7 +115,7 @@ the body were written out N times in place:
   (`.macro SET_PPU, \i`), since the argument's tokens are passed through
   verbatim and evaluated per iteration. `\i` in a macro *body* refers to
   whichever loop the expansion lands in.
-- **Nested `.loop` blocks** (§2.1).
+- **Nested `.for` blocks** (§2.1).
 
 What it may **not** contain:
 
@@ -123,7 +124,7 @@ What it may **not** contain:
   silently overwrites it — so every reference would quietly resolve to the
   last iteration's address. That is a wrong-code bug with no diagnostic, so a
   named label in a body is an error that says *why* ("label `x` is defined
-  inside a `.loop` body, so it would be defined once per iteration"). The same
+  inside a `.for` body, so it would be defined once per iteration"). The same
   applies to a `label\@` from a macro expanded inside a
   loop: the preprocessor gave it one unique suffix, not one per iteration
   ([§11, Q4](#q4-named-labels-in-a-loop-body)).
@@ -141,14 +142,14 @@ splices token streams for `.include` and `.macro`, and a loop could be one
 more splice: capture the body like `capture_macro` does, re-emit it N times
 with `\i` replaced by a `Tok::Number` like `substitute` does for `\N`. It is
 the smallest change. But the preprocessor runs before any symbol exists, so
-the bounds could only be integer literals — `.loop 0, PALETTE_LEN-1` would be
+the bounds could only be integer literals — `.for 0, PALETTE_LEN-1` would be
 an error, and that is the form real code wants.
 
 **The assembler** (`crates/nessemble-core/src/assemble.rs`) evaluates
 expressions, so bounds may reference constants. Its passes already walk a flat
 `&[Line]` and handle `.if` blocks by keeping a stack (`if_stack`); a loop is
-the same shape with one addition — on `.endloop`, jump back to the line after
-`.loop` instead of falling through. `\i` becomes an expression node evaluated
+the same shape with one addition — on `.endfor`, jump back to the line after
+`.for` instead of falling through. `\i` becomes an expression node evaluated
 against a loop stack rather than a token substituted into a copy of the body,
 so no tokens are duplicated and every executed line is still the real line in
 the real file.
@@ -157,21 +158,21 @@ the real file.
 Concretely:
 
 - **Lexer** (`lexer.rs`): `\i`, `\j`, `\k` lex as a new `Tok::LoopIndex(depth)`
-  (0, 1, 2) alongside the existing `\N` / `\#` / `\@` rules. `.loop` and
-  `.endloop` lex as `Tok::Pseudo` with no lexer change.
-- **AST** (`ast.rs`): `Expr::LoopIndex(u8)`; `Pseudo::Loop(Expr, Expr)` and
-  `Pseudo::EndLoop`.
+  (0, 1, 2) alongside the existing `\N` / `\#` / `\@` rules. `.for` and
+  `.endfor` lex as `Tok::Pseudo` with no lexer change.
+- **AST** (`ast.rs`): `Expr::LoopIndex(u8)`; `Pseudo::For(Expr, Expr)` and
+  `Pseudo::EndFor`.
 - **Parser** (`parse.rs`): parse the two pseudo-ops; parse `Tok::LoopIndex` as a
-  primary expression. Matching `.loop`/`.endloop` and checking what a body may
+  primary expression. Matching `.for`/`.endfor` and checking what a body may
   contain (§3) is done in one pass over the parsed lines, before assembly, so
   an unterminated loop is reported once at parse time and not once per pass.
 - **Assembler**: `run_pass` becomes an index-based walk. A `loop_stack` holds
-  one frame per open loop — `{ body_start, current, end, step }`. `.loop`
-  evaluates its bounds and pushes a frame; `.endloop` either advances
+  one frame per open loop — `{ body_start, current, end, step }`. `.for`
+  evaluates its bounds and pushes a frame; `.endfor` either advances
   `current` and jumps to `body_start`, or pops. `Expr::LoopIndex(d)` reads
-  `loop_stack[len - 1 - d].current`. Inside a suppressed `.if`, `.loop` pushes
-  a zero-iteration frame so its `.endloop` still pairs up.
-- **`exec_emitted_source`** (a custom pseudo-op's `emit_source`): `.loop` in
+  `loop_stack[len - 1 - d].current`. Inside a suppressed `.if`, `.for` pushes
+  a zero-iteration frame so its `.endfor` still pairs up.
+- **`exec_emitted_source`** (a custom pseudo-op's `emit_source`): `.for` in
   emitted source just works, since it is executed by the same machinery. A
   custom pseudo-op invoked inside a loop body is re-run every iteration, which
   is correct (and its cache key already includes its arguments, so an
@@ -191,18 +192,18 @@ loop, which is the common case, are fine.
 
 ### 5.2 An iteration limit
 
-A loop whose bounds are wrong (`.loop 0, $FFFF` where `$FF` was meant) would
+A loop whose bounds are wrong (`.for 0, $FFFF` where `$FF` was meant) would
 otherwise emit until it overflows a bank, producing a wall of errors. A single
-`.loop` is capped at **4096 iterations** (more than a full nametable's 1024
+`.for` is capped at **4096 iterations** (more than a full nametable's 1024
 bytes with room to spare), and a nested loop's total iterations are capped at
-**65536**; exceeding either is one error on the `.loop` line, naming the count
+**65536**; exceeding either is one error on the `.for` line, naming the count
 ([§11, Q6](#q6-the-iteration-limit)).
 
 ### 5.3 What is unchanged
 
-- **ROM output for every existing source.** `.loop`, `.endloop` and `\i`/`\j`/`\k`
+- **ROM output for every existing source.** `.for`, `.endfor` and `\i`/`\j`/`\k`
   are not valid in any source today (`\i` is an "expected expression" parse
-  error, `.loop` an unknown custom pseudo-op), so no existing program changes
+  error, `.for` an unknown custom pseudo-op), so no existing program changes
   meaning. This is
   an extension over the reference tool, which has no equivalent; parity tests
   are unaffected.
@@ -219,40 +220,40 @@ the line named:
 
 | Condition | Line |
 | --- | --- |
-| `.loop` with no matching `.endloop` | the `.loop` |
-| `.endloop` with no open `.loop` | the `.endloop` |
-| `.loop` missing a bound, or with more than two | the `.loop` |
-| A bound that is not known on pass 1 (§5.1) | the `.loop` |
-| More than 4096 iterations, or 65536 nested (§5.2) | the `.loop` |
+| `.for` with no matching `.endfor` | the `.for` |
+| `.endfor` with no open `.for` | the `.endfor` |
+| `.for` missing a bound, or with more than two | the `.for` |
+| A bound that is not known on pass 1 (§5.1) | the `.for` |
+| More than 4096 iterations, or 65536 nested (§5.2) | the `.for` |
 | `\i` outside any loop; `\j` / `\k` with too few enclosing loops | the use |
 | A named label inside a body (§3) | the label |
 | `.macrodef` inside a body (§3) | the `.macrodef` |
-| `.if` opened in a body and closed outside it (or vice versa) | the `.endloop` |
+| `.if` opened in a body and closed outside it (or vice versa) | the `.endfor` |
 
 An error raised by a line *inside* a body (an out-of-range branch, an
 overflowing operand) repeats once per iteration that hits it. Those are
 de-duplicated to one diagnostic per (file, line, message), with the message
 suffixed by the counter value of the first iteration that produced it —
-"Branch out of range (in `.loop` iteration `\i` = 5)" — so the author can tell
+"Branch out of range (in `.for` iteration `\i` = 5)" — so the author can tell
 which iteration broke ([§11, Q7](#q7-per-iteration-diagnostics)).
 
 ## 7. Tooling
 
 - **Directive catalog** (`crates/nessemble-isa/src/lib.rs`, `DIRECTIVES`):
-  a `(".loop / .endloop", "repeat a block, unrolled")` entry. This feeds the
+  a `(".for / .endfor", "repeat a block, unrolled")` entry. This feeds the
   `reference` command and LSP completion/hover.
 - **Formatter** (`format_source` in `crates/nessemble-core/src/tooling.rs`):
   no change. The formatter has no block-depth indentation (an `.if` body is not
-  indented either); `.loop`/`.endloop` follow `indent_directives` like every
+  indented either); `.for`/`.endfor` follow `indent_directives` like every
   other directive, and body lines format as they would outside a loop. Phase 2
   adds a test pinning that `\i` operands survive formatting unchanged.
-- **Language server** (`crates/nessemble-lsp`): `.loop`…`.endloop` folding
+- **Language server** (`crates/nessemble-lsp`): `.for`…`.endfor` folding
   ranges (beside `.macrodef`…`.endm` and `.if`…`.endif`); `\i`/`\j`/`\k` get the
   same semantic token class as `\1`; hover on `\i` says which loop it binds to
   and its range.
 - **Routine-signature verifier** (plan 010): a routine body containing a
-  `.loop` is reported as "not fully understood" in v1, the same as any
-  directive the verifier does not model — `.loop` is deliberately *not* added
+  `.for` is reported as "not fully understood" in v1, the same as any
+  directive the verifier does not model — `.for` is deliberately *not* added
   to `is_transparent_directive`, since it emits code.
 - **Linting** (plan 008): no new rule in v1. Existing rules see the body once
   (they work on source text), which is the right granularity.
@@ -275,13 +276,13 @@ the diagnostics in §6; the `DIRECTIVES` entry; the docs section. Tests in
 `crates/nessemble-core`:
 
 - The §1 example assembles to the same bytes as its hand-unrolled form.
-- Counting down; a single-iteration loop (`.loop 3, 3`); nesting with `\j`;
+- Counting down; a single-iteration loop (`.for 3, 3`); nesting with `\j`;
   bounds from constants; `\i` in `.db`, immediate operands and `.if`.
 - Anonymous labels and branches inside a body.
 - A `.macro` and an `.include` inside a body; `\i` as a macro argument.
 - A custom pseudo-op inside a body sees a fresh argument each iteration.
 - Every diagnostic in §6, including de-duplication of a per-iteration error.
-- `.loop` inside a false `.if` emits nothing and pairs its `.endloop`.
+- `.for` inside a false `.if` emits nothing and pairs its `.endfor`.
 
 Changeset: `minor`.
 
@@ -291,14 +292,14 @@ and the routine-verifier behavior from §7, with their tests. Changeset:
 
 ## 10. Non-goals
 
-- **A step argument** (`.loop 0, 14, 2`). `\i*2` with halved bounds covers it;
+- **A step argument** (`.for 0, 14, 2`). `\i*2` with halved bounds covers it;
   revisit if real code finds that awkward.
-- **Iterating over a list** (`.loop x in 1, 4, 9`). That is a table lookup,
+- **Iterating over a list** (`.for x in 1, 4, 9`). That is a table lookup,
   which `.db` plus `LDA table+\i` already expresses.
 - **Per-iteration named labels** (something like `row\i:` producing `row0`,
   `row1`, …). It needs a token-pasting rule the expression-level `\i` does not
   have; out of scope unless Q4 decides otherwise.
-- **Runtime loops.** `.loop` only ever unrolls; it never emits a counter and a
+- **Runtime loops.** `.for` only ever unrolls; it never emits a counter and a
   branch.
 
 ## 11. Open questions
@@ -310,7 +311,7 @@ Each question lists the option this draft assumes first.
 - **(a) `\i` innermost, `\j` / `\k` outward** (assumed). Short, matches the
   request's `\i`, but the meaning of `\i` shifts when a loop is wrapped in
   another one, and three levels is a hard ceiling.
-- (b) Named counters: `.loop row, 0, 3` with the counter spelled `\row`. Never
+- (b) Named counters: `.for row, 0, 3` with the counter spelled `\row`. Never
   ambiguous, any depth — but a three-argument form, and the request's
   two-argument example would need a default name (`\i`).
 - (c) No access to outer counters: `\i` is always innermost, and an outer
@@ -318,9 +319,9 @@ Each question lists the option this draft assumes first.
 
 ### Q2. Inclusive end bound
 
-- **(a) Inclusive** (assumed), matching the example: `.loop 0, 2` runs 3 times.
-- (b) Exclusive (`.loop 0, 3` runs 3 times), like a Rust range.
-- (c) A count instead of an end: `.loop 3` runs `\i` = 0…2, with the two-bound
+- **(a) Inclusive** (assumed), matching the example: `.for 0, 2` runs 3 times.
+- (b) Exclusive (`.for 0, 3` runs 3 times), like a Rust range.
+- (c) A count instead of an end: `.for 3` runs `\i` = 0…2, with the two-bound
   form also accepted.
 
 ### Q3. `START > END`
@@ -353,17 +354,12 @@ Each question lists the option this draft assumes first.
   (assumed).
 - (b) One diagnostic per failing iteration.
 
-### Q8. The directive's name
+### Q8. The directive's name — **settled: `.for` / `.endfor`**
 
-- (a) `.loop` / `.endloop` (what this draft is written with), as first
-  requested. The risk: on the 6502, "loop" usually means a runtime loop (a
-  counter and a `BNE`), which is exactly what this directive is *not*
-  ([§10](#10-non-goals)).
-- **(b) `.for` / `.endfor`** (recommended). It describes what the directive
-  does: "for `\i` from `START` to `END`, emit the body". It doesn't suggest a
-  runtime branch. It also fits Q1(b) if counters get names: `.for row, 0, 3`
-  reads naturally, while `.loop row, 0, 3` does not. If this is chosen, the
-  rest of the document is renamed before it is marked settled.
-- (c) An alias for familiarity from other 6502 assemblers — `.rept` / `.endr`
-  (asm6, NESASM-style) or `.repeat` / `.endrepeat` (ca65) — accepted alongside
-  `.loop`.
+The name says what the directive does: "for `\i` from `START` to `END`, emit
+the body". It also fits named counters if Q1(b) is chosen (`.for row, 0, 3`).
+The other candidate, `.loop` / `.endloop`, was rejected because on the 6502
+"loop" usually means a runtime loop (a counter and a `BNE`), which this
+directive never emits ([§10](#10-non-goals)). No aliases from other assemblers
+(`.rept` / `.endr`, `.repeat` / `.endrepeat`) are accepted. One spelling
+keeps the directive catalog, completion and docs unambiguous.
