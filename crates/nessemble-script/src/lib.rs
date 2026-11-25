@@ -1941,7 +1941,7 @@ mod tests {
     fn a_script_that_reads_nothing_records_nothing() {
         let src = "fn custom(ints, texts) { [1, 2, 3] }";
         let out = run_with_inputs(src, &[], &[], cwd()).unwrap();
-        assert!(out.inputs.is_empty());
+        assert_eq!(out.inputs, [] as [std::path::PathBuf; 0]);
         assert!(out.cacheable);
     }
 

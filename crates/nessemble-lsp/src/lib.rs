@@ -3576,9 +3576,10 @@ mod tests {
     #[test]
     fn analyze_is_clean_for_valid_source() {
         let uri = Url::parse("file:///ok.asm").unwrap();
-        assert!(analyze(&uri, "  lda #$00\n  nop\n", &HashSet::new())
-            .diagnostics
-            .is_empty());
+        assert_eq!(
+            analyze(&uri, "  lda #$00\n  nop\n", &HashSet::new()).diagnostics,
+            [] as [lsp_types::Diagnostic; 0]
+        );
     }
 
     #[test]
@@ -3619,7 +3620,10 @@ mod tests {
             open_params("file:///g.asm", "    lda #$00\n"),
         );
         let uri = Url::parse("file:///g.asm").unwrap();
-        assert!(server.format_document(&uri).unwrap().is_empty());
+        assert_eq!(
+            server.format_document(&uri).unwrap(),
+            [] as [lsp_types::TextEdit; 0]
+        );
     }
 
     #[test]
@@ -4126,7 +4130,7 @@ mod tests {
             serde_json::json!({ "textDocument": { "uri": "file:///b.asm" } }),
         );
         assert_eq!(cleared.len(), 1);
-        assert!(cleared[0].diagnostics.is_empty());
+        assert_eq!(cleared[0].diagnostics, [] as [lsp_types::Diagnostic; 0]);
         assert_eq!(server.document_count(), 0);
     }
 
@@ -4477,7 +4481,7 @@ mod tests {
         // Cursor on the mnemonic, not a number.
         let actions =
             server.code_actions(&uri, Range::new(Position::new(0, 2), Position::new(0, 2)));
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [lsp_types::CodeActionOrCommand; 0]);
     }
 
     // ---- custom pseudo-op awareness ---------------------------------------
@@ -4559,7 +4563,10 @@ mod tests {
 
         assert!(server.format_document(&uri).is_none_or(|e| e.is_empty()));
         assert!(server.semantic_tokens(&uri).is_none());
-        assert!(server.code_actions(&uri, Range::default()).is_empty());
+        assert_eq!(
+            server.code_actions(&uri, Range::default()),
+            [] as [lsp_types::CodeActionOrCommand; 0]
+        );
         assert!(server
             .inlay_hints(&uri, Range::new(Position::new(0, 0), Position::new(10, 0)))
             .is_empty());
@@ -4736,7 +4743,7 @@ mod tests {
     fn lint_is_clean_when_a_comment_is_near() {
         let uri = Url::parse("file:///lint_clean.asm").unwrap();
         let diags = lint_diagnostics(&uri, "\n; documents the routine\nwidget:\n    rts\n");
-        assert!(diags.is_empty());
+        assert_eq!(diags, [] as [lsp_types::Diagnostic; 0]);
     }
 
     #[test]
@@ -4796,7 +4803,7 @@ mod tests {
         let file = dir.join("a.asm");
         let uri = Url::from_file_path(&file).unwrap();
         let diags = lint_diagnostics(&uri, "\nwidget:\n    rts\n");
-        assert!(diags.is_empty());
+        assert_eq!(diags, [] as [lsp_types::Diagnostic; 0]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5259,7 +5266,10 @@ mod tests {
         let tree = PathTree::new("missing");
         let (server, uri) = tree.open_main(".incbin \"gone.chr\"\n.tilemap \"file://gone.png\"\n");
 
-        assert!(server.document_links(&uri).expect("known").is_empty());
+        assert_eq!(
+            server.document_links(&uri).expect("known"),
+            [] as [lsp_types::DocumentLink; 0]
+        );
     }
 
     #[test]
@@ -5270,7 +5280,10 @@ mod tests {
         tree.write("map.png", b"x");
         let (server, uri) = tree.open_main(".tilemap \"map.png\"\n");
 
-        assert!(server.document_links(&uri).expect("known").is_empty());
+        assert_eq!(
+            server.document_links(&uri).expect("known"),
+            [] as [lsp_types::DocumentLink; 0]
+        );
     }
 
     #[test]
@@ -5279,7 +5292,10 @@ mod tests {
         tree.write("hi", b"x");
         let (server, uri) = tree.open_main(".db \"hi\"\n.ascii \"hi\"\n");
 
-        assert!(server.document_links(&uri).expect("known").is_empty());
+        assert_eq!(
+            server.document_links(&uri).expect("known"),
+            [] as [lsp_types::DocumentLink; 0]
+        );
     }
 
     #[test]

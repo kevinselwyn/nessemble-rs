@@ -154,11 +154,11 @@ fn a_preprocessing_failure_yields_no_candidates_rather_than_an_error() {
     // The real assemble call that follows is the sole authority on reporting
     // a missing include; prewarm scanning simply has nothing to offer here.
     let candidates = prewarm_candidates(".include \"does-not-exist.asm\"\n", &Options::default());
-    assert!(candidates.is_empty());
+    assert_eq!(candidates, [] as [nessemble_core::PrewarmCandidate; 0]);
 }
 
 #[test]
 fn a_parse_failure_yields_no_candidates_rather_than_an_error() {
     let candidates = prewarm_candidates(".db 1 +\n", &Options::default());
-    assert!(candidates.is_empty());
+    assert_eq!(candidates, [] as [nessemble_core::PrewarmCandidate; 0]);
 }

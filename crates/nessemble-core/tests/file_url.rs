@@ -184,7 +184,7 @@ fn incrle_accepts_a_declared_path() {
     let plain = assemble_file(&plain_src);
 
     assert_eq!(declared, plain, "the declaration changes nothing");
-    assert!(!declared.is_empty());
+    assert_ne!(declared, [] as [u8; 0]);
 }
 
 #[test]

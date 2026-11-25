@@ -475,13 +475,13 @@ mod tests {
     #[test]
     fn a_clean_two_arg_custom_has_no_findings() {
         let src = "fn custom(ints, texts) { [] }";
-        assert!(diagnostics(src, true).is_empty());
+        assert_eq!(diagnostics(src, true), [] as [lsp_types::Diagnostic; 0]);
     }
 
     #[test]
     fn missing_custom_fires_only_when_mapped() {
         let src = "fn helper() { 1 }";
-        assert!(diagnostics(src, false).is_empty());
+        assert_eq!(diagnostics(src, false), [] as [lsp_types::Diagnostic; 0]);
         let diags = diagnostics(src, true);
         assert_eq!(codes(&diags), vec![rule::MISSING_CUSTOM]);
     }
@@ -515,7 +515,7 @@ mod tests {
         let src = "fn helper(x) { x.to_string() }\n\
                    fn custom(ints, texts) { helper(1); [] }";
         let diags = diagnostics(src, true);
-        assert!(codes(&diags).is_empty());
+        assert_eq!(codes(&diags), [] as [std::string::String; 0]);
     }
 
     #[test]

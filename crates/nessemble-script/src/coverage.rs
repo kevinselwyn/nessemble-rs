@@ -269,7 +269,7 @@ mod tests {
         let cov_ref = cov.borrow();
         let (path, rows) = cov_ref.files().next().expect("one script recorded");
         assert_eq!(path, Path::new("never-run.rhai"));
-        assert!(!rows.is_empty());
+        assert_ne!(rows, [] as [(u32, bool); 0]);
         assert!(
             rows.iter().all(|&(_, hit)| !hit),
             "a seeded-only script has no hits: {rows:?}"

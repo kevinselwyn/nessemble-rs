@@ -63,7 +63,7 @@ mod tests {
     fn font_table_is_128_glyphs() {
         assert_eq!(FONT_CHR.len(), 128 * 0x10);
         assert_eq!(font_glyph(0x41).len(), 0x10);
-        assert!(font_glyph(0x200).is_empty());
+        assert_eq!(font_glyph(0x200), []);
     }
 
     #[test]

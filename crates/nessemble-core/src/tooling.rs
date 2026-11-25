@@ -3587,7 +3587,10 @@ mod tests {
         // shorter one with a stray `-next-line` argument.
         let found = scan("; @nessemble-coverage-ignore-next-line\n");
         assert_eq!(found[0].name, DirectiveName::CoverageIgnoreNextLine);
-        assert!(bad("; @nessemble-coverage-ignore-next-line\n").is_empty());
+        assert_eq!(
+            bad("; @nessemble-coverage-ignore-next-line\n"),
+            [] as [crate::tooling::MalformedDirective; 0]
+        );
     }
 
     #[test]
@@ -3849,7 +3852,7 @@ mod tests {
         let found = scan("; @nessemble-clobbers none\nfoo:\n");
         assert_eq!(found[0].args, DirectiveArgs::Slots(Vec::new()));
         let sig = &sigs("; @nessemble-clobbers none\nfoo:\n")[0];
-        assert!(sig.clobbers.is_empty());
+        assert_eq!(sig.clobbers, [] as [crate::tooling::Slot; 0]);
         assert!(sig.declares_clobbers, "`none` is a declaration");
         // No tag at all is *not* the same claim.
         let undeclared = &sigs("; @nessemble-param A i\nfoo:\n")[0];
@@ -3924,7 +3927,10 @@ mod tests {
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].kind, SignatureProblemKind::Unbound);
         assert_eq!(problems[0].subject, "@nessemble-clobbers");
-        assert!(sigs("; @nessemble-clobbers A\n    LDA #$00\nfoo:\n").is_empty());
+        assert_eq!(
+            sigs("; @nessemble-clobbers A\n    LDA #$00\nfoo:\n"),
+            [] as [crate::tooling::Signature; 0]
+        );
     }
 
     #[test]
@@ -3938,8 +3944,14 @@ mod tests {
     fn a_trailing_tag_is_inert() {
         // `own_line: false` — reported by `ineffective-comment-directive`, and
         // never resolved into a signature (nor reported as unbound here).
-        assert!(sigs("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n").is_empty());
-        assert!(sig_problems("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n").is_empty());
+        assert_eq!(
+            sigs("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n"),
+            [] as [crate::tooling::Signature; 0]
+        );
+        assert_eq!(
+            sig_problems("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n"),
+            [] as [crate::tooling::SignatureProblem; 0]
+        );
     }
 
     #[test]
@@ -3962,8 +3974,9 @@ mod tests {
         let sig = &sigs("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n")[0];
         assert_eq!(sig.params.len(), 1);
         assert_eq!(sig.returns.len(), 1);
-        assert!(
-            sig_problems("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n").is_empty()
+        assert_eq!(
+            sig_problems("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n"),
+            [] as [crate::tooling::SignatureProblem; 0]
         );
     }
 
@@ -3995,9 +4008,12 @@ mod tests {
     fn prose_and_other_directives_are_left_alone() {
         // `@param` without the namespace is prose; a format hint is not a tag.
         let src = "; @param A not ours\n; @nessemble-format stride=2\n.db $01\n";
-        assert!(sigs(src).is_empty());
-        assert!(sig_problems(src).is_empty());
-        assert!(bad(src).is_empty());
+        assert_eq!(sigs(src), [] as [crate::tooling::Signature; 0]);
+        assert_eq!(
+            sig_problems(src),
+            [] as [crate::tooling::SignatureProblem; 0]
+        );
+        assert_eq!(bad(src), [] as [crate::tooling::MalformedDirective; 0]);
     }
 
     // ── Pass 2: blank line after RTS / RTI ──────────────────────────────────
@@ -4395,17 +4411,29 @@ data:
 
     #[test]
     fn lint_clean_when_comment_is_near() {
-        assert!(lint_default("\n; documents the routine\nmy_label:\n    nop\n", 3).is_empty());
+        assert_eq!(
+            lint_default("\n; documents the routine\nmy_label:\n    nop\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
         // comment after the label, within the window
-        assert!(lint_default("\nmy_label:\n    nop\n; trailing doc\n", 3).is_empty());
+        assert_eq!(
+            lint_default("\nmy_label:\n    nop\n; trailing doc\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
     fn lint_skips_branch_targets_and_anonymous_labels() {
         // internal branch target (label immediately after code)
-        assert!(lint_default("    bne target\ntarget:\n    nop\n", 3).is_empty());
+        assert_eq!(
+            lint_default("    bne target\ntarget:\n    nop\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
         // anonymous labels are never checked
-        assert!(lint_default("\n:\n    nop\n:++\n", 3).is_empty());
+        assert_eq!(
+            lint_default("\n:\n    nop\n:++\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4441,7 +4469,10 @@ data:
             window: 3,
             ignore: &no_ignore,
         };
-        assert!(lint("\nmy_label:\n    nop\n", &opts).is_empty());
+        assert_eq!(
+            lint("\nmy_label:\n    nop\n", &opts),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     // ── Directive rules ─────────────────────────────────────────────────────
@@ -4489,7 +4520,10 @@ data:
         assert_eq!(findings[0].rule, RuleId::DeprecatedCommentDirective);
         assert!(findings[0].message.contains("@nessemble-format"));
 
-        assert!(lint_directives("; @nessemble-format stride=2\n.db $01, $02\n").is_empty());
+        assert_eq!(
+            lint_directives("; @nessemble-format stride=2\n.db $01, $02\n"),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4506,8 +4540,9 @@ data:
         assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
         assert!(findings[0].message.contains("no following line"));
         // A comment between the directive and its target is skipped, not fatal.
-        assert!(
-            lint_directives("; @nessemble-coverage-ignore-next-line\n; why\n    nop\n").is_empty()
+        assert_eq!(
+            lint_directives("; @nessemble-coverage-ignore-next-line\n; why\n    nop\n"),
+            [] as [crate::tooling::Finding; 0]
         );
     }
 
@@ -4517,8 +4552,14 @@ data:
         assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
         assert!(findings[0].message.contains("data line"));
         // `.color` counts as data, as does a blank line before the run.
-        assert!(lint_directives("; @nessemble-format stride=2\n.color $0F\n").is_empty());
-        assert!(lint_directives("; @nessemble-format stride=2\n\n.db $01\n").is_empty());
+        assert_eq!(
+            lint_directives("; @nessemble-format stride=2\n.color $0F\n"),
+            [] as [crate::tooling::Finding; 0]
+        );
+        assert_eq!(
+            lint_directives("; @nessemble-format stride=2\n\n.db $01\n"),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4537,20 +4578,23 @@ data:
     #[test]
     fn lint_never_flags_an_unclosed_ignore_region() {
         // Running to end of file is the documented whole-file opt-out.
-        assert!(
-            lint_directives("; @nessemble-coverage-ignore start\n    nop\n    nop\n").is_empty()
+        assert_eq!(
+            lint_directives("; @nessemble-coverage-ignore start\n    nop\n    nop\n"),
+            [] as [crate::tooling::Finding; 0]
         );
         // …and a balanced pair is clean too.
-        assert!(lint_directives(
-            "; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore end\n"
-        )
-        .is_empty());
+        assert_eq!(
+            lint_directives(
+                "; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore end\n"
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
     fn lint_leaves_ordinary_comments_alone() {
         let src = "; @todo tidy this\n; @param x the value\nmy_label: ; documented\n    nop\n";
-        assert!(lint_directives(src).is_empty());
+        assert_eq!(lint_directives(src), [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -4686,14 +4730,16 @@ data:
 
     #[test]
     fn lint_accepts_a_correct_clobber_list() {
-        assert!(lint_routines(
-            "; @nessemble-clobbers A, X\n\
+        assert_eq!(
+            lint_routines(
+                "; @nessemble-clobbers A, X\n\
              draw:\n\
              \x20   LDA #$00\n\
              \x20   LDX #$10\n\
              \x20   RTS\n",
-        )
-        .is_empty());
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4712,14 +4758,16 @@ data:
     #[test]
     fn lint_counts_a_returned_slot_as_declared() {
         // A `returns` slot is clobbered by definition and need not be repeated.
-        assert!(lint_routines(
-            "; @nessemble-returns A the value\n\
+        assert_eq!(
+            lint_routines(
+                "; @nessemble-returns A the value\n\
              ; @nessemble-clobbers none\n\
              read:\n\
              \x20   LDA #$01\n\
              \x20   RTS\n",
-        )
-        .is_empty());
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4745,13 +4793,15 @@ data:
              \x20   RTS\n",
         );
         assert_eq!(rules_of(&shifts_a), vec![RuleId::UndeclaredClobber]);
-        assert!(lint_routines(
-            "; @nessemble-clobbers none\n\
+        assert_eq!(
+            lint_routines(
+                "; @nessemble-clobbers none\n\
              shift:\n\
              \x20   ASL $00\n\
              \x20   RTS\n",
-        )
-        .is_empty());
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4833,7 +4883,7 @@ data:
                    \n\
                    helper:\n\
                    \x20   RTS\n";
-        assert!(lint_routines(src).is_empty());
+        assert_eq!(lint_routines(src), [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -4916,7 +4966,7 @@ data:
                    loc_8000:\n\
                    \x20   LDX #$00\n\
                    \x20   RTS\n";
-        assert!(lint(src, &opts).is_empty());
+        assert_eq!(lint(src, &opts), [] as [crate::tooling::Finding; 0]);
     }
 
     // ── Lint suppression (`@nessemble-lint-ignore…`) ────────────────────────
@@ -4964,7 +5014,7 @@ data:
                     draw:\n\
                     \x20   LDX #$00\n\
                     \x20   RTS\n";
-        assert!(lint_routines(both).is_empty());
+        assert_eq!(lint_routines(both), [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -5014,7 +5064,7 @@ data:
             findings.iter().all(|f| f.subject == "outside"),
             "only the routine past `end` reports: {findings:?}"
         );
-        assert!(!findings.is_empty());
+        assert_ne!(findings, [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -5234,6 +5284,6 @@ data:
             window: 3,
             ignore: &no_ignore,
         };
-        assert!(lint(src, &opts).is_empty());
+        assert_eq!(lint(src, &opts), [] as [crate::tooling::Finding; 0]);
     }
 }

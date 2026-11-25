@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn an_empty_document_has_no_headers_or_rows() {
         let t = parse_ok("");
-        assert!(t.headers().is_empty());
+        assert_eq!(t.headers(), [] as [String; 0]);
         assert!(t.rows().is_empty());
     }
 

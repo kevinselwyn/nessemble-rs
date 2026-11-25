@@ -557,18 +557,17 @@ fn glob_rec(p: &[u8], s: &[u8]) -> bool {
                         }
                         k += 1;
                     }
-                } else {
-                    let rest = &p[pi + 1..];
-                    let mut k = si;
-                    loop {
-                        if glob_rec(rest, &s[k..]) {
-                            return true;
-                        }
-                        if k >= s.len() || s[k] == b'/' {
-                            return false;
-                        }
-                        k += 1;
+                }
+                let rest = &p[pi + 1..];
+                let mut k = si;
+                loop {
+                    if glob_rec(rest, &s[k..]) {
+                        return true;
                     }
+                    if k >= s.len() || s[k] == b'/' {
+                        return false;
+                    }
+                    k += 1;
                 }
             }
             b'?' => {
