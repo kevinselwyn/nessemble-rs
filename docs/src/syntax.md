@@ -2192,7 +2192,8 @@ anywhere an expression can (`LDA #\i*4`, `.db \i`, `.if \i == 0`). A single
 loop may run at most 4096 iterations, and a nest of loops at most 65536 in
 total.
 
-`.for` and `.endfor` are not case-sensitive and may be indented.
+`.for` and `.endfor` may be indented. Like every other directive, they are
+lowercase: `.FOR` is not recognised.
 
 ### Counting down
 

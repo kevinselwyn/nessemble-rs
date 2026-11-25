@@ -419,14 +419,6 @@ impl Parser {
         if let Some(field) = ines_field(name) {
             return Ok(Pseudo::Ines(field, self.parse_expr()?));
         }
-        // `.for` / `.endfor` are case-insensitive (`plans/016-unrolled-loops.md`
-        // §2); every other directive name is matched exactly, as before.
-        let name = if name.eq_ignore_ascii_case("for") || name.eq_ignore_ascii_case("endfor") {
-            name.to_ascii_lowercase()
-        } else {
-            name.to_string()
-        };
-        let name = name.as_str();
         let p = match name {
             "org" => Pseudo::Org(self.parse_expr()?),
             "phase" => Pseudo::Phase(self.parse_expr()?),

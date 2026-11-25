@@ -68,8 +68,16 @@ fn single_iteration_loop() {
 }
 
 #[test]
-fn directives_are_case_insensitive_and_may_be_indented() {
-    assert_eq!(bytes("  .FOR 1, 2\n    .db \\i\n  .EndFor\n"), vec![1, 2]);
+fn directives_may_be_indented() {
+    assert_eq!(bytes("  .for 1, 2\n    .db \\i\n  .endfor\n"), vec![1, 2]);
+}
+
+#[test]
+fn directives_are_case_sensitive_like_every_other_directive() {
+    // `.FOR` is not `.for`, exactly as `.ORG` is not `.org`: it is an unknown
+    // custom pseudo-op, so the source fails to assemble.
+    let opts = raw();
+    assert!(assemble(".FOR 1, 2\n.db 1\n.ENDFOR\n", &opts).is_err());
 }
 
 #[test]

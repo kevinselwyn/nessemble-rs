@@ -165,9 +165,9 @@ impl Pre<'_> {
                     i = self.handle_directive(&name, toks, i, file_id, depth, raw)?;
                     continue;
                 }
-                if name.eq_ignore_ascii_case("for") {
+                if name == "for" {
                     self.for_depth += 1;
-                } else if name.eq_ignore_ascii_case("endfor") {
+                } else if name == "endfor" {
                     self.for_depth = self.for_depth.saturating_sub(1);
                 }
             }

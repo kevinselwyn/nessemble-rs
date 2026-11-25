@@ -1,6 +1,7 @@
 # nessemble-rs: A Plan for Unrolled Loops (`.for` / `.endfor`)
 
-> Status: **Approved design, not yet built.** No code has been written. Every
+> Status: **Phase 1 shipped**; Phase 2 in progress. Deviations found while
+> building are recorded in [§12](#12-as-built). Every
 > design fork was settled with the maintainer and is recorded in
 > [§11](#11-decisions); those answers are final. The one answer that departs
 > from the first draft is per-iteration label pasting
@@ -63,8 +64,8 @@ assembles exactly as if it had been written:
   ([§11, Q3](#q3-start--end)). Copying a buffer backwards to the PPU, or
   pushing a table onto the stack in reverse, is common enough that making the
   author write `7-\i` is a needless indirection.
-- **`.for` and `.endfor` are case-insensitive** and may be indented, like
-  every other directive.
+- **`.for` and `.endfor` are lowercase** and may be indented, like every other
+  directive (`.FOR` is not recognised, just as `.ORG` is not).
 
 ### 2.1 Nesting
 
@@ -74,7 +75,7 @@ counters of enclosing loops are `\j` (one level out) and `\k` (two levels out):
 ```nessemble
 .for 0, 3          ; row
   .for 0, 7        ; column
-    LDA tiles+\j*8+\i
+    LDA tiles+(\j*8)+\i
     STA PPUDATA
   .endfor
 .endfor
@@ -143,8 +144,8 @@ the body were written out N times in place:
   (`.if \i == 0` to special-case the first iteration). A conditional opened in
   a body must close in the same body ([§6](#6-diagnostics)).
 - **Constant assignment** (`X = …`) — reassigned every iteration, as a constant
-  redefined on consecutive lines already is. `X\i = …` defines one constant per
-  iteration (§2.2).
+  redefined on consecutive lines already is. `SLOT\i = …` defines one constant
+  per iteration (§2.2).
 - **Pasted labels** (`row\i:`), one per iteration (§2.2).
 - **Anonymous labels** (`:` with `:-` / `:+` references) — these already
   resolve to the nearest definition, so a body with an internal branch works
@@ -155,7 +156,8 @@ the body were written out N times in place:
     LDA status+\i
     BEQ :+
     JSR handle
-  : NOP
+  :
+    NOP
   .endfor
   ```
 
@@ -438,3 +440,37 @@ the body". The other candidate, `.loop` / `.endloop`, was rejected because on th
 directive never emits ([§10](#10-non-goals)). No aliases from other assemblers
 (`.rept` / `.endr`, `.repeat` / `.endrepeat`) are accepted. One spelling
 keeps the directive catalog, completion and docs unambiguous.
+
+## 12. As built
+
+Deviations found while building, recorded so the sections above stay readable:
+
+- **Expression precedence.** Expressions have one precedence level and are
+  right-associative, so `tiles+\j*8+\i` parses as `tiles+(\j*(8+\i))`. The
+  §2.1 example and the docs use `tiles+(\j*8)+\i`, and the docs explain why.
+- **`: NOP` on one line drops the `NOP`.** The parser already skips the rest of
+  a line after an anonymous `:`, so §3's example puts `:` on its own line. That
+  behavior is unchanged.
+- **Directives are case-sensitive** (§2). The draft wrongly assumed they were
+  case-insensitive. `.for`/`.endfor` follow the rest and are lowercase only.
+- **Single-letter names can't be pasted onto.** One-letter words lex as
+  registers, and one-letter symbols don't exist, so `X\i` is not a name;
+  `SLOT\i` is.
+- **Plain constants in a body.** Constants are only written on pass 1, so pass
+  2 reads a reassigned constant's final value. A body therefore behaves
+  exactly like its hand-unrolled source (a test pins this). Per-iteration
+  values need pasted names.
+- **Bounds are fixed on pass 1 by replay** (§5.1). Pass 1 logs each executed
+  `.for`'s file, line and bounds in order, and pass 2 reuses the logged
+  bounds instead of re-evaluating. This prevents a constant reassigned after
+  the loop from changing the count between passes. When the log doesn't line
+  up (a `.if` took another branch), pass 2 falls back to evaluating.
+- **The nest limit** (§5.2) is the product of the iteration counts of every
+  open loop, checked at each `.for` and reported on the inner `.for`.
+- **The iteration suffix** (§6) names every open counter, innermost first
+  ("`\i` = 3, `\j` = 0"), so a failure in a nested loop is identifiable.
+- **Nesting deeper than three** is allowed. Only the three innermost counters
+  can be referenced.
+- **`.macrodef` in a body** is a fatal preprocessor error (one diagnostic),
+  because only the preprocessor sees `.macrodef`.
+- **There is no unary minus**, so a negative bound is written `0-1`.
