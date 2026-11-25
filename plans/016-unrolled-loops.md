@@ -1,11 +1,11 @@
 # nessemble-rs: A Plan for Unrolled Loops (`.for` / `.endfor`)
 
-> Status: **Draft — under review.** No code has been written. The design forks
-> that need the maintainer's call are collected in
-> [§11](#11-open-questions); each has a recommended answer that the rest of this
-> document assumes, so the plan reads as one coherent proposal. Once those are
-> settled, §11 becomes "Decisions" and its answers are final. Settled so far:
-> Q8 (the name is `.for` / `.endfor`).
+> Status: **Approved design, not yet built.** No code has been written. Every
+> design fork was settled with the maintainer and is recorded in
+> [§11](#11-decisions); those answers are final. The one answer that departs
+> from the first draft is per-iteration label pasting
+> ([§2.2](#22-per-iteration-names)), so a body may define a named label
+> once per iteration.
 
 ---
 
@@ -80,10 +80,58 @@ counters of enclosing loops are `\j` (one level out) and `\k` (two levels out):
 .endfor
 ```
 
-This is [§11, Q1](#q1-how-nested-loops-name-their-counters) — the biggest open
-question, since the alternatives (named counters) change the syntax of `.for`
-itself. A `\j`/`\k` with no loop that many levels out is an error
-([§6](#6-diagnostics)).
+Three levels is the ceiling, which covers every real unrolling case (a 2D
+nametable region is two levels). A `\j`/`\k` with no loop that many levels out
+is an error ([§6](#6-diagnostics)). See
+[§11, Q1](#q1-how-nested-loops-name-their-counters) for the named-counter
+alternative that was rejected.
+
+### 2.2 Per-iteration names
+
+A symbol name directly followed by a counter is **pasted**: the counter's
+current value is appended to the name in decimal. This works for label
+definitions, constant definitions and references alike:
+
+```nessemble
+.for 0, 2
+row\i:              ; defines row0, row1, row2
+  LDA #\i
+  STA $0200+\i
+  RTS
+.endfor
+
+jump_table:
+.for 0, 2
+  .dw row\i         ; .dw row0, row1, row2
+.endfor
+
+  JSR row1          ; outside the loop, the names are ordinary symbols
+```
+
+- **The rule matches `label\@`.** The preprocessor already treats a name
+  followed by `\@` as one pasted name. Tokens carry no column, so it can't tell
+  `row\i` from `row \i`; neither can this rule. That costs nothing: `row \i`
+  (a name, then a bare counter with no operator between them) is not a valid
+  expression anyway.
+- **A name may paste one counter, as a suffix.** `cell\j\i` is an error: with
+  `\j` = 1 and `\i` = 12 it would be `cell112`, the same as `\j` = 11 and
+  `\i` = 2. Pasting in the middle of a name (`row\i_end`) is not supported in
+  v1 ([§10](#10-non-goals)). A 2D table can still be named: the inner loop
+  pastes `\i` onto a constant base set by the outer loop, or the table uses
+  one flat loop.
+- **A negative counter can't be pasted.** `row-1` isn't a name, so pasting a
+  negative value is an error naming the iteration.
+- **A pasted name that already exists is an error.** Ordinary redefinition is
+  silent today (§3), but a pasted `row2` colliding with a hand-written `row2:`,
+  or with another loop's `row\i`, is almost certainly a mistake. Pasted names
+  are checked on pass 1 and an existing name is reported.
+- **Pasted symbols are flagged `from_macro`**, like a macro's `label\@`. The
+  name `row2` does not appear in the file's text, so the symbol exports that
+  leave out macro labels leave these out too.
+- **`\i` in a macro body pastes too.** A macro that defines `entry\i:` and is
+  invoked inside a `.for` body gets one label per iteration. This is how a
+  macro that needs a label can be used in a loop, since its `\@` label would
+  collide.
 
 ## 3. What a loop body may contain
 
@@ -95,7 +143,9 @@ the body were written out N times in place:
   (`.if \i == 0` to special-case the first iteration). A conditional opened in
   a body must close in the same body ([§6](#6-diagnostics)).
 - **Constant assignment** (`X = …`) — reassigned every iteration, as a constant
-  redefined on consecutive lines already is.
+  redefined on consecutive lines already is. `X\i = …` defines one constant per
+  iteration (§2.2).
+- **Pasted labels** (`row\i:`), one per iteration (§2.2).
 - **Anonymous labels** (`:` with `:-` / `:+` references) — these already
   resolve to the nearest definition, so a body with an internal branch works
   in every iteration unchanged:
@@ -119,14 +169,15 @@ the body were written out N times in place:
 
 What it may **not** contain:
 
-- **Named labels.** A named label inside a body would be defined once per
-  iteration. Redefining a label is *not* an error today — `add_symbol`
-  silently overwrites it — so every reference would quietly resolve to the
-  last iteration's address. That is a wrong-code bug with no diagnostic, so a
-  named label in a body is an error that says *why* ("label `x` is defined
-  inside a `.for` body, so it would be defined once per iteration"). The same
-  applies to a `label\@` from a macro expanded inside a
-  loop: the preprocessor gave it one unique suffix, not one per iteration
+- **Named labels without a counter.** A plain `x:` inside a body would be
+  defined once per iteration. Redefining a label is *not* an error today
+  (`add_symbol` silently overwrites it), so every reference would quietly
+  resolve to the last iteration's address. That is a wrong-code bug with no
+  diagnostic, so a plain named label in a body is an error that says *why* and
+  points at the fix ("label `x` is defined inside a `.for` body, so it would be
+  defined once per iteration; write `x\i:` for one label per iteration"). The
+  same applies to a `label\@` from a macro expanded inside a loop: the
+  preprocessor gave it one unique suffix, not one per iteration
   ([§11, Q4](#q4-named-labels-in-a-loop-body)).
 - **`.macrodef` / `.endm`.** A definition inside a loop is defined once by the
   preprocessor regardless of the loop, which is surprising enough to reject
@@ -155,22 +206,28 @@ so no tokens are duplicated and every executed line is still the real line in
 the real file.
 
 **This plan takes the assembler route** ([§11, Q5](#q5-assembler-or-preprocessor)).
+It also makes pasting (§2.2) simple: the name is built from the counter's
+current value as each line executes, not from copied tokens.
 Concretely:
 
 - **Lexer** (`lexer.rs`): `\i`, `\j`, `\k` lex as a new `Tok::LoopIndex(depth)`
   (0, 1, 2) alongside the existing `\N` / `\#` / `\@` rules. `.for` and
   `.endfor` lex as `Tok::Pseudo` with no lexer change.
-- **AST** (`ast.rs`): `Expr::LoopIndex(u8)`; `Pseudo::For(Expr, Expr)` and
-  `Pseudo::EndFor`.
+- **AST** (`ast.rs`): `Expr::LoopIndex(u8)`; `Expr::PastedSymbol(String, u8)`
+  for a pasted reference; a pasted form of `Stmt::Label` and
+  `Stmt::Constant` (a `Name` type, `Plain(String)` or `Pasted(String, u8)`,
+  shared by both); `Pseudo::For(Expr, Expr)` and `Pseudo::EndFor`.
 - **Parser** (`parse.rs`): parse the two pseudo-ops; parse `Tok::LoopIndex` as a
-  primary expression. Matching `.for`/`.endfor` and checking what a body may
+  primary expression, and a `Tok::Text` followed by `Tok::LoopIndex` as a
+  pasted name (§2.2) wherever a symbol name may appear. Matching `.for`/`.endfor` and checking what a body may
   contain (§3) is done in one pass over the parsed lines, before assembly, so
   an unterminated loop is reported once at parse time and not once per pass.
 - **Assembler**: `run_pass` becomes an index-based walk. A `loop_stack` holds
   one frame per open loop — `{ body_start, current, end, step }`. `.for`
   evaluates its bounds and pushes a frame; `.endfor` either advances
   `current` and jumps to `body_start`, or pops. `Expr::LoopIndex(d)` reads
-  `loop_stack[len - 1 - d].current`. Inside a suppressed `.if`, `.for` pushes
+  `loop_stack[len - 1 - d].current`, and a pasted name formats that value
+  onto its base before the symbol table is consulted. Inside a suppressed `.if`, `.for` pushes
   a zero-iteration frame so its `.endfor` still pairs up.
 - **`exec_emitted_source`** (a custom pseudo-op's `emit_source`): `.for` in
   emitted source just works, since it is executed by the same machinery. A
@@ -208,7 +265,7 @@ bytes with room to spare), and a nested loop's total iterations are capped at
   an extension over the reference tool, which has no equivalent; parity tests
   are unaffected.
 - **Symbols.** Body lines are the file's own text, so constants defined in a
-  body are *not* flagged `from_macro`.
+  body are *not* flagged `from_macro`. Pasted names are the exception (§2.2).
 - **Coverage (plan 007).** Each executed body line maps back to its real file
   and line, so CDL-based coverage reports a body line as covered when any
   iteration's bytes ran — no special handling.
@@ -226,7 +283,10 @@ the line named:
 | A bound that is not known on pass 1 (§5.1) | the `.for` |
 | More than 4096 iterations, or 65536 nested (§5.2) | the `.for` |
 | `\i` outside any loop; `\j` / `\k` with too few enclosing loops | the use |
-| A named label inside a body (§3) | the label |
+| A plain named label inside a body (§3) | the label |
+| A name pasting more than one counter (`cell\j\i`) (§2.2) | the use |
+| Pasting a negative counter value (§2.2) | the use, naming the iteration |
+| A pasted name that is already defined (§2.2) | the definition |
 | `.macrodef` inside a body (§3) | the `.macrodef` |
 | `.if` opened in a body and closed outside it (or vice versa) | the `.endfor` |
 
@@ -256,7 +316,18 @@ which iteration broke ([§11, Q7](#q7-per-iteration-diagnostics)).
   directive the verifier does not model — `.for` is deliberately *not* added
   to `is_transparent_directive`, since it emits code.
 - **Linting** (plan 008): no new rule in v1. Existing rules see the body once
-  (they work on source text), which is the right granularity.
+  (they work on source text), which is the right granularity. Rules that read
+  label definitions from text (e.g. `require-block-comment`'s `block_label`)
+  must read `row\i:` as one pasted definition, not as a label `row` followed
+  by junk. Phase 2 tests this.
+- **Pasted names in the LSP**: go-to-definition and hover on `row1` (outside
+  the loop) resolve to the `row\i:` line. A text search for `row1:` finds
+  nothing, and the assembler's `Symbol` records no definition site. So the
+  language server falls back by text: a reference `<base><digits>` with no
+  plain definition resolves to a pasted definition `<base>\i:` (or `\j`/`\k`)
+  with the same base. That needs no change to the assembler. Hover names the
+  loop and, when its bounds are literals, whether the index is in range.
+  Completion offers `<base>\i` once, not each pasted name.
 - **Editors** (`editors/vscode`): no grammar change — highlighting comes from
   the LSP's semantic tokens.
 - **WASM / web playground**: no change beyond rebuilding; the assembler is
@@ -267,7 +338,8 @@ which iteration broke ([§11, Q7](#q7-per-iteration-diagnostics)).
 `docs/src/syntax.md` gains a `## Loops` section after `## Macros`: the example
 from §1, its hex output, and a `<nessemble-assembler>` "Try it" block, then
 short subsections on counting down, nesting with `\j`, anonymous labels in a
-body, and why named labels are rejected.
+body, and pasted names (`row\i:`, with the jump-table example from §2.2 and
+why a plain label is rejected).
 
 ## 9. Phased plan
 
@@ -279,6 +351,10 @@ the diagnostics in §6; the `DIRECTIVES` entry; the docs section. Tests in
 - Counting down; a single-iteration loop (`.for 3, 3`); nesting with `\j`;
   bounds from constants; `\i` in `.db`, immediate operands and `.if`.
 - Anonymous labels and branches inside a body.
+- Pasted labels and constants: the §2.2 jump table assembles to the same bytes
+  as a hand-written one, a pasted name is usable outside the loop, `\i` pastes
+  inside a macro body invoked in a loop, and pasted symbols are flagged
+  `from_macro`.
 - A `.macro` and an `.include` inside a body; `\i` as a macro argument.
 - A custom pseudo-op inside a body sees a fresh argument each iteration.
 - Every diagnostic in §6, including de-duplication of a per-iteration error.
@@ -287,7 +363,8 @@ the diagnostics in §6; the `DIRECTIVES` entry; the docs section. Tests in
 Changeset: `minor`.
 
 **Phase 2 — tooling.** The formatter test, LSP folding / semantic tokens / hover,
-and the routine-verifier behavior from §7, with their tests. Changeset:
+go-to-definition and completion for pasted names, lint rules reading pasted
+definitions, and the routine-verifier behavior from §7, with their tests. Changeset:
 `minor` (new editor features).
 
 ## 10. Non-goals
@@ -296,69 +373,67 @@ and the routine-verifier behavior from §7, with their tests. Changeset:
   revisit if real code finds that awkward.
 - **Iterating over a list** (`.for x in 1, 4, 9`). That is a table lookup,
   which `.db` plus `LDA table+\i` already expresses.
-- **Per-iteration named labels** (something like `row\i:` producing `row0`,
-  `row1`, …). It needs a token-pasting rule the expression-level `\i` does not
-  have; out of scope unless Q4 decides otherwise.
+- **More general pasting.** Pasting in the middle of a name (`row\i_end`),
+  pasting several counters (`cell\j\i`), and pasting a computed value
+  (`row\(\i*2)`) are all out of v1 (§2.2). Each needs a rule for where the
+  pasted part ends; revisit if real code needs it.
 - **Runtime loops.** `.for` only ever unrolls; it never emits a counter and a
   branch.
 
-## 11. Open questions
+## 11. Decisions
 
-Each question lists the option this draft assumes first.
+Each question was settled with the maintainer. The chosen option is first and
+bold.
 
 ### Q1. How nested loops name their counters
 
-- **(a) `\i` innermost, `\j` / `\k` outward** (assumed). Short, matches the
-  request's `\i`, but the meaning of `\i` shifts when a loop is wrapped in
-  another one, and three levels is a hard ceiling.
-- (b) Named counters: `.for row, 0, 3` with the counter spelled `\row`. Never
-  ambiguous, any depth — but a three-argument form, and the request's
-  two-argument example would need a default name (`\i`).
-- (c) No access to outer counters: `\i` is always innermost, and an outer
-  counter must be copied into a constant (`ROW = \i`) before the inner loop.
+- **(a) `\i` innermost, `\j` / `\k` outward.** Short, and matches the
+  original `\i`. The trade-offs accepted: the meaning of `\i` shifts when a
+  loop is wrapped in another one, and three levels is a hard ceiling.
+- (b) Named counters (`.for row, 0, 3` with `\row`). Rejected: a
+  three-argument form, for depth nobody needs.
+- (c) No access to outer counters. Rejected: 2D nametable copies want `\j`.
 
 ### Q2. Inclusive end bound
 
-- **(a) Inclusive** (assumed), matching the example: `.for 0, 2` runs 3 times.
-- (b) Exclusive (`.for 0, 3` runs 3 times), like a Rust range.
-- (c) A count instead of an end: `.for 3` runs `\i` = 0…2, with the two-bound
-  form also accepted.
+- **(a) Inclusive**, matching the original example: `.for 0, 2` runs 3 times.
+- (b) Exclusive, like a Rust range. Rejected.
+- (c) A count form (`.for 3`) as well. Rejected: two spellings of one thing.
 
 ### Q3. `START > END`
 
-- **(a) Counts down** (assumed).
-- (b) Runs zero times.
-- (c) Is an error.
+- **(a) Counts down.**
+- (b) Runs zero times. Rejected.
+- (c) Is an error. Rejected.
 
 ### Q4. Named labels in a loop body
 
-- **(a) An error** explaining why (assumed).
-- (b) Add per-iteration label pasting so `row\i:` defines `row0`, `row1`, ….
-  Useful for jump tables built from a loop, but a new token-pasting rule.
+- **(b) Per-iteration pasting**: `row\i:` defines `row0`, `row1`, …
+  ([§2.2](#22-per-iteration-names)). Chosen over the draft's
+  recommendation because jump tables and per-entry handlers built from a loop
+  are real NES use. A plain named label in a body is still an error (§3).
+- (a) Reject all named labels in a body. Rejected.
 
 ### Q5. Assembler or preprocessor
 
-- **(a) Assembler** (assumed) — bounds may use constants defined above the loop.
-- (b) Preprocessor — a smaller change, reusing the macro-expansion machinery,
-  but bounds must be integer literals.
+- **(a) Assembler**, so bounds may use constants defined above the loop.
+- (b) Preprocessor. Rejected: bounds would have to be integer literals.
 
 ### Q6. The iteration limit
 
-- **(a) 4096 per loop, 65536 total for a nest** (assumed).
-- (b) A different limit, or a configurable one in `nessemble.toml`.
-- (c) No limit — rely on bank-overflow errors.
+- **(a) 4096 per loop, 65536 total for a nest.**
+- (b) Configurable in `nessemble.toml`. Rejected for v1.
+- (c) No limit. Rejected.
 
 ### Q7. Per-iteration diagnostics
 
-- **(a) One diagnostic per line, naming the first failing iteration's `\i`**
-  (assumed).
-- (b) One diagnostic per failing iteration.
+- **(a) One diagnostic per line, naming the first failing iteration's `\i`.**
+- (b) One diagnostic per failing iteration. Rejected.
 
 ### Q8. The directive's name — **settled: `.for` / `.endfor`**
 
 The name says what the directive does: "for `\i` from `START` to `END`, emit
-the body". It also fits named counters if Q1(b) is chosen (`.for row, 0, 3`).
-The other candidate, `.loop` / `.endloop`, was rejected because on the 6502
+the body". The other candidate, `.loop` / `.endloop`, was rejected because on the 6502
 "loop" usually means a runtime loop (a counter and a `BNE`), which this
 directive never emits ([§10](#10-non-goals)). No aliases from other assemblers
 (`.rept` / `.endr`, `.repeat` / `.endrepeat`) are accepted. One spelling
