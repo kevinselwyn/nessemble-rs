@@ -299,11 +299,13 @@ Read more about 6502 addressing modes
 | [.dw](#dw)             | Define 16-bit word(s)                                                               |
 | [.else](#else)         | Else condition of an [`.if`](#if)/[`.ifdef`](#ifdef)/[`.ifndef`](#ifndef) statement |
 | [.endenum](#endenum)   | End [`.enum`](#enum)                                                                |
+| [.endfor](#loops)      | End a [`.for`](#loops) block                                                        |
 | [.endif](#endif)       | End [`.if`](#if)/[`.ifdef`](#ifdef)/[`.ifndef`](#ifndef) statement                  |
 | [.endm](#endm)         | End [`.macrodef`](#macrodef)                                                        |
 | [.enum](#enum)         | Start enumerated variable declarations                                              |
 | [.fill](#fill)         | Fill with bytes                                                                     |
 | [.font](#font)         | Generate font character tile                                                        |
+| [.for](#loops)         | Repeat a block, unrolled                                                            |
 | [.hibytes](#hibytes)   | Output only the high byte of 16-bit word(s)                                         |
 | [.if](#if)             | Test if condition                                                                   |
 | [.ifdef](#ifdef)       | Test if variable is defined                                                         |
@@ -2138,3 +2140,191 @@ A `\@`-uniquified label (such as `label_\@` above) is a real label — it lands 
 the symbol table with a distinct name per invocation. To keep list files (`-l`)
 readable, these macro-created labels are **omitted from the list by default**;
 pass [`--mlist`](usage.md#mlist) to include them.
+
+## Loops
+
+`.for START, END` … `.endfor` repeats a block of code, unrolled: the body is
+assembled once for each value of a counter, which is available inside the body
+as `\i`. Unrolling costs bytes but saves the counter and the branch of a
+runtime loop, which matters for time-critical code such as writing to the PPU
+during vblank.
+
+Example:
+
+```nessemble
+PPUDATA = $2007
+src_label = $0300
+
+.for 0, 2
+    LDA src_label+\i
+    STA PPUDATA
+.endfor
+```
+
+Output:
+
+```text
+00000000  ad 00 03 8d 07 20 ad 01  03 8d 07 20 ad 02 03 8d  |..... ..... ....|
+00000010  07 20                                             |. |
+00000012
+```
+
+This assembles exactly as if the body had been written out three times, with
+`\i` replaced by `0`, `1` and `2`.
+
+Try it:
+
+<nessemble-assembler>
+PPUDATA = $2007
+src_label = $0300
+
+.for 0, 2
+    LDA src_label+\i
+    STA PPUDATA
+.endfor
+</nessemble-assembler>
+
+Both bounds are **inclusive** expressions: `.for 0, 2` runs three times. They
+may use constants and labels defined *above* the loop (`.for 0, TABLE_LEN-1`),
+but not a symbol defined later: the number of iterations decides how many bytes
+the loop emits, so it has to be known on the first pass. `\i` can be used
+anywhere an expression can (`LDA #\i*4`, `.db \i`, `.if \i == 0`). A single
+loop may run at most 4096 iterations, and a nest of loops at most 65536 in
+total.
+
+`.for` and `.endfor` may be indented. Like every other directive, they are
+lowercase: `.FOR` is not recognised.
+
+### Counting down
+
+When `START` is greater than `END` the counter counts down.
+
+Example:
+
+```nessemble
+.for 7, 4
+    .db \i
+.endfor
+```
+
+Output:
+
+```text
+00000000  07 06 05 04                                       |....|
+00000004
+```
+
+### Nesting
+
+Loops nest. Inside the innermost loop `\i` is its own counter, `\j` is the
+counter of the loop around it, and `\k` the one around that.
+
+Example:
+
+```nessemble
+PPUDATA = $2007
+tiles = $0400
+
+.for 0, 1
+    .for 0, 2
+        LDA tiles+(\j*8)+\i
+        STA PPUDATA
+    .endfor
+.endfor
+```
+
+Output:
+
+```text
+00000000  ad 00 04 8d 07 20 ad 01  04 8d 07 20 ad 02 04 8d  |..... ..... ....|
+00000010  07 20 ad 08 04 8d 07 20  ad 09 04 8d 07 20 ad 0a  |. ..... ..... ..|
+00000020  04 8d 07 20                                       |... |
+00000024
+```
+
+The assembler evaluates expressions strictly right to left with no operator
+precedence, so the outer counter is parenthesised: `(\j*8)+\i`.
+
+Using `\j` or `\k` without that many enclosing loops, or `\i` outside any loop,
+is an error.
+
+### Labels in a body
+
+An [anonymous label](#temporary) and the branches to it work unchanged inside a
+body, since each reference resolves to the nearest definition.
+
+Example:
+
+```nessemble
+.for 0, 1
+    LDA $2002
+    BPL :+
+    NOP
+:
+    STA $2005
+.endfor
+```
+
+Output:
+
+```text
+00000000  ad 02 20 10 01 ea 8d 05  20 ad 02 20 10 01 ea 8d  |.. ..... .. ....|
+00000010  05 20                                             |. |
+00000012
+```
+
+A **named** label in a body would be defined once per iteration, with every
+reference quietly resolving to the last copy, so it is an error. Paste the
+counter onto the name instead.
+
+### Pasted names
+
+A name written directly before a counter has the counter's value (in decimal)
+pasted onto the end, so a body can define one label or constant per iteration:
+`row\i:` defines `row0`, `row1` and `row2`. The same works for a constant
+(`slot\i = \i*4`) and for a reference (`.dw row\i`). Once defined, the pasted
+names are ordinary symbols that can be used anywhere after (or before) the loop.
+
+Example:
+
+```nessemble
+    JSR row1
+    RTS
+
+jump_table:
+.for 0, 2
+    .dw row\i
+.endfor
+
+.for 0, 2
+row\i:
+    LDA #\i
+    RTS
+.endfor
+```
+
+Output:
+
+```text
+00000000  20 0d 00 60 0a 00 0d 00  10 00 a9 00 60 a9 01 60  | ..`........`..`|
+00000010  a9 02 60                                          |..`|
+00000013
+```
+
+A name may paste only one counter, as its suffix (`cell\j\i` and `row\i_end`
+are errors), the counter must not be negative, and a pasted name that is already
+defined is an error. Like the labels of a [macro](#macros), pasted symbols are
+omitted from the list file (`-l`) unless [`--mlist`](usage.md#mlist) is given.
+
+### Macros, includes and errors
+
+A `.macro` invocation or `.include` in a body is expanded once and then runs on
+every iteration, and `\i` may be passed as a macro argument
+(`.macro SET_PPU, \i`). Inside a macro body `\i` refers to whichever loop the
+macro is invoked in, so a macro can define a pasted label (`entry\i:`). A
+`.macrodef` in a body is an error, and a conditional (`.if` … `.endif`) opened
+in a body must be closed in it.
+
+An error on a body line is reported once rather than once per iteration, with
+the first failing counter value added to the message, for example `Branch
+address out of range (in `.for` iteration `\i` = 5)`.

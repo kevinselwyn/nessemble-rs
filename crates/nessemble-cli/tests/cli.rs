@@ -694,7 +694,7 @@ fn format_check_exits_nonzero_and_lists_unformatted() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert!(String::from_utf8(out.stdout).unwrap().is_empty());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -732,7 +732,7 @@ fn format_write_edits_in_place_and_reports_changed_files() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert!(String::from_utf8(out.stdout).unwrap().is_empty());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -264,7 +264,7 @@ mod tests {
         let r = assemble("  notareal\n", "");
         assert!(!r.ok());
         assert_eq!(r.errors().len(), 1);
-        assert!(r.rom().is_empty());
+        assert_eq!(r.rom(), Vec::<u8>::new());
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
             r#"{"pseudo":{"ease":true}}"#,
         );
         assert!(r.ok(), "errors: {:?}", r.errors());
-        assert!(!r.rom().is_empty());
+        assert_ne!(r.rom(), Vec::<u8>::new());
     }
 
     #[test]

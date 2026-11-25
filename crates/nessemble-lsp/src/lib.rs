@@ -500,7 +500,21 @@ impl Server {
         }
         let mut items = mnemonic_items();
         items.extend(directive_items());
-        items.extend(doc.symbols.iter().map(|s| symbol_item(&s.name)));
+        // A `.for` body's `row\i:` defines row0, row1, …: offer the pasted
+        // base once as `row\i`, not every name the assembler made from it.
+        let defs = definitions(&doc.text);
+        items.extend(
+            doc.symbols
+                .iter()
+                .filter(|s| pasted_match(&defs, &s.name).is_none())
+                .map(|s| symbol_item(&s.name)),
+        );
+        let mut seen = HashSet::new();
+        items.extend(
+            defs.iter()
+                .filter(|d| d.name.contains('\\') && seen.insert(d.name.as_str()))
+                .map(|d| pasted_item(&d.name)),
+        );
         items.extend(macro_names(&doc.text).iter().map(|name| macro_item(name)));
         items
     }
@@ -624,13 +638,19 @@ impl Server {
     /// The definition of `name` for the document at `uri`: the local definition
     /// if present, else the first one found in the project's include closure.
     fn definition_location(&self, uri: &Url, name: &str) -> Option<Location> {
+        // A reference with no plain definition (`row1`) may come from a `.for`
+        // body's pasted `row\i:`; that is only the fallback, after every plain
+        // definition in the project has been tried.
+        let mut pasted: Option<Location> = None;
         if let Some(doc) = self.documents.get(uri) {
-            if let Some(def) = definitions(&doc.text).into_iter().find(|d| d.name == name) {
+            let defs = definitions(&doc.text);
+            if let Some(def) = defs.iter().find(|d| d.name == name) {
                 return Some(Location::new(uri.clone(), def.range));
             }
+            pasted = pasted_match(&defs, name).map(|(d, _)| Location::new(uri.clone(), d.range));
         }
         if self.workspace_roots.is_empty() {
-            return None;
+            return pasted;
         }
 
         // Search the include closure of the roots that contain this file.
@@ -662,13 +682,18 @@ impl Server {
             let Some(text) = read(&path) else {
                 continue;
             };
-            if let Some(def) = definitions(&text).into_iter().find(|d| d.name == name) {
-                if let Ok(url) = Url::from_file_path(&path) {
-                    return Some(Location::new(url, def.range));
-                }
+            let defs = definitions(&text);
+            let Ok(url) = Url::from_file_path(&path) else {
+                continue;
+            };
+            if let Some(def) = defs.iter().find(|d| d.name == name) {
+                return Some(Location::new(url, def.range));
+            }
+            if pasted.is_none() {
+                pasted = pasted_match(&defs, name).map(|(d, _)| Location::new(url, d.range));
             }
         }
-        None
+        pasted
     }
 
     /// All references to the symbol under `pos` in the document at `uri`: every
@@ -726,6 +751,16 @@ impl Server {
         if let Some(hover) = color_hover(&doc.text, pos, &doc.symbols) {
             return Some(hover);
         }
+        // A `.for` counter says which loop it binds to.
+        if let Some((depth, letter, range)) = loop_counter_at(&doc.text, pos) {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: loop_counter_hover(&doc.text, pos.line, depth, letter),
+                }),
+                range: Some(range),
+            });
+        }
         let token = token_at(&doc.text, pos)?;
         let markdown = match token.kind {
             // A custom pseudo-op directive shows the script it maps to (and
@@ -743,12 +778,20 @@ impl Server {
                     .find(|arg| arg.token_range == token.range && !arg.path.is_empty())?;
                 path_arg_hover(root.as_deref(), &base, &arg)
             }
-            LexKind::Ident => ident_hover(
-                token.text,
-                &doc.text,
-                &doc.symbols,
-                self.signature_for(uri, token.text).as_ref(),
-            )?,
+            LexKind::Ident => {
+                let plain = ident_hover(
+                    token.text,
+                    &doc.text,
+                    &doc.symbols,
+                    self.signature_for(uri, token.text).as_ref(),
+                );
+                // A name a `.for` body pastes (`row1` from `row\i:`) also says
+                // where it comes from.
+                match (plain, pasted_hover(&doc.text, token.text)) {
+                    (Some(md), Some(pasted)) => format!("{md}\n\n{pasted}"),
+                    (md, pasted) => md.or(pasted)?,
+                }
+            }
             LexKind::Comment => return comment_directive_hover(&doc.text, pos),
             _ => return None,
         };
@@ -1630,7 +1673,8 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
         .map(|d| d.line)
         .chain(malformed.iter().map(|m| m.line))
         .collect();
-    for lx in tooling::lex(text) {
+    let lexemes = tooling::lex(text);
+    for (idx, lx) in lexemes.iter().enumerate() {
         let piece = &text[lx.start..lx.end];
         match lx.kind {
             LexKind::Newline => {
@@ -1652,7 +1696,13 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
                     // wasm/editor highlighter (`tooling::classify` +
                     // `TokenClass::wire_id`); the LSP keeps its own delta encoding
                     // and maps that id through `TOKEN_TYPES`.
-                    token_type: tooling::classify(kind, piece).wire_id(),
+                    token_type: if tooling::is_loop_counter(text, &lexemes, idx) {
+                        // The `i` of a `.for` counter `\i` reads like the `1` of `\1`.
+                        tooling::TokenClass::Number
+                    } else {
+                        tooling::classify(kind, piece)
+                    }
+                    .wire_id(),
                     // A directive comment keeps the `COMMENT` type and is
                     // distinguished by a modifier, so no wire id moves.
                     token_modifiers_bitset: if is_directive_comment {
@@ -1901,9 +1951,31 @@ struct Definition {
     range: Range,
 }
 
+/// How many tokens the symbol name starting at `toks[i]` spans: 1 for a plain
+/// name, 3 for a pasted `.for` name (`row\i`: the identifier, the `\`, and the
+/// counter letter `i`/`j`/`k`, with no gap between them).
+fn name_tokens(toks: &[Located<'_>], i: usize) -> usize {
+    let adjacent = |a: &Located<'_>, b: &Located<'_>| a.range.end == b.range.start;
+    match toks.get(i..i + 3) {
+        Some([name, slash, counter])
+            if name.kind == LexKind::Ident
+                && slash.kind == LexKind::Punct
+                && slash.text == "\\"
+                && counter.kind == LexKind::Ident
+                && matches!(counter.text, "i" | "j" | "k")
+                && adjacent(name, slash)
+                && adjacent(slash, counter) =>
+        {
+            3
+        }
+        _ => 1,
+    }
+}
+
 /// Scan `text` for symbol definitions: a line-initial identifier followed by
 /// `:` is a label, one followed by `=` is a constant, and the identifier after
-/// `.macrodef` is a macro.
+/// `.macrodef` is a macro. A `.for` body's pasted definition (`row\i:` or
+/// `ROW\i =`) is one definition named `row\i`, spanning the whole pasted name.
 fn definitions(text: &str) -> Vec<Definition> {
     let toks = located_lexemes(text);
     let mut defs = Vec::new();
@@ -1923,17 +1995,27 @@ fn definitions(text: &str) -> Vec<Definition> {
                 }
             }
             LexKind::Ident if first_on_line => {
-                if let Some(next) = next_same_line.filter(|n| n.kind == LexKind::Punct) {
+                let n = name_tokens(&toks, i);
+                let after = toks
+                    .get(i + n)
+                    .filter(|a| a.range.start.line == t.range.start.line);
+                if let Some(next) = after.filter(|a| a.kind == LexKind::Punct) {
                     let kind = match next.text {
                         ":" => Some(DefKind::Label),
                         "=" => Some(DefKind::Constant),
                         _ => None,
                     };
                     if let Some(kind) = kind {
+                        let last = &toks[i + n - 1];
+                        let name = if n == 3 {
+                            format!("{}\\{}", t.text, last.text)
+                        } else {
+                            t.text.to_string()
+                        };
                         defs.push(Definition {
-                            name: t.text.to_string(),
+                            name,
                             kind,
-                            range: t.range,
+                            range: Range::new(t.range.start, last.range.end),
                         });
                     }
                 }
@@ -1942,6 +2024,169 @@ fn definitions(text: &str) -> Vec<Definition> {
         }
     }
     defs
+}
+
+/// The pasted definition (`row\i:`, `ROW\j =`) a reference like `row1` resolves
+/// to, with the index (`1`) it would take, when `name` has no plain definition.
+/// This is a text match, as the assembler records no definition site for a
+/// pasted symbol: some `<base><digits>` split of `name` must equal the base of
+/// a pasted definition, with the digits as the decimal the assembler pastes
+/// (no leading zeros).
+fn pasted_match<'a>(defs: &'a [Definition], name: &str) -> Option<(&'a Definition, u64)> {
+    if defs.iter().any(|d| d.name == name) {
+        return None;
+    }
+    let digits = name.bytes().rev().take_while(u8::is_ascii_digit).count();
+    (1..=digits).find_map(|k| {
+        let (base, num) = name.split_at(name.len() - k);
+        if base.is_empty() || (num.len() > 1 && num.starts_with('0')) {
+            return None;
+        }
+        let index = num.parse().ok()?;
+        let def = defs
+            .iter()
+            .find(|d| d.name.rsplit_once('\\').is_some_and(|(b, _)| b == base))?;
+        Some((def, index))
+    })
+}
+
+/// A `.for` block enclosing some line: where it opens and its bounds text.
+struct ForBlock {
+    /// 0-based line of the `.for`.
+    line: u32,
+    /// The text after `.for`, comment removed (`0, 7`).
+    bounds: String,
+}
+
+impl ForBlock {
+    /// The bounds as `(start, end)` when both are plain numeric literals.
+    fn literal_bounds(&self) -> Option<(i64, i64)> {
+        let (a, b) = self.bounds.split_once(',')?;
+        Some((parse_number(a.trim())?, parse_number(b.trim())?))
+    }
+
+    /// `` `.for 0, 7` on line 3 ``.
+    fn describe(&self) -> String {
+        format!("`.for {}` on line {}", self.bounds, self.line + 1)
+    }
+}
+
+/// The `.for` blocks open at `line`, innermost first (so index `0` is what `\i`
+/// binds to, `1` is `\j`, `2` is `\k`). The `.for` line itself is outside its
+/// own loop. A text scan, like the folding ranges.
+fn enclosing_fors(text: &str, line: u32) -> Vec<ForBlock> {
+    let mut stack: Vec<ForBlock> = Vec::new();
+    for (i, raw) in text.lines().enumerate().take(line as usize) {
+        let code = raw.split(';').next().unwrap_or("").trim();
+        match leading_directive(code).as_deref() {
+            Some("for") => stack.push(ForBlock {
+                line: i as u32,
+                bounds: code[".for".len()..].trim().to_string(),
+            }),
+            Some("endfor") => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack.reverse();
+    stack
+}
+
+/// The `.for` counter (`\i`, `\j` or `\k`) under `pos`: its depth (0, 1, 2),
+/// letter and range.
+fn loop_counter_at(text: &str, pos: Position) -> Option<(usize, char, Range)> {
+    let toks = located_lexemes(text);
+    let idx = toks.iter().position(|t| {
+        t.range.start.line == pos.line
+            && pos.character >= t.range.start.character
+            && pos.character <= t.range.end.character
+    })?;
+    // Cursor on the `\` or on the letter: both name the counter.
+    let letter = match toks[idx].kind {
+        LexKind::Punct if toks[idx].text == "\\" => idx + 1,
+        LexKind::Ident => idx,
+        _ => return None,
+    };
+    let (slash, counter) = (toks.get(letter.checked_sub(1)?)?, toks.get(letter)?);
+    let depth = match counter.text {
+        "i" => 0,
+        "j" => 1,
+        "k" => 2,
+        _ => return None,
+    };
+    (slash.kind == LexKind::Punct
+        && slash.text == "\\"
+        && counter.kind == LexKind::Ident
+        && slash.range.end == counter.range.start)
+        .then(|| {
+            let range = Range::new(slash.range.start, counter.range.end);
+            (depth, counter.text.chars().next().unwrap_or('i'), range)
+        })
+}
+
+/// Hover markdown for a `.for` counter at 0-based `line`: which loop it binds to.
+fn loop_counter_hover(text: &str, line: u32, depth: usize, letter: char) -> String {
+    use std::fmt::Write as _;
+    match enclosing_fors(text, line).get(depth) {
+        Some(block) => {
+            let mut md = format!(
+                "**\\{letter}** (`.for` counter) — bound by the {}",
+                block.describe()
+            );
+            if let Some((a, b)) = block.literal_bounds() {
+                let dir = if a > b {
+                    "counting down"
+                } else {
+                    "counting up"
+                };
+                let _ = write!(md, "\n\n`\\{letter}` runs {a} to {b}, {dir}.");
+            }
+            md
+        }
+        None => {
+            format!("**\\{letter}** (`.for` counter) — no enclosing `.for` that many levels out")
+        }
+    }
+}
+
+/// Hover markdown for a reference `name` (like `row1`) with no plain
+/// definition that a pasted definition (`row\i:`) produces: the definition, its
+/// loop, and — when the bounds are literals — whether the index is in range.
+fn pasted_hover(text: &str, name: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    let defs = definitions(text);
+    let (def, index) = pasted_match(&defs, name)?;
+    let letter = def.name.rsplit('\\').next().unwrap_or("i");
+    let depth = match letter {
+        "j" => 1,
+        "k" => 2,
+        _ => 0,
+    };
+    let what = if def.kind == DefKind::Constant {
+        "constant"
+    } else {
+        "label"
+    };
+    let mut md = format!(
+        "**{name}** (pasted {what}) — defined by `{}` on line {}",
+        def.name,
+        def.range.start.line + 1
+    );
+    if let Some(block) = enclosing_fors(text, def.range.start.line).get(depth) {
+        let _ = write!(md, ", in the {}", block.describe());
+        if let Some((a, b)) = block.literal_bounds() {
+            let (lo, hi) = (a.min(b), a.max(b));
+            let verdict = if (lo..=hi).contains(&(index as i64)) {
+                "in range"
+            } else {
+                "out of range, so the loop never defines it"
+            };
+            let _ = write!(md, "; index {index} is {verdict} ({lo} to {hi})");
+        }
+    }
+    md.push('.');
+    Some(md)
 }
 
 /// Build a document-outline entry for a definition. A documented routine carries
@@ -2613,14 +2858,15 @@ fn range_contains(range: Range, pos: Position) -> bool {
         && (pos.line, pos.character) <= (range.end.line, range.end.character)
 }
 
-/// A block-directive folding tag: a macro body or a conditional block.
+/// A block-directive folding tag: a macro body, a conditional block or a loop.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockTag {
     Macro,
     If,
+    For,
 }
 
-/// Foldable regions: `.macrodef`…`.endm` and `.if*`…`.endif` blocks (nested via
+/// Foldable regions: `.macrodef`…`.endm`, `.if*`…`.endif` and `.for`…`.endfor` blocks (nested via
 /// a stack), subroutine bodies (a label definition down to the first blank
 /// line), plus runs of two or more consecutive line comments.
 fn folding_ranges(text: &str) -> Vec<FoldingRange> {
@@ -2645,7 +2891,9 @@ fn folding_ranges(text: &str) -> Vec<FoldingRange> {
         match leading_directive(trimmed).as_deref() {
             Some("macrodef") => stack.push((BlockTag::Macro, i)),
             Some("if" | "ifdef" | "ifndef") => stack.push((BlockTag::If, i)),
+            Some("for") => stack.push((BlockTag::For, i)),
             Some("endm") => close_block(&mut stack, BlockTag::Macro, i, &mut ranges),
+            Some("endfor") => close_block(&mut stack, BlockTag::For, i, &mut ranges),
             Some("endif") => close_block(&mut stack, BlockTag::If, i, &mut ranges),
             _ => {}
         }
@@ -3241,6 +3489,16 @@ fn symbol_item(name: &str) -> CompletionItem {
     }
 }
 
+/// A pasted `.for` definition base (`row\i`), completing to the pasted form.
+fn pasted_item(name: &str) -> CompletionItem {
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(CompletionItemKind::VARIABLE),
+        detail: Some("pasted label / constant (.for)".to_string()),
+        ..Default::default()
+    }
+}
+
 fn macro_item(name: &str) -> CompletionItem {
     CompletionItem {
         label: name.to_string(),
@@ -3576,9 +3834,10 @@ mod tests {
     #[test]
     fn analyze_is_clean_for_valid_source() {
         let uri = Url::parse("file:///ok.asm").unwrap();
-        assert!(analyze(&uri, "  lda #$00\n  nop\n", &HashSet::new())
-            .diagnostics
-            .is_empty());
+        assert_eq!(
+            analyze(&uri, "  lda #$00\n  nop\n", &HashSet::new()).diagnostics,
+            [] as [lsp_types::Diagnostic; 0]
+        );
     }
 
     #[test]
@@ -3619,7 +3878,10 @@ mod tests {
             open_params("file:///g.asm", "    lda #$00\n"),
         );
         let uri = Url::parse("file:///g.asm").unwrap();
-        assert!(server.format_document(&uri).unwrap().is_empty());
+        assert_eq!(
+            server.format_document(&uri).unwrap(),
+            [] as [lsp_types::TextEdit; 0]
+        );
     }
 
     #[test]
@@ -4126,7 +4388,7 @@ mod tests {
             serde_json::json!({ "textDocument": { "uri": "file:///b.asm" } }),
         );
         assert_eq!(cleared.len(), 1);
-        assert!(cleared[0].diagnostics.is_empty());
+        assert_eq!(cleared[0].diagnostics, [] as [lsp_types::Diagnostic; 0]);
         assert_eq!(server.document_count(), 0);
     }
 
@@ -4477,7 +4739,7 @@ mod tests {
         // Cursor on the mnemonic, not a number.
         let actions =
             server.code_actions(&uri, Range::new(Position::new(0, 2), Position::new(0, 2)));
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [lsp_types::CodeActionOrCommand; 0]);
     }
 
     // ---- custom pseudo-op awareness ---------------------------------------
@@ -4559,7 +4821,10 @@ mod tests {
 
         assert!(server.format_document(&uri).is_none_or(|e| e.is_empty()));
         assert!(server.semantic_tokens(&uri).is_none());
-        assert!(server.code_actions(&uri, Range::default()).is_empty());
+        assert_eq!(
+            server.code_actions(&uri, Range::default()),
+            [] as [lsp_types::CodeActionOrCommand; 0]
+        );
         assert!(server
             .inlay_hints(&uri, Range::new(Position::new(0, 0), Position::new(10, 0)))
             .is_empty());
@@ -4736,7 +5001,7 @@ mod tests {
     fn lint_is_clean_when_a_comment_is_near() {
         let uri = Url::parse("file:///lint_clean.asm").unwrap();
         let diags = lint_diagnostics(&uri, "\n; documents the routine\nwidget:\n    rts\n");
-        assert!(diags.is_empty());
+        assert_eq!(diags, [] as [lsp_types::Diagnostic; 0]);
     }
 
     #[test]
@@ -4796,7 +5061,7 @@ mod tests {
         let file = dir.join("a.asm");
         let uri = Url::from_file_path(&file).unwrap();
         let diags = lint_diagnostics(&uri, "\nwidget:\n    rts\n");
-        assert!(diags.is_empty());
+        assert_eq!(diags, [] as [lsp_types::Diagnostic; 0]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5259,7 +5524,10 @@ mod tests {
         let tree = PathTree::new("missing");
         let (server, uri) = tree.open_main(".incbin \"gone.chr\"\n.tilemap \"file://gone.png\"\n");
 
-        assert!(server.document_links(&uri).expect("known").is_empty());
+        assert_eq!(
+            server.document_links(&uri).expect("known"),
+            [] as [lsp_types::DocumentLink; 0]
+        );
     }
 
     #[test]
@@ -5270,7 +5538,10 @@ mod tests {
         tree.write("map.png", b"x");
         let (server, uri) = tree.open_main(".tilemap \"map.png\"\n");
 
-        assert!(server.document_links(&uri).expect("known").is_empty());
+        assert_eq!(
+            server.document_links(&uri).expect("known"),
+            [] as [lsp_types::DocumentLink; 0]
+        );
     }
 
     #[test]
@@ -5279,7 +5550,10 @@ mod tests {
         tree.write("hi", b"x");
         let (server, uri) = tree.open_main(".db \"hi\"\n.ascii \"hi\"\n");
 
-        assert!(server.document_links(&uri).expect("known").is_empty());
+        assert_eq!(
+            server.document_links(&uri).expect("known"),
+            [] as [lsp_types::DocumentLink; 0]
+        );
     }
 
     #[test]
@@ -5514,5 +5788,169 @@ mod tests {
             .map(|i| i.label)
             .collect();
         assert_eq!(labels, ["logo.chr"], "{labels:?}");
+    }
+
+    // ── `.for` loops (plan 016) ─────────────────────────────────────────────
+
+    /// A jump table and per-entry handlers built from a loop, then a call to one
+    /// pasted name. Lines are 0-based.
+    const FOR_DOC: &str = concat!(
+        "LAST = 2\n",         // 0
+        "table:\n",           // 1
+        ".for 0, LAST\n",     // 2
+        "  .dw row\\i\n",     // 3
+        ".endfor\n",          // 4
+        ".for 0, 2\n",        // 5
+        "row\\i:\n",          // 6
+        "  LDA #\\i\n",       // 7
+        "  RTS\n",            // 8
+        ".endfor\n",          // 9
+        ".for 7, 0\n",        // 10
+        "  .for 0, 1\n",      // 11
+        "    .db \\i, \\j\n", // 12
+        "  .endfor\n",        // 13
+        ".endfor\n",          // 14
+        "main:\n",            // 15
+        "  JSR row1\n",       // 16
+        "  RTS\n",            // 17
+    );
+
+    #[test]
+    fn folding_ranges_cover_for_loops() {
+        let ranges = folding_ranges(FOR_DOC);
+        let region = |a: u32, b: u32| {
+            ranges.iter().any(|r| {
+                r.start_line == a && r.end_line == b && r.kind == Some(FoldingRangeKind::Region)
+            })
+        };
+        assert!(region(2, 4));
+        assert!(region(5, 9));
+        // Nested loops fold independently.
+        assert!(region(10, 14));
+        assert!(region(11, 13));
+    }
+
+    #[test]
+    fn for_sources_assemble_without_spurious_diagnostics() {
+        let uri = Url::parse("file:///for.asm").unwrap();
+        let analysis = analyze(&uri, FOR_DOC, &HashSet::new());
+        assert_eq!(analysis.diagnostics, [] as [Diagnostic; 0]);
+        assert!(analysis.symbols.iter().any(|s| s.name == "row1"));
+    }
+
+    #[test]
+    fn pasted_definitions_are_definitions_of_the_pasted_name() {
+        let defs = definitions(FOR_DOC);
+        let pasted = defs.iter().find(|d| d.name == "row\\i").expect("row\\i");
+        assert!(pasted.kind == DefKind::Label);
+        assert_eq!(
+            pasted.range,
+            Range::new(Position::new(6, 0), Position::new(6, 5))
+        );
+        // Not a label `row` followed by junk.
+        assert!(!defs.iter().any(|d| d.name == "row"));
+        let consts = definitions("SLOT\\j = 3\n");
+        assert_eq!(consts.len(), 1);
+        assert!(consts[0].name == "SLOT\\j" && consts[0].kind == DefKind::Constant);
+    }
+
+    #[test]
+    fn semantic_tokens_class_loop_counters_like_macro_arguments() {
+        let number = tooling::TokenClass::Number.wire_id();
+        let ty = |src: &str| {
+            semantic_tokens(src)
+                .iter()
+                .map(|t| t.token_type)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ty("\\1"), ty("\\i"));
+        assert_eq!(ty("\\i")[1], number);
+        assert_eq!(ty("\\j")[1], number);
+        assert_eq!(ty("\\k")[1], number);
+    }
+
+    #[test]
+    fn hover_on_a_loop_counter_names_its_loop() {
+        // `\i` on line 12 binds to `.for 0, 1` (line 11, 1-based 12); `\j` to the
+        // `.for 7, 0` outside it (line 10, 1-based 11), which counts down.
+        let i = hover_markdown("file:///for.asm", FOR_DOC, Position::new(12, 9)).unwrap();
+        assert!(i.contains("`.for 0, 1` on line 12"), "{i}");
+        assert!(i.contains("0 to 1, counting up"), "{i}");
+        let j = hover_markdown("file:///for.asm", FOR_DOC, Position::new(12, 13)).unwrap();
+        assert!(j.contains("`.for 7, 0` on line 11"), "{j}");
+        assert!(j.contains("counting down"), "{j}");
+        // Hovering the backslash works too; bounds that are not literals are
+        // quoted as written.
+        let table = hover_markdown("file:///for.asm", FOR_DOC, Position::new(3, 10)).unwrap();
+        assert!(table.contains("`.for 0, LAST` on line 3"), "{table}");
+        // A counter with no loop that many levels out says so.
+        let none = hover_markdown("file:///for.asm", "  .db \\k\n", Position::new(0, 7)).unwrap();
+        assert!(none.contains("no enclosing `.for`"), "{none}");
+    }
+
+    #[test]
+    fn goto_definition_resolves_a_pasted_reference_by_text() {
+        let mut server = Server::default();
+        open(&mut server, "file:///for.asm", FOR_DOC);
+        let uri = Url::parse("file:///for.asm").unwrap();
+        // `row1` in `JSR row1` (line 16) jumps to the `row\i:` line.
+        let loc = server
+            .goto_definition(&uri, Position::new(16, 8))
+            .expect("pasted def");
+        assert_eq!(
+            loc.range,
+            Range::new(Position::new(6, 0), Position::new(6, 5))
+        );
+        // A plain definition still wins over a pasted one.
+        let mut server = Server::default();
+        let text = format!("{FOR_DOC}row1:\n  JSR row1\n");
+        open(&mut server, "file:///for.asm", &text);
+        let loc = server
+            .goto_definition(&uri, Position::new(19, 8))
+            .expect("plain def");
+        assert_eq!(loc.range.start, Position::new(18, 0));
+        // A name that matches no pasted base resolves to nothing.
+        assert!(server.goto_definition(&uri, Position::new(16, 4)).is_none());
+    }
+
+    #[test]
+    fn goto_definition_resolves_a_pasted_constant_with_j() {
+        let mut server = Server::default();
+        let text = ".for 0, 3\nSLOT\\j = 1\n.endfor\n  LDA SLOT2\n";
+        // `\j` with a single loop is an assembler error, but the text match
+        // still answers: navigation does not depend on a clean assemble.
+        open(&mut server, "file:///c.asm", text);
+        let uri = Url::parse("file:///c.asm").unwrap();
+        let loc = server
+            .goto_definition(&uri, Position::new(3, 8))
+            .expect("pasted const");
+        assert_eq!(loc.range.start.line, 1);
+    }
+
+    #[test]
+    fn hover_on_a_pasted_reference_names_the_definition_and_range() {
+        let md = hover_markdown("file:///for.asm", FOR_DOC, Position::new(16, 8)).unwrap();
+        assert!(md.contains("row\\i"), "{md}");
+        assert!(md.contains("line 7"), "{md}");
+        assert!(md.contains("`.for 0, 2` on line 6"), "{md}");
+        assert!(md.contains("index 1 is in range (0 to 2)"), "{md}");
+        // An index past the loop's bounds is called out.
+        let text = FOR_DOC.replace("JSR row1", "JSR row9");
+        let md = hover_markdown("file:///for.asm", &text, Position::new(16, 8)).unwrap();
+        assert!(md.contains("index 9 is out of range"), "{md}");
+    }
+
+    #[test]
+    fn completion_offers_each_pasted_base_once() {
+        let mut server = Server::default();
+        open(&mut server, "file:///for.asm", FOR_DOC);
+        let uri = Url::parse("file:///for.asm").unwrap();
+        let ls = labels(server.complete(&uri, Position::new(16, 2)));
+        assert_eq!(ls.iter().filter(|l| *l == "row\\i").count(), 1, "{ls:?}");
+        for pasted in ["row0", "row1", "row2"] {
+            assert!(!ls.iter().any(|l| l == pasted), "{pasted} offered: {ls:?}");
+        }
+        assert!(ls.iter().any(|l| l == "main"));
+        assert!(ls.iter().any(|l| l == ".for") && ls.iter().any(|l| l == ".endfor"));
     }
 }

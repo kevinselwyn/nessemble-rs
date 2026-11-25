@@ -95,6 +95,7 @@ pub fn preprocess_with(
         macros: HashMap::new(),
         out: Vec::new(),
         unique: 0,
+        for_depth: 0,
         overlay,
     };
     pre.process_file(source, 0, 0)?;
@@ -119,6 +120,10 @@ struct Pre<'a> {
     macros: HashMap<String, Vec<Token>>,
     out: Vec<Token>,
     unique: u32,
+    /// How many `.for` blocks are open at this point of the token stream. The
+    /// loop itself runs in the assembler, but a `.macrodef` inside a body is
+    /// only visible here (the definition is consumed by this pass).
+    for_depth: usize,
     /// Optional tooling overlay consulted before disk when splicing includes.
     overlay: Option<&'a FileOverlay<'a>>,
 }
@@ -159,6 +164,11 @@ impl Pre<'_> {
                     }
                     i = self.handle_directive(&name, toks, i, file_id, depth, raw)?;
                     continue;
+                }
+                if name == "for" {
+                    self.for_depth += 1;
+                } else if name == "endfor" {
+                    self.for_depth = self.for_depth.saturating_sub(1);
                 }
             }
             self.out.push(Token {
@@ -212,7 +222,14 @@ impl Pre<'_> {
                 self.do_include(&target, depth, file_id, line)?;
                 Ok(next)
             }
-            "macrodef" => self.capture_macro(toks, i, file_id, line),
+            "macrodef" => {
+                // A definition is made once by this pass whatever the loop does,
+                // which would surprise anyone who put one in a body.
+                if self.for_depth > 0 {
+                    return Err(self.diag(file_id, line, t!("macrodef-in-for")));
+                }
+                self.capture_macro(toks, i, file_id, line)
+            }
             "macro" => self.expand_macro(toks, i, file_id, depth, raw),
             _ => unreachable!("unhandled directive {name}"),
         }

@@ -60,6 +60,24 @@ emit-source-parse-error = `.{ $pseudo }` emitted source that failed to parse (li
 emit-source-unsupported-directive = `.{ $pseudo }` emitted `{ $directive }`, which is not supported in a directive's own emitted source
 emit-source-too-deep = `.{ $pseudo }` emitted source too many levels deep (a script emitting source that emits source, recursively?)
 
+## Loops (`.for` / `.endfor`)
+
+for-unterminated = `.for` has no matching `.endfor`
+endfor-unmatched = `.endfor` has no open `.for`
+for-bound-count = `.for` takes two bounds (`.for START, END`), but { $count } were given
+for-bound-unknown = `.for` bound depends on `{ $name }`, which is not known on the first pass; use constants and labels defined above the loop
+for-too-many = `.for` would run { $count } iterations; the limit is { $limit } per loop
+for-nest-too-many = Nested `.for` loops would run { $count } iterations in total; the limit is { $limit }
+loop-index-outside = `{ $counter }` can only be used inside a `.for` loop
+loop-index-too-deep = `{ $counter }` needs { $needed } enclosing `.for` loops, but only { $open } are open
+label-in-for = Label `{ $name }` is defined inside a `.for` body, so it would be defined once per iteration; write `{ $name }\i:` for one label per iteration
+for-paste-multiple = `{ $name }` pastes more than one loop counter; a name can end in only one (`\i`, `\j` or `\k`)
+for-paste-negative = Cannot paste the negative counter value { $value } onto `{ $name }`
+for-paste-defined = Pasted name `{ $name }` is already defined
+macrodef-in-for = `.macrodef` is not allowed inside a `.for` body
+for-if-unbalanced = A conditional opened in a `.for` body must close in the same body (an `.if` and its `.endif` straddle the `.endfor`)
+for-iteration-suffix = { $message } (in `.for` iteration { $counters })
+
 ## Diagnostic framing (CLI)
 
 error-line = Error in `{ $file }` on line { $line }: { $message }

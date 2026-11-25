@@ -95,6 +95,7 @@ pub const DIRECTIVES: &[(&str, &str)] = &[
         "conditional assembly",
     ),
     (".macro / .macrodef / .endm", "invoke / define macros"),
+    (".for / .endfor", "repeat a block, unrolled"),
     (".include", "include another source file"),
     (".incbin", "include a raw binary"),
     (".incpng", "include a PNG as CHR tiles"),

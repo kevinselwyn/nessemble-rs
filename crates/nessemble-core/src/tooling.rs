@@ -286,6 +286,21 @@ pub fn classify(kind: LexKind, piece: &str) -> TokenClass {
     }
 }
 
+/// Whether `lexemes[idx]` is the counter letter of a `.for` loop index — the `i`
+/// of `\i` (or `j`/`k`), directly after a `\`. Highlighters class it like the
+/// digit of a macro argument `\1`: a [`TokenClass::Number`].
+#[must_use]
+pub fn is_loop_counter(source: &str, lexemes: &[Lexeme], idx: usize) -> bool {
+    let Some(lx) = lexemes.get(idx) else {
+        return false;
+    };
+    idx > 0
+        && lx.kind == LexKind::Ident
+        && matches!(text(source, lx), "i" | "j" | "k")
+        && lexemes[idx - 1].end == lx.start
+        && is_punct(source, &lexemes[idx - 1], "\\")
+}
+
 /// A highlight token: a classified span given as a **UTF-16 code-unit** offset and
 /// length from the start of the source, so a JavaScript consumer's string indices
 /// line up. Whitespace and newlines are not emitted — the gaps between tokens are
@@ -308,14 +323,20 @@ pub struct HlToken {
 pub fn highlight(source: &str) -> Vec<HlToken> {
     let mut out = Vec::new();
     let mut off = 0u32;
-    for lx in lex(source) {
+    let lexemes = lex(source);
+    for (idx, lx) in lexemes.iter().enumerate() {
         let piece = &source[lx.start..lx.end];
         let len = utf16_len(piece);
         if !matches!(lx.kind, LexKind::Whitespace | LexKind::Newline) {
+            let class = if is_loop_counter(source, &lexemes, idx) {
+                TokenClass::Number
+            } else {
+                classify(lx.kind, piece)
+            };
             out.push(HlToken {
                 start: off,
                 len,
-                class: classify(lx.kind, piece),
+                class,
             });
         }
         off += len;
@@ -725,7 +746,8 @@ fn is_indented(source: &str, sig: &[&Lexeme], opts: &FormatOptions) -> bool {
     match first.kind {
         LexKind::Directive => opts.indent_directives,
         LexKind::Ident => {
-            let is_const = sig.get(1).is_some_and(|l| is_punct(source, l, "="));
+            let n = name_lexemes(source, sig);
+            let is_const = sig.get(n).is_some_and(|l| is_punct(source, l, "="));
             !(is_named_label(source, sig) || is_const)
         }
         LexKind::Punct if is_punct(source, first, ":") => false,
@@ -742,9 +764,31 @@ fn is_indented(source: &str, sig: &[&Lexeme], opts: &FormatOptions) -> bool {
 /// line) — keeping formatter and assembler in agreement so a format pass never
 /// changes the assembled bytes.
 fn is_named_label(source: &str, sig: &[&Lexeme]) -> bool {
+    let n = name_lexemes(source, sig);
     sig.first().is_some_and(|l| l.kind == LexKind::Ident)
-        && sig.get(1).is_some_and(|l| is_punct(source, l, ":"))
-        && sig.get(2).is_none_or(|l| l.kind == LexKind::Comment)
+        && sig.get(n).is_some_and(|l| is_punct(source, l, ":"))
+        && sig.get(n + 1).is_none_or(|l| l.kind == LexKind::Comment)
+}
+
+/// How many lexemes the symbol name starting `sig[0]` spans: 1 for a plain name,
+/// 3 for a pasted `.for` name (`row\i`: the identifier, the `\`, and the
+/// counter letter `i`/`j`/`k`, with no whitespace between them). The `.for`
+/// loop (plan 016 §2.2) defines one such symbol per iteration, so a line
+/// starting `row\i:` or `ROW\i =` is a definition like any other.
+fn name_lexemes(source: &str, sig: &[&Lexeme]) -> usize {
+    match sig {
+        [name, slash, counter, ..]
+            if name.kind == LexKind::Ident
+                && is_punct(source, slash, "\\")
+                && counter.kind == LexKind::Ident
+                && matches!(text(source, counter), "i" | "j" | "k")
+                && name.end == slash.start
+                && slash.end == counter.start =>
+        {
+            3
+        }
+        _ => 1,
+    }
 }
 
 // ── Pass 1: data-block consolidation ─────────────────────────────────────────
@@ -819,7 +863,10 @@ fn is_label_or_constant(line: &str) -> bool {
     if sig.first().is_none_or(|l| l.kind != LexKind::Ident) {
         return false;
     }
-    is_named_label(line, &sig) || sig.get(1).is_some_and(|l| is_punct(line, l, "="))
+    is_named_label(line, &sig)
+        || sig
+            .get(name_lexemes(line, &sig))
+            .is_some_and(|l| is_punct(line, l, "="))
 }
 
 // ── Directive binding (shared by the formatter and the linter) ───────────────
@@ -2940,7 +2987,8 @@ fn line_text<'a>(source: &'a str, line: &[Lexeme]) -> &'a str {
     }
 }
 
-/// If `line` is exactly a named label definition (`name:`), return the label
+/// If `line` is exactly a named label definition (`name:`, or a pasted
+/// `name\i:` from a `.for` body, returned as one name), return the label
 /// name and its 1-based character column. Anonymous labels (`:`, `:++`), `@local`
 /// temp labels, and labels sharing a line with code all return `None`.
 fn block_label<'a>(source: &'a str, line: &[Lexeme]) -> Option<(&'a str, u32)> {
@@ -2948,10 +2996,14 @@ fn block_label<'a>(source: &'a str, line: &[Lexeme]) -> Option<(&'a str, u32)> {
         .iter()
         .filter(|l| l.kind != LexKind::Whitespace && l.kind != LexKind::Comment)
         .collect();
-    if sig.len() != 2 || sig[0].kind != LexKind::Ident || !is_punct(source, sig[1], ":") {
+    if sig.first().is_none_or(|l| l.kind != LexKind::Ident) {
         return None;
     }
-    let name = text(source, sig[0]);
+    let n = name_lexemes(source, &sig);
+    if sig.len() != n + 1 || !is_punct(source, sig[n], ":") {
+        return None;
+    }
+    let name = &source[sig[0].start..sig[n - 1].end];
     // Match the "document every code block" convention: a real label name starts
     // with an ASCII letter or `_`, so `@local` temp labels read as anonymous.
     let first = name.as_bytes().first().copied().unwrap_or(0);
@@ -3184,6 +3236,71 @@ mod tests {
         };
         let src = "tbl:\n.db $01, $02, $03\n.dw addr\nloop:\n    BNE :-\n";
         let once = format_with(src, &opts);
+        assert_eq!(format_with(&once, &opts), once);
+    }
+
+    // ── `.for` loops (plan 016): counters and pasted names ──────────────────
+
+    const FOR_SRC: &str = "\
+.for 0, 2
+row\\i:
+    LDA #\\i
+    STA $0200+\\i
+    RTS
+.endfor
+jump_table:
+.for 0, 2
+.dw row\\i
+.endfor
+.for 0, 1
+.for 0, 1
+.db \\i, \\j
+.endfor
+.endfor
+SLOT\\i = \\i*4
+";
+
+    #[test]
+    fn format_leaves_for_loops_and_pasted_names_unchanged() {
+        // Body lines format as they would outside a loop: `.for`/`.endfor` are
+        // directives (column 0 by default), `row\i:` is a label (column 0), and
+        // `\i`/`\j` operands and pasted references pass through verbatim.
+        let want = "\
+.for 0, 2
+row\\i:
+    LDA #\\i
+    STA $0200+\\i
+    RTS
+
+.endfor
+jump_table:
+.for 0, 2
+.dw row\\i
+.endfor
+.for 0, 1
+.for 0, 1
+.db \\i, \\j
+.endfor
+.endfor
+SLOT\\i = \\i*4
+";
+        let once = format(FOR_SRC);
+        assert_eq!(once, want);
+        assert_eq!(format(&once), once);
+    }
+
+    #[test]
+    fn format_for_directives_follow_indent_directives() {
+        let opts = FormatOptions {
+            indent_directives: true,
+            ..FormatOptions::default()
+        };
+        let once = format_with(".for 0, 1\n.db \\i\n.endfor\n", &opts);
+        assert_eq!(once, "    .for 0, 1\n    .db \\i\n    .endfor\n");
+        assert_eq!(format_with(&once, &opts), once);
+        // Pasted labels and constants stay at column 0 even when directives indent.
+        let once = format_with("  row\\i:\n  LDA #\\i\n  SLOT\\j = 1\n", &opts);
+        assert_eq!(once, "row\\i:\n    LDA #\\i\nSLOT\\j = 1\n");
         assert_eq!(format_with(&once, &opts), once);
     }
 
@@ -3587,7 +3704,10 @@ mod tests {
         // shorter one with a stray `-next-line` argument.
         let found = scan("; @nessemble-coverage-ignore-next-line\n");
         assert_eq!(found[0].name, DirectiveName::CoverageIgnoreNextLine);
-        assert!(bad("; @nessemble-coverage-ignore-next-line\n").is_empty());
+        assert_eq!(
+            bad("; @nessemble-coverage-ignore-next-line\n"),
+            [] as [crate::tooling::MalformedDirective; 0]
+        );
     }
 
     #[test]
@@ -3849,7 +3969,7 @@ mod tests {
         let found = scan("; @nessemble-clobbers none\nfoo:\n");
         assert_eq!(found[0].args, DirectiveArgs::Slots(Vec::new()));
         let sig = &sigs("; @nessemble-clobbers none\nfoo:\n")[0];
-        assert!(sig.clobbers.is_empty());
+        assert_eq!(sig.clobbers, [] as [crate::tooling::Slot; 0]);
         assert!(sig.declares_clobbers, "`none` is a declaration");
         // No tag at all is *not* the same claim.
         let undeclared = &sigs("; @nessemble-param A i\nfoo:\n")[0];
@@ -3924,7 +4044,10 @@ mod tests {
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].kind, SignatureProblemKind::Unbound);
         assert_eq!(problems[0].subject, "@nessemble-clobbers");
-        assert!(sigs("; @nessemble-clobbers A\n    LDA #$00\nfoo:\n").is_empty());
+        assert_eq!(
+            sigs("; @nessemble-clobbers A\n    LDA #$00\nfoo:\n"),
+            [] as [crate::tooling::Signature; 0]
+        );
     }
 
     #[test]
@@ -3938,8 +4061,14 @@ mod tests {
     fn a_trailing_tag_is_inert() {
         // `own_line: false` — reported by `ineffective-comment-directive`, and
         // never resolved into a signature (nor reported as unbound here).
-        assert!(sigs("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n").is_empty());
-        assert!(sig_problems("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n").is_empty());
+        assert_eq!(
+            sigs("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n"),
+            [] as [crate::tooling::Signature; 0]
+        );
+        assert_eq!(
+            sig_problems("    LDA #$00 ; @nessemble-clobbers A\nfoo:\n"),
+            [] as [crate::tooling::SignatureProblem; 0]
+        );
     }
 
     #[test]
@@ -3962,8 +4091,9 @@ mod tests {
         let sig = &sigs("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n")[0];
         assert_eq!(sig.params.len(), 1);
         assert_eq!(sig.returns.len(), 1);
-        assert!(
-            sig_problems("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n").is_empty()
+        assert_eq!(
+            sig_problems("; @nessemble-param A in\n; @nessemble-returns A out\nfoo:\n"),
+            [] as [crate::tooling::SignatureProblem; 0]
         );
     }
 
@@ -3995,9 +4125,12 @@ mod tests {
     fn prose_and_other_directives_are_left_alone() {
         // `@param` without the namespace is prose; a format hint is not a tag.
         let src = "; @param A not ours\n; @nessemble-format stride=2\n.db $01\n";
-        assert!(sigs(src).is_empty());
-        assert!(sig_problems(src).is_empty());
-        assert!(bad(src).is_empty());
+        assert_eq!(sigs(src), [] as [crate::tooling::Signature; 0]);
+        assert_eq!(
+            sig_problems(src),
+            [] as [crate::tooling::SignatureProblem; 0]
+        );
+        assert_eq!(bad(src), [] as [crate::tooling::MalformedDirective; 0]);
     }
 
     // ── Pass 2: blank line after RTS / RTI ──────────────────────────────────
@@ -4385,6 +4518,61 @@ data:
     }
 
     #[test]
+    fn highlight_classes_a_loop_counter_like_a_macro_argument() {
+        let class_of = |src: &str, nth: usize| highlight(src)[nth].class;
+        // `\1` is Operator + Number; `\i`/`\j`/`\k` match it.
+        for src in ["\\1", "\\i", "\\j", "\\k"] {
+            assert_eq!(class_of(src, 0), TokenClass::Operator, "{src}");
+            assert_eq!(class_of(src, 1), TokenClass::Number, "{src}");
+        }
+        // A pasted name keeps its identifier; only the counter is a number.
+        let toks = highlight("row\\i");
+        assert_eq!(
+            toks.iter().map(|t| t.class).collect::<Vec<_>>(),
+            vec![
+                TokenClass::Identifier,
+                TokenClass::Operator,
+                TokenClass::Number
+            ]
+        );
+        // A plain `i` (or `\x`) is still an identifier.
+        assert_eq!(class_of("i", 0), TokenClass::Identifier);
+        assert_eq!(class_of("\\x", 1), TokenClass::Identifier);
+    }
+
+    #[test]
+    fn block_label_reads_a_pasted_label_as_one_definition() {
+        let src = "row\\i:";
+        assert_eq!(block_label(src, &line_of(src, 0)), Some(("row\\i", 1)));
+        let src = "  tile\\j: ; note";
+        assert_eq!(block_label(src, &line_of(src, 0)), Some(("tile\\j", 3)));
+        // Not pasted: a gap, an unknown counter letter, or a trailing operand.
+        for src in [
+            "row \\i:",
+            "row\\x:",
+            "row\\i: nop",
+            "row\\i = 1",
+            "row\\1:",
+        ] {
+            assert!(block_label(src, &line_of(src, 0)).is_none(), "{src}");
+        }
+    }
+
+    #[test]
+    fn lint_warns_once_on_an_undocumented_pasted_label() {
+        let findings = lint_default("\n.for 0, 2\n\nrow\\i:\n    NOP\n    RTS\n.endfor\n", 0);
+        assert_eq!(labels(&findings), vec!["row\\i"]);
+        assert_eq!(findings[0].rule, RuleId::RequireBlockComment);
+        assert_eq!(findings[0].line, 4);
+        // A nearby comment satisfies the rule for the pasted label as for any.
+        let findings = lint_default(
+            "\n.for 0, 2\n\n; entry\nrow\\i:\n    NOP\n    RTS\n.endfor\n",
+            3,
+        );
+        assert_eq!(findings, [] as [Finding; 0]);
+    }
+
+    #[test]
     fn lint_warns_on_undocumented_block_label() {
         let findings = lint_default("\nmy_label:\n    nop\n", 3);
         assert_eq!(findings.len(), 1);
@@ -4395,17 +4583,29 @@ data:
 
     #[test]
     fn lint_clean_when_comment_is_near() {
-        assert!(lint_default("\n; documents the routine\nmy_label:\n    nop\n", 3).is_empty());
+        assert_eq!(
+            lint_default("\n; documents the routine\nmy_label:\n    nop\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
         // comment after the label, within the window
-        assert!(lint_default("\nmy_label:\n    nop\n; trailing doc\n", 3).is_empty());
+        assert_eq!(
+            lint_default("\nmy_label:\n    nop\n; trailing doc\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
     fn lint_skips_branch_targets_and_anonymous_labels() {
         // internal branch target (label immediately after code)
-        assert!(lint_default("    bne target\ntarget:\n    nop\n", 3).is_empty());
+        assert_eq!(
+            lint_default("    bne target\ntarget:\n    nop\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
         // anonymous labels are never checked
-        assert!(lint_default("\n:\n    nop\n:++\n", 3).is_empty());
+        assert_eq!(
+            lint_default("\n:\n    nop\n:++\n", 3),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4441,7 +4641,10 @@ data:
             window: 3,
             ignore: &no_ignore,
         };
-        assert!(lint("\nmy_label:\n    nop\n", &opts).is_empty());
+        assert_eq!(
+            lint("\nmy_label:\n    nop\n", &opts),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     // ── Directive rules ─────────────────────────────────────────────────────
@@ -4489,7 +4692,10 @@ data:
         assert_eq!(findings[0].rule, RuleId::DeprecatedCommentDirective);
         assert!(findings[0].message.contains("@nessemble-format"));
 
-        assert!(lint_directives("; @nessemble-format stride=2\n.db $01, $02\n").is_empty());
+        assert_eq!(
+            lint_directives("; @nessemble-format stride=2\n.db $01, $02\n"),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4506,8 +4712,9 @@ data:
         assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
         assert!(findings[0].message.contains("no following line"));
         // A comment between the directive and its target is skipped, not fatal.
-        assert!(
-            lint_directives("; @nessemble-coverage-ignore-next-line\n; why\n    nop\n").is_empty()
+        assert_eq!(
+            lint_directives("; @nessemble-coverage-ignore-next-line\n; why\n    nop\n"),
+            [] as [crate::tooling::Finding; 0]
         );
     }
 
@@ -4517,8 +4724,14 @@ data:
         assert_eq!(findings[0].rule, RuleId::IneffectiveCommentDirective);
         assert!(findings[0].message.contains("data line"));
         // `.color` counts as data, as does a blank line before the run.
-        assert!(lint_directives("; @nessemble-format stride=2\n.color $0F\n").is_empty());
-        assert!(lint_directives("; @nessemble-format stride=2\n\n.db $01\n").is_empty());
+        assert_eq!(
+            lint_directives("; @nessemble-format stride=2\n.color $0F\n"),
+            [] as [crate::tooling::Finding; 0]
+        );
+        assert_eq!(
+            lint_directives("; @nessemble-format stride=2\n\n.db $01\n"),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4537,20 +4750,23 @@ data:
     #[test]
     fn lint_never_flags_an_unclosed_ignore_region() {
         // Running to end of file is the documented whole-file opt-out.
-        assert!(
-            lint_directives("; @nessemble-coverage-ignore start\n    nop\n    nop\n").is_empty()
+        assert_eq!(
+            lint_directives("; @nessemble-coverage-ignore start\n    nop\n    nop\n"),
+            [] as [crate::tooling::Finding; 0]
         );
         // …and a balanced pair is clean too.
-        assert!(lint_directives(
-            "; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore end\n"
-        )
-        .is_empty());
+        assert_eq!(
+            lint_directives(
+                "; @nessemble-coverage-ignore start\n    nop\n; @nessemble-coverage-ignore end\n"
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
     fn lint_leaves_ordinary_comments_alone() {
         let src = "; @todo tidy this\n; @param x the value\nmy_label: ; documented\n    nop\n";
-        assert!(lint_directives(src).is_empty());
+        assert_eq!(lint_directives(src), [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -4686,14 +4902,16 @@ data:
 
     #[test]
     fn lint_accepts_a_correct_clobber_list() {
-        assert!(lint_routines(
-            "; @nessemble-clobbers A, X\n\
+        assert_eq!(
+            lint_routines(
+                "; @nessemble-clobbers A, X\n\
              draw:\n\
              \x20   LDA #$00\n\
              \x20   LDX #$10\n\
              \x20   RTS\n",
-        )
-        .is_empty());
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4712,14 +4930,16 @@ data:
     #[test]
     fn lint_counts_a_returned_slot_as_declared() {
         // A `returns` slot is clobbered by definition and need not be repeated.
-        assert!(lint_routines(
-            "; @nessemble-returns A the value\n\
+        assert_eq!(
+            lint_routines(
+                "; @nessemble-returns A the value\n\
              ; @nessemble-clobbers none\n\
              read:\n\
              \x20   LDA #$01\n\
              \x20   RTS\n",
-        )
-        .is_empty());
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4745,13 +4965,15 @@ data:
              \x20   RTS\n",
         );
         assert_eq!(rules_of(&shifts_a), vec![RuleId::UndeclaredClobber]);
-        assert!(lint_routines(
-            "; @nessemble-clobbers none\n\
+        assert_eq!(
+            lint_routines(
+                "; @nessemble-clobbers none\n\
              shift:\n\
              \x20   ASL $00\n\
              \x20   RTS\n",
-        )
-        .is_empty());
+            ),
+            [] as [crate::tooling::Finding; 0]
+        );
     }
 
     #[test]
@@ -4788,6 +5010,21 @@ data:
              \x20   RTS\n",
         );
         assert_eq!(rules_of(&undeclared), vec![RuleId::UndeclaredClobber]);
+    }
+
+    #[test]
+    fn a_for_loop_in_a_body_is_not_transparent() {
+        assert!(!is_transparent_directive(".for"));
+        assert!(!is_transparent_directive(".endfor"));
+        // Y and X are over-declared, which would be reported if the body were
+        // fully understood; the `.for` emits code, so the verifier makes no claim.
+        let src = |body: &str| {
+            format!("; @nessemble-clobbers A, X, Y\ntouch:\n    LDA #$00\n{body}    RTS\n")
+        };
+        let plain = lint_routines(&src(""));
+        assert_eq!(rules_of(&plain), vec![RuleId::OverdeclaredClobber]);
+        let looped = lint_routines(&src(".for 0, 1\n    STA $2007\n.endfor\n"));
+        assert_eq!(looped, [] as [Finding; 0]);
     }
 
     #[test]
@@ -4833,7 +5070,7 @@ data:
                    \n\
                    helper:\n\
                    \x20   RTS\n";
-        assert!(lint_routines(src).is_empty());
+        assert_eq!(lint_routines(src), [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -4916,7 +5153,7 @@ data:
                    loc_8000:\n\
                    \x20   LDX #$00\n\
                    \x20   RTS\n";
-        assert!(lint(src, &opts).is_empty());
+        assert_eq!(lint(src, &opts), [] as [crate::tooling::Finding; 0]);
     }
 
     // ── Lint suppression (`@nessemble-lint-ignore…`) ────────────────────────
@@ -4964,7 +5201,7 @@ data:
                     draw:\n\
                     \x20   LDX #$00\n\
                     \x20   RTS\n";
-        assert!(lint_routines(both).is_empty());
+        assert_eq!(lint_routines(both), [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -5014,7 +5251,7 @@ data:
             findings.iter().all(|f| f.subject == "outside"),
             "only the routine past `end` reports: {findings:?}"
         );
-        assert!(!findings.is_empty());
+        assert_ne!(findings, [] as [crate::tooling::Finding; 0]);
     }
 
     #[test]
@@ -5234,6 +5471,6 @@ data:
             window: 3,
             ignore: &no_ignore,
         };
-        assert!(lint(src, &opts).is_empty());
+        assert_eq!(lint(src, &opts), [] as [crate::tooling::Finding; 0]);
     }
 }
