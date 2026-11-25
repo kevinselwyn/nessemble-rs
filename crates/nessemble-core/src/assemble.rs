@@ -13,7 +13,9 @@ use std::sync::Arc;
 use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
 
-use crate::ast::{BinOp, CustomArg, Expr, InesField, Instruction, Line, Operand, Pseudo, Stmt};
+use crate::ast::{
+    BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo, Stmt,
+};
 
 const BANK_PRG: i64 = 0x4000;
 const BANK_CHR: i64 = 0x2000;
@@ -27,6 +29,27 @@ const MAX_NESTED_IFS: usize = 10;
 /// `.include`/`.macro` recursion, applied to this analogous case so a
 /// pathological script errors instead of overflowing the stack.
 const MAX_EMIT_SOURCE_DEPTH: usize = 10;
+/// Most iterations a single `.for` may run (`plans/016-unrolled-loops.md` §5.2).
+const MAX_FOR_ITERATIONS: u128 = 4096;
+/// Most iterations a nest of `.for` blocks may run in total: the product of the
+/// iteration counts of every loop open at the innermost body.
+const MAX_FOR_NEST_ITERATIONS: u128 = 65536;
+
+/// One open `.for` block on the assembler's loop stack.
+#[derive(Debug, Clone, Copy)]
+struct LoopFrame {
+    /// Index (into the line slice being walked) of the first body line, which
+    /// `.endfor` jumps back to.
+    body_start: usize,
+    /// The counter's value in the current iteration.
+    current: i64,
+    /// The counter's value in the last iteration.
+    end: i64,
+    /// `1` when counting up, `-1` when counting down.
+    step: i64,
+    /// Total iterations this loop runs.
+    count: u128,
+}
 
 /// Convert a NES 2.0 RAM size in bytes to its logarithmic shift count, where a
 /// present size is `64 << shift` bytes. Returns `Some(0)` for no RAM (0 bytes),
@@ -250,6 +273,17 @@ pub struct Assembler {
     // condition. Empty means no conditional is open.
     if_stack: Vec<bool>,
 
+    // `.for` blocks currently open, innermost last (`\i` reads the last frame,
+    // `\j` the one before it, ...). Empty outside any loop.
+    loop_stack: Vec<LoopFrame>,
+    /// Diagnostics already reported from inside a loop body this pass, keyed by
+    /// (file, line, message) so a per-iteration error is reported once.
+    loop_err_seen: std::collections::HashSet<(u32, u32, String)>,
+    /// The first symbol an expression evaluation touched that was not yet
+    /// known (undefined, or a local-label reference on pass 1). Reset by the
+    /// caller before evaluating a `.for` bound, which must be known on pass 1.
+    eval_unknown: Option<String>,
+
     // iNES trainer redirection (`.inestrn`).
     trainer: Vec<u8>,
     offset_trainer: usize,
@@ -416,6 +450,9 @@ impl Assembler {
             enum_inc: 0,
             rsset: 0,
             if_stack: Vec::new(),
+            loop_stack: Vec::new(),
+            loop_err_seen: std::collections::HashSet::new(),
+            eval_unknown: None,
             trainer: Vec::new(),
             offset_trainer: 0,
             pass: 1,
@@ -583,6 +620,8 @@ impl Assembler {
         self.enum_inc = 0;
         self.rsset = 0;
         self.if_stack.clear();
+        self.loop_stack.clear();
+        self.loop_err_seen.clear();
         self.offset_trainer = 0;
         // Spans are collected fresh on pass 2; clearing here drops any from an
         // earlier pass so the final map reflects only the emitting pass.
@@ -811,24 +850,197 @@ impl Assembler {
     }
 
     fn run_pass(&mut self, lines: &[Line]) {
-        for line in lines {
+        self.run_lines(lines, true);
+    }
+
+    /// Walk `lines` in order, jumping back at each `.endfor` so a `.for` body
+    /// runs once per counter value. With `attribute` set each line sets the
+    /// current file/line/macro flag (the top-level program); emitted source
+    /// leaves them as its call site set them.
+    ///
+    /// Frames this call pushes are discarded on the way out, so an abort inside
+    /// a body cannot leave the caller's loop stack holding frames whose
+    /// `body_start` indexes a different slice.
+    fn run_lines(&mut self, lines: &[Line], attribute: bool) {
+        let base = self.loop_stack.len();
+        let mut i = 0;
+        while i < lines.len() {
             if self.aborted {
                 break;
             }
-            self.cur_line = line.line;
-            self.cur_file = line.file;
-            self.cur_from_macro = line.from_macro;
-            self.exec_stmt(&line.stmt);
+            let line = &lines[i];
+            if attribute {
+                self.cur_line = line.line;
+                self.cur_file = line.file;
+                self.cur_from_macro = line.from_macro;
+            }
+            match &line.stmt {
+                Stmt::Pseudo(Pseudo::For(start, end)) => i = self.exec_for(lines, i, start, end),
+                Stmt::Pseudo(Pseudo::EndFor) => i = self.exec_endfor(i),
+                stmt => {
+                    self.exec_stmt(stmt);
+                    i += 1;
+                }
+            }
         }
+        self.loop_stack.truncate(base);
+    }
+
+    /// Index of the `.endfor` that closes the `.for` at `lines[open]`. The
+    /// parser guarantees one exists; `lines.len()` is the defensive fallback.
+    fn matching_endfor(lines: &[Line], open: usize) -> usize {
+        let mut depth = 0usize;
+        for (j, l) in lines.iter().enumerate().skip(open + 1) {
+            match l.stmt {
+                Stmt::Pseudo(Pseudo::For(..)) => depth += 1,
+                Stmt::Pseudo(Pseudo::EndFor) if depth == 0 => return j,
+                Stmt::Pseudo(Pseudo::EndFor) => depth -= 1,
+                _ => {}
+            }
+        }
+        lines.len()
+    }
+
+    /// Execute the `.for START, END` at `lines[i]`: evaluate and check the
+    /// bounds, then either push a frame and enter the body, or skip past the
+    /// matching `.endfor`. Returns the index to continue from.
+    fn exec_for(&mut self, lines: &[Line], i: usize, start: &Expr, end: &Expr) -> usize {
+        let skip = |lines: &[Line]| Self::matching_endfor(lines, i) + 1;
+        // In a false conditional the loop runs zero times (its bounds are not
+        // even evaluated), and skipping to the `.endfor` keeps the pairing.
+        if self.if_suppressed() {
+            return skip(lines);
+        }
+        self.eval_unknown = None;
+        let first = self.eval(start);
+        let last = self.eval(end);
+        let unknown = self.eval_unknown.take();
+        // The count decides every later address, so on pass 1 a bound that is
+        // not yet known (a forward reference) is an error, not a guess.
+        if self.pass == 1 {
+            if let Some(name) = unknown {
+                self.error(t!("for-bound-unknown", name = name));
+                return skip(lines);
+            }
+        }
+        let count = (i128::from(last) - i128::from(first)).unsigned_abs() + 1;
+        if count > MAX_FOR_ITERATIONS {
+            self.error(t!(
+                "for-too-many",
+                count = count.to_string(),
+                limit = MAX_FOR_ITERATIONS.to_string()
+            ));
+            return skip(lines);
+        }
+        let nest = self
+            .loop_stack
+            .iter()
+            .fold(count, |total, f| total.saturating_mul(f.count));
+        if nest > MAX_FOR_NEST_ITERATIONS {
+            self.error(t!(
+                "for-nest-too-many",
+                count = nest.to_string(),
+                limit = MAX_FOR_NEST_ITERATIONS.to_string()
+            ));
+            return skip(lines);
+        }
+        self.loop_stack.push(LoopFrame {
+            body_start: i + 1,
+            current: first,
+            end: last,
+            step: if first <= last { 1 } else { -1 },
+            count,
+        });
+        i + 1
+    }
+
+    /// Execute `.endfor` at `lines[i]`: run the next iteration, or pop the
+    /// frame and fall through. Returns the index to continue from.
+    fn exec_endfor(&mut self, i: usize) -> usize {
+        let Some(frame) = self.loop_stack.last_mut() else {
+            return i + 1;
+        };
+        if frame.current == frame.end {
+            self.loop_stack.pop();
+            i + 1
+        } else {
+            frame.current += frame.step;
+            frame.body_start
+        }
+    }
+
+    /// The value of the loop counter `depth` levels out (0 = `\i`), or an error
+    /// (and `0`) when that many loops are not open.
+    fn loop_value(&mut self, depth: u8) -> i64 {
+        let open = self.loop_stack.len();
+        let d = usize::from(depth);
+        if d < open {
+            return self.loop_stack[open - 1 - d].current;
+        }
+        let counter = ["\\i", "\\j", "\\k"][d.min(2)];
+        if open == 0 {
+            self.error(t!("loop-index-outside", counter = counter));
+        } else {
+            self.error(t!(
+                "loop-index-too-deep",
+                counter = counter,
+                needed = d + 1,
+                open = open
+            ));
+        }
+        0
+    }
+
+    /// Build the name `base` + the decimal value of the counter `depth` levels
+    /// out (`row` + `\i` = `row2`), or report why it can't be built.
+    fn paste_name(&mut self, base: &str, depth: u8) -> Option<String> {
+        let open = self.loop_stack.len();
+        if usize::from(depth) >= open {
+            self.loop_value(depth);
+            return None;
+        }
+        let value = self.loop_stack[open - 1 - usize::from(depth)].current;
+        if value < 0 {
+            self.error(t!("for-paste-negative", name = base, value = value));
+            return None;
+        }
+        Some(format!("{base}{value}"))
+    }
+
+    /// Counter values for an in-body diagnostic's suffix: `\i` = 5, `\j` = 1.
+    fn loop_counters(&self) -> String {
+        self.loop_stack
+            .iter()
+            .rev()
+            .zip(["\\i", "\\j", "\\k"])
+            .map(|(f, name)| format!("`{name}` = {}", f.current))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     // -- error helpers ------------------------------------------------------
 
     fn error(&mut self, message: impl Into<String>) {
+        let mut message = message.into();
+        // A line in a `.for` body that fails does so once per iteration it
+        // fails in; report it once, naming the first such iteration.
+        if !self.loop_stack.is_empty() {
+            if !self
+                .loop_err_seen
+                .insert((self.cur_file, self.cur_line, message.clone()))
+            {
+                return;
+            }
+            message = t!(
+                "for-iteration-suffix",
+                message = message,
+                counters = self.loop_counters()
+            );
+        }
         self.errors.push(Diag {
             file: self.file_name(),
             line: self.cur_line,
-            message: message.into(),
+            message,
         });
     }
 
@@ -862,6 +1074,31 @@ impl Assembler {
     }
 
     fn add_symbol(&mut self, name: &str, value: i64, kind: SymType) {
+        self.define_symbol(name, value, kind, self.cur_from_macro);
+    }
+
+    /// Define a symbol built by pasting a loop counter onto `base`, flagged
+    /// `from_macro` (its name is not in the file's text) and rejected on pass 1
+    /// if the name is already defined — a collision between pasted names is
+    /// almost certainly a mistake, unlike an ordinary redefinition.
+    fn add_pasted_symbol(&mut self, base: &str, depth: u8, kind: SymType, value: Option<i64>) {
+        let Some(name) = self.paste_name(base, depth) else {
+            return;
+        };
+        if self.pass == 1
+            && !self.if_suppressed()
+            && self
+                .find_symbol(&name)
+                .is_some_and(|id| self.symbols[id].kind != SymType::Undefined)
+        {
+            self.error(t!("for-paste-defined", name = name.as_str()));
+            return;
+        }
+        let value = value.unwrap_or_else(|| self.address_offset());
+        self.define_symbol(&name, value, kind, true);
+    }
+
+    fn define_symbol(&mut self, name: &str, value: i64, kind: SymType, from_macro: bool) {
         if self.pass != 1 {
             return;
         }
@@ -880,14 +1117,14 @@ impl Assembler {
                 self.symbols[id].value = value;
                 self.symbols[id].bank = bank;
                 self.symbols[id].kind = kind;
-                self.symbols[id].from_macro = self.cur_from_macro;
+                self.symbols[id].from_macro = from_macro;
             }
             None => self.symbols.push(Symbol {
                 name: name.to_string(),
                 value,
                 kind,
                 bank,
-                from_macro: self.cur_from_macro,
+                from_macro,
             }),
         }
     }
@@ -1045,13 +1282,29 @@ impl Assembler {
 
     fn exec_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Label(name) => self.add_label(name),
+            Stmt::Label(Name::Plain(name)) => {
+                // The parser rejects a plain label in a written-out `.for` body;
+                // this catches one that arrives later, in a custom pseudo-op's
+                // emitted source expanded inside a loop.
+                if !self.loop_stack.is_empty() && name != ":" {
+                    self.error(t!("label-in-for", name = name.as_str()));
+                }
+                self.add_label(name);
+            }
+            Stmt::Label(Name::Pasted(base, depth)) => {
+                self.add_pasted_symbol(base, *depth, SymType::Label, None);
+            }
             Stmt::Constant(name, expr) => {
                 let value = match expr {
                     Some(e) => self.eval(e),
                     None => 1,
                 };
-                self.add_symbol(name, value, SymType::Constant);
+                match name {
+                    Name::Plain(name) => self.add_symbol(name, value, SymType::Constant),
+                    Name::Pasted(base, depth) => {
+                        self.add_pasted_symbol(base, *depth, SymType::Constant, Some(value));
+                    }
+                }
             }
             Stmt::Instruction(instr) => self.exec_instruction(instr),
             Stmt::Pseudo(p) => self.exec_pseudo(p),
@@ -1321,6 +1574,9 @@ impl Assembler {
                 self.exec_defchr(&ints);
             }
             Pseudo::Custom(name, args) => self.exec_custom(name, args),
+            // `.for` / `.endfor` move the line cursor, so `run_lines` handles
+            // them before a statement ever reaches here.
+            Pseudo::For(..) | Pseudo::EndFor => {}
         }
     }
 
@@ -1505,12 +1761,7 @@ impl Assembler {
         let saved_from_macro = self.cur_from_macro;
         self.cur_from_macro = true;
         self.custom_expansion_depth += 1;
-        for line in &lines {
-            self.exec_stmt(&line.stmt);
-            if self.aborted {
-                break;
-            }
-        }
+        self.run_lines(&lines, false);
         self.custom_expansion_depth -= 1;
         self.cur_from_macro = saved_from_macro;
     }
@@ -1851,6 +2102,11 @@ impl Assembler {
             Expr::High(e) => (self.eval(e) >> 8) & 0xFF,
             Expr::Low(e) => self.eval(e) & 0xFF,
             Expr::Bank(name) => self.eval_bank(name),
+            Expr::LoopIndex(depth) => self.loop_value(*depth),
+            Expr::PastedSymbol(base, depth) => match self.paste_name(base, *depth) {
+                Some(name) => self.eval_symbol(&name),
+                None => 0,
+            },
             Expr::Binary(a, op, b) => {
                 let lhs = self.eval(a);
                 let rhs = self.eval(b);
@@ -1861,12 +2117,16 @@ impl Assembler {
 
     fn eval_symbol(&mut self, name: &str) -> i64 {
         if let Some(id) = self.find_symbol(name) {
-            if self.pass == 2 && self.symbols[id].kind == SymType::Undefined {
-                let msg = t!("symbol-not-defined", name = self.symbols[id].name);
-                self.error(msg);
+            if self.symbols[id].kind == SymType::Undefined {
+                self.note_unknown(name);
+                if self.pass == 2 {
+                    let msg = t!("symbol-not-defined", name = self.symbols[id].name);
+                    self.error(msg);
+                }
             }
             self.symbols[id].value
         } else {
+            self.note_unknown(name);
             // Reference behavior: unknown symbols are registered as
             // undefined (value 1) during pass 1.
             self.add_symbol(name, 1, SymType::Undefined);
@@ -1874,8 +2134,18 @@ impl Assembler {
         }
     }
 
+    /// Remember the first thing an expression touched whose value is not known
+    /// yet, for the pass-1 check on `.for` bounds.
+    fn note_unknown(&mut self, name: &str) {
+        if self.eval_unknown.is_none() {
+            self.eval_unknown = Some(name.to_string());
+        }
+    }
+
     fn eval_local(&mut self, direction: i32) -> i64 {
         if self.pass != 2 {
+            let name = if direction > 0 { ":+" } else { ":-" };
+            self.note_unknown(name);
             return 1;
         }
         match self.get_symbol_local(direction) {
@@ -1885,9 +2155,11 @@ impl Assembler {
     }
 
     fn eval_bank(&mut self, name: &str) -> i64 {
-        match self.find_symbol(name) {
-            Some(id) => self.symbols[id].bank as i64,
-            None => 1,
+        if let Some(id) = self.find_symbol(name) {
+            self.symbols[id].bank as i64
+        } else {
+            self.note_unknown(name);
+            1
         }
     }
 
@@ -2028,7 +2300,12 @@ pub struct PrewarmCandidate {
 fn literal_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Num(n) => Some(*n),
-        Expr::Symbol(_) | Expr::LocalForward(_) | Expr::LocalBackward(_) | Expr::Bank(_) => None,
+        Expr::Symbol(_)
+        | Expr::LocalForward(_)
+        | Expr::LocalBackward(_)
+        | Expr::Bank(_)
+        | Expr::LoopIndex(_)
+        | Expr::PastedSymbol(..) => None,
         Expr::High(e) => Some((literal_eval(e)? >> 8) & 0xFF),
         Expr::Low(e) => Some(literal_eval(e)? & 0xFF),
         Expr::Binary(a, op, b) => Some(Assembler::apply(literal_eval(a)?, *op, literal_eval(b)?)),

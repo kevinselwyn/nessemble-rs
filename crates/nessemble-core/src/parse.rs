@@ -5,8 +5,11 @@
 //! precedence level, right-associative), and the core/data/iNES pseudo-ops.
 //! Directives outside this phase parse to [`Pseudo::Unsupported`].
 
+use nessemble_i18n::t;
+
 use crate::ast::{
-    AsciiArg, BinOp, CustomArg, Expr, InesField, Instruction, Line, Operand, Pseudo, RandTerm, Stmt,
+    AsciiArg, BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo,
+    RandTerm, Stmt,
 };
 use crate::lexer::{Tok, Token};
 
@@ -19,11 +22,15 @@ pub struct ParseError {
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Line>, ParseError> {
-    Parser {
+    let lines = Parser {
         toks: tokens,
         pos: 0,
     }
-    .parse_program()
+    .parse_program()?;
+    match validate_loops(&lines).into_iter().next() {
+        Some(e) => Err(e),
+        None => Ok(lines),
+    }
 }
 
 /// Parse `tokens`, recovering from errors: on a statement error, record it and
@@ -31,11 +38,71 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Line>, ParseError> {
 /// every error found. Used by the tooling diagnostics path; [`parse`] (strict,
 /// first-error) is unchanged.
 pub fn parse_recovering(tokens: Vec<Token>) -> (Vec<Line>, Vec<ParseError>) {
-    Parser {
+    let (lines, mut errors) = Parser {
         toks: tokens,
         pos: 0,
     }
-    .parse_program_recovering()
+    .parse_program_recovering();
+    errors.extend(validate_loops(&lines));
+    (lines, errors)
+}
+
+/// Check the `.for` / `.endfor` structure of a parsed program in one pass, so a
+/// structural mistake is reported once at parse time rather than once per
+/// assembly pass (`plans/016-unrolled-loops.md` §4, §6): every `.for` has an
+/// `.endfor` and vice versa, a conditional opened inside a body closes inside it
+/// (and vice versa), and a body defines no plain named label. (`.macrodef` in a
+/// body is rejected by the preprocessor, which is the only place that sees it.)
+fn validate_loops(lines: &[Line]) -> Vec<ParseError> {
+    /// One open `.for`: where it was written and the conditional depth at that
+    /// point.
+    struct Open {
+        line: u32,
+        file: u32,
+        if_depth: usize,
+    }
+    let mut errors = Vec::new();
+    let mut open: Vec<Open> = Vec::new();
+    let mut if_depth = 0usize;
+    for l in lines {
+        let err = |message: String| ParseError {
+            line: l.line,
+            file: l.file,
+            message,
+        };
+        match &l.stmt {
+            Stmt::Pseudo(Pseudo::For(..)) => open.push(Open {
+                line: l.line,
+                file: l.file,
+                if_depth,
+            }),
+            Stmt::Pseudo(Pseudo::EndFor) => match open.pop() {
+                None => errors.push(err(t!("endfor-unmatched"))),
+                Some(frame) => {
+                    if frame.if_depth != if_depth {
+                        errors.push(err(t!("for-if-unbalanced")));
+                        // Resume from the depth the loop opened at so one
+                        // straddling conditional is reported once.
+                        if_depth = frame.if_depth;
+                    }
+                }
+            },
+            Stmt::Pseudo(Pseudo::If(_) | Pseudo::Ifdef(_) | Pseudo::Ifndef(_)) => if_depth += 1,
+            Stmt::Pseudo(Pseudo::Endif) => if_depth = if_depth.saturating_sub(1),
+            Stmt::Label(Name::Plain(name)) if !open.is_empty() && name != ":" => {
+                errors.push(err(t!("label-in-for", name = name.as_str())));
+            }
+            _ => {}
+        }
+    }
+    for frame in open {
+        errors.push(ParseError {
+            line: frame.line,
+            file: frame.file,
+            message: t!("for-unterminated"),
+        });
+    }
+    errors
 }
 
 struct Parser {
@@ -183,9 +250,18 @@ impl Parser {
             }
             Some(Tok::Colon) => {
                 self.pos += 1;
-                Ok(Some(Stmt::Label(":".to_string())))
+                Ok(Some(Stmt::Label(Name::Plain(":".to_string()))))
             }
             Some(Tok::Text(name)) => {
+                // A name directly followed by a loop counter (`row\i`) is a
+                // pasted name: `row\i:` defines a label, `row\i = ...` a
+                // constant. Anything else (e.g. `LDA \i`, where the mnemonic is
+                // merely followed by a counter operand) falls through.
+                if let Some(Tok::LoopIndex(depth)) = self.peek_at(1).cloned() {
+                    if let Some(stmt) = self.parse_pasted_def(&name, depth, indented)? {
+                        return Ok(Some(stmt));
+                    }
+                }
                 // A label declaration is `text COLON` where the colon ends the
                 // line. A colon that begins a local-label operand (`:-`, `:+`)
                 // belongs to an instruction, so require end-of-line after it.
@@ -193,7 +269,7 @@ impl Parser {
                     && matches!(self.peek_at(2), Some(Tok::Endl) | None);
                 if is_label {
                     self.pos += 2;
-                    return Ok(Some(Stmt::Label(name)));
+                    return Ok(Some(Stmt::Label(Name::Plain(name))));
                 }
                 // `<label> .rs <size>` reserves a variable.
                 if matches!(self.peek_at(1), Some(Tok::Pseudo(p)) if p == "rs") {
@@ -205,7 +281,7 @@ impl Parser {
                     Some(Tok::Equ) => {
                         self.pos += 2;
                         let e = self.parse_expr()?;
-                        Ok(Some(Stmt::Constant(name, Some(e))))
+                        Ok(Some(Stmt::Constant(Name::Plain(name), Some(e))))
                     }
                     _ if indented => {
                         self.pos += 1;
@@ -217,11 +293,48 @@ impl Parser {
                     }
                     _ => {
                         self.pos += 1;
-                        Ok(Some(Stmt::Constant(name, None)))
+                        Ok(Some(Stmt::Constant(Name::Plain(name), None)))
                     }
                 }
             }
             _ => self.err("unexpected token at start of statement"),
+        }
+    }
+
+    /// Parse a pasted-name definition at the start of a statement: `toks[pos]` is
+    /// the base `Text` and `toks[pos + 1]` the counter. Returns `None` when the
+    /// line is not a definition (an instruction with a counter operand, say), so
+    /// the caller falls through to the ordinary rules.
+    fn parse_pasted_def(
+        &mut self,
+        base: &str,
+        depth: u8,
+        indented: bool,
+    ) -> Result<Option<Stmt>, ParseError> {
+        if matches!(self.peek_at(2), Some(Tok::LoopIndex(_))) {
+            return self.err(t!("for-paste-multiple", name = base));
+        }
+        match self.peek_at(2) {
+            Some(Tok::Colon) if matches!(self.peek_at(3), Some(Tok::Endl) | None) => {
+                self.pos += 3;
+                Ok(Some(Stmt::Label(Name::Pasted(base.to_string(), depth))))
+            }
+            Some(Tok::Equ) => {
+                self.pos += 3;
+                let e = self.parse_expr()?;
+                Ok(Some(Stmt::Constant(
+                    Name::Pasted(base.to_string(), depth),
+                    Some(e),
+                )))
+            }
+            Some(Tok::Endl) | None if !indented => {
+                self.pos += 2;
+                Ok(Some(Stmt::Constant(
+                    Name::Pasted(base.to_string(), depth),
+                    None,
+                )))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -306,6 +419,14 @@ impl Parser {
         if let Some(field) = ines_field(name) {
             return Ok(Pseudo::Ines(field, self.parse_expr()?));
         }
+        // `.for` / `.endfor` are case-insensitive (`plans/016-unrolled-loops.md`
+        // §2); every other directive name is matched exactly, as before.
+        let name = if name.eq_ignore_ascii_case("for") || name.eq_ignore_ascii_case("endfor") {
+            name.to_ascii_lowercase()
+        } else {
+            name.to_string()
+        };
+        let name = name.as_str();
         let p = match name {
             "org" => Pseudo::Org(self.parse_expr()?),
             "phase" => Pseudo::Phase(self.parse_expr()?),
@@ -338,6 +459,28 @@ impl Parser {
             "ifndef" => Pseudo::Ifndef(self.parse_text_name("ifndef")?),
             "else" => Pseudo::Else,
             "endif" => Pseudo::Endif,
+            "for" => {
+                let mut bounds = Vec::new();
+                if !matches!(self.peek(), Some(Tok::Endl) | None) {
+                    loop {
+                        bounds.push(self.parse_expr()?);
+                        if !matches!(self.peek(), Some(Tok::Comma)) {
+                            break;
+                        }
+                        self.pos += 1;
+                        if matches!(self.peek(), Some(Tok::Endl) | None) {
+                            break;
+                        }
+                    }
+                }
+                let count = bounds.len();
+                let mut it = bounds.into_iter();
+                match (it.next(), it.next(), it.next()) {
+                    (Some(start), Some(end), None) => Pseudo::For(start, end),
+                    _ => return self.err(t!("for-bound-count", count = count)),
+                }
+            }
+            "endfor" => Pseudo::EndFor,
             "incbin" => {
                 let (file, a, b) = self.parse_inc_args("incbin")?;
                 Pseudo::Incbin(file, a, b)
@@ -543,7 +686,19 @@ impl Parser {
         let mut e = match self.bump() {
             Some(Tok::Number(n)) => Expr::Num(n),
             Some(Tok::NumberArg(_) | Tok::NumberArgc | Tok::NumberArgu) => Expr::Num(0),
-            Some(Tok::Text(name)) => Expr::Symbol(name),
+            Some(Tok::LoopIndex(depth)) => Expr::LoopIndex(depth),
+            Some(Tok::Text(name)) => {
+                // `name\i` pastes the counter onto the name (one counter only).
+                if let Some(Tok::LoopIndex(depth)) = self.peek().cloned() {
+                    self.pos += 1;
+                    if matches!(self.peek(), Some(Tok::LoopIndex(_))) {
+                        return self.err(t!("for-paste-multiple", name = name.as_str()));
+                    }
+                    Expr::PastedSymbol(name, depth)
+                } else {
+                    Expr::Symbol(name)
+                }
+            }
             Some(Tok::High) => {
                 self.expect(&Tok::OpenParen)?;
                 let inner = self.parse_expr()?;
@@ -735,6 +890,46 @@ mod tests {
     #[test]
     fn db_no_continuation_still_one_line() {
         assert_eq!(db_list(".db $00, $01\n.db $02\n"), nums(&[0, 1]));
+    }
+
+    #[test]
+    fn for_parses_two_bounds_and_endfor() {
+        let lines = parse(Lexer::new(".for 0, 7\n.endfor\n").tokenize()).expect("parse ok");
+        let stmts: Vec<_> = lines.into_iter().map(|l| l.stmt).collect();
+        assert_eq!(
+            stmts,
+            vec![
+                Stmt::Pseudo(Pseudo::For(Expr::Num(0), Expr::Num(7))),
+                Stmt::Pseudo(Pseudo::EndFor),
+            ]
+        );
+    }
+
+    #[test]
+    fn pasted_names_parse_in_definitions_and_expressions() {
+        assert_eq!(
+            first_stmt("row\\i:\n"),
+            Stmt::Label(Name::Pasted("row".into(), 0))
+        );
+        assert_eq!(
+            first_stmt("slot\\j = 3\n"),
+            Stmt::Constant(Name::Pasted("slot".into(), 1), Some(Expr::Num(3)))
+        );
+        assert_eq!(
+            db_list(".db row\\k, \\i\n"),
+            vec![Expr::PastedSymbol("row".into(), 2), Expr::LoopIndex(0)]
+        );
+    }
+
+    #[test]
+    fn a_counter_after_a_mnemonic_is_an_operand_not_a_paste() {
+        match first_stmt("  LDA \\i\n") {
+            Stmt::Instruction(i) => {
+                assert_eq!(i.mnemonic, "LDA");
+                assert_eq!(i.operand, Operand::Absolute(Expr::LoopIndex(0)));
+            }
+            other => panic!("expected an instruction, got {other:?}"),
+        }
     }
 
     fn custom_args(src: &str) -> (String, Vec<CustomArg>) {

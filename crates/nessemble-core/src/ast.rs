@@ -38,6 +38,21 @@ pub enum Expr {
     Low(Box<Expr>),
     Bank(String),
     Binary(Box<Expr>, BinOp, Box<Expr>),
+    /// A `.for` loop counter: depth 0 is `\i` (innermost loop), 1 is `\j`, 2 is
+    /// `\k`. Evaluated against the assembler's loop stack.
+    LoopIndex(u8),
+    /// A reference to a name with a loop counter pasted on as a decimal suffix
+    /// (`row\i`): the base name and the counter's depth.
+    PastedSymbol(String, u8),
+}
+
+/// A symbol name in a definition: written out, or built per `.for` iteration by
+/// pasting a loop counter onto a base (`row\i:` defines `row0`, `row1`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Name {
+    Plain(String),
+    /// The base name and the counter's depth (0 = `\i`, 1 = `\j`, 2 = `\k`).
+    Pasted(String, u8),
 }
 
 /// The operand form of an instruction, determined syntactically.
@@ -114,6 +129,11 @@ pub enum Pseudo {
     Prg(Expr),
     Chr(Expr),
     Segment(String),
+    /// `.for START, END` — begin an unrolled loop (both bounds inclusive; counts
+    /// down when `START > END`). See `plans/016-unrolled-loops.md`.
+    For(Expr, Expr),
+    /// `.endfor` — end the innermost `.for` block.
+    EndFor,
     /// `.inestrn` — mark the iNES trainer region active (the trainer file's
     /// bytes are spliced in by the preprocessor immediately after this).
     InesTrn,
@@ -207,9 +227,9 @@ pub enum CustomArg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     /// A label definition. Name is `":"` for an anonymous label.
-    Label(String),
+    Label(Name),
     /// A constant definition; value expression is `None` for a bare name (=> 1).
-    Constant(String, Option<Expr>),
+    Constant(Name, Option<Expr>),
     Instruction(Instruction),
     Pseudo(Pseudo),
 }

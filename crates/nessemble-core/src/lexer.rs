@@ -56,6 +56,10 @@ pub enum Tok {
     NumberArgc,
     /// Macro unique id `\@` (Phase 4).
     NumberArgu,
+    /// `.for` loop counter `\i` / `\j` / `\k`: depth 0 / 1 / 2 (innermost
+    /// loop outward). Passed through macro expansion untouched and resolved by
+    /// the assembler.
+    LoopIndex(u8),
 
     Text(String),
     QuotString(String),
@@ -374,7 +378,7 @@ impl<'a> Lexer<'a> {
         if rest.first() == Some(&b'\'') && rest.len() >= 3 && rest[2] == b'\'' {
             consider(3, Tok::Number(rest[1] as i64), &mut best);
         }
-        // 10. \N macro arg  11. \#  12. \@
+        // 10. \N macro arg  11. \#  12. \@  (and `.for` counters \i \j \k)
         if rest.first() == Some(&b'\\') {
             let n = rest[1..].iter().take_while(|c| c.is_ascii_digit()).count();
             if n > 0 {
@@ -384,6 +388,13 @@ impl<'a> Lexer<'a> {
                 consider(2, Tok::NumberArgc, &mut best);
             } else if rest.get(1) == Some(&b'@') {
                 consider(2, Tok::NumberArgu, &mut best);
+            } else if let Some(depth) = match rest.get(1) {
+                Some(b'i') => Some(0),
+                Some(b'j') => Some(1),
+                Some(b'k') => Some(2),
+                _ => None,
+            } {
+                consider(2, Tok::LoopIndex(depth), &mut best);
             }
         }
         // 13. defchr [.0-3]{8}
@@ -513,6 +524,22 @@ mod tests {
                 Tok::CharReg('X'),
             ]
         );
+    }
+
+    #[test]
+    fn loop_counters() {
+        assert_eq!(
+            kinds("\\i \\j \\k"),
+            vec![Tok::LoopIndex(0), Tok::LoopIndex(1), Tok::LoopIndex(2)]
+        );
+        // A name directly followed by a counter is two tokens; the parser pastes.
+        assert_eq!(
+            kinds("row\\i:"),
+            vec![Tok::Text("row".into()), Tok::LoopIndex(0), Tok::Colon]
+        );
+        // The macro tokens are untouched.
+        assert_eq!(kinds("\\1"), vec![Tok::NumberArg(1)]);
+        assert_eq!(kinds("\\@"), vec![Tok::NumberArgu]);
     }
 
     #[test]
