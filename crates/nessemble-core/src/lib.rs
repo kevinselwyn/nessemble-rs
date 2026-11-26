@@ -598,8 +598,10 @@ fn is_directive_name(name: &str) -> bool {
 /// arbitrary code from a workspace just to analyze a buffer — so the bytes a
 /// custom pseudo-op would emit are not modeled, and addresses after it may be
 /// approximate.
-#[allow(clippy::implicit_hasher)] // callers use the standard HashSet.
-#[must_use]
+// `implicit_hasher`: callers use the standard HashSet. `must_use_candidate`:
+// the boxed `Fn` returned is already `#[must_use]`, so newer clippy rejects a
+// second one (`double_must_use`) while older clippy still suggests adding it.
+#[allow(clippy::implicit_hasher, clippy::must_use_candidate)]
 pub fn lenient_custom_resolver(known: std::collections::HashSet<String>) -> CustomResolver {
     Box::new(move |name, _ints, _texts, _base, _root| {
         if known.contains(name) {
