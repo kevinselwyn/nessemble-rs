@@ -328,7 +328,7 @@ This file uses the same helpers as `for_loops.rs` (`bytes`, `assembly`, `error`,
   - Recommendation: a follow-up plan that makes all three forms skip counter effects when suppressed.
   - That plan changes output for `.rs` too, so it needs its own named exception.
 - **Q2: the indented-member rule.** Some authors indent everything. E9 makes the mistake obvious, but the alternative is "any lone non-mnemonic word in an enum is a member". That needs mnemonic knowledge in the parser and tooling, including `-u` undocumented opcodes, so it was rejected for v1.
-- **Q3: the `=` reset is a second output change.** It is decided, but it should be in the release notes as a separate item. No known user is affected; the reference corpus has no `.enum`.
+- **Q3: the `=` reset is a second output change.** Settled: it ships as a separate release-notes item. No known user is affected; the reference corpus has no `.enum`.
 - **Q4: contract additions for `.table` (plan 019).**
   - Added `size`, `file` and `line` per member, plus `file`/`line` for the enum.
   - `contiguous` is defined on values (§2.5), not on "no resets".
@@ -349,3 +349,9 @@ This file uses the same helpers as `for_loops.rs` (`bytes`, `assembly`, `error`,
 - `crates/nessemble-core/src/ast.rs`
 - `crates/nessemble-core/src/tooling.rs`
 - `crates/nessemble-lsp/src/lib.rs`
+
+---
+
+## Decisions settled with the maintainer
+
+1. `NAME = expr` inside `.enum` resets the counter in every enum, named or not, and ships as **its own release-notes item**, separate from the bare-name change, in both the changeset and `upgrading.md` (§2.3, Q3).

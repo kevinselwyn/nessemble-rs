@@ -308,8 +308,8 @@ A failure inside a `.for` body gets the existing `for-iteration-suffix`. `$detai
 
 - **Macro diagnostics today report the wrong place.** The body's line number is paired with the invoking file. Checked on v2.27.0: an undefined argument reports body line 3, not call line 7. This plan moves only `.assert`, `.error` and `.out` to the call site (plan 019 does the same for table checks). Moving every macro diagnostic to the call site is out of scope, but now cheap with `call_line`.
 - **The CLI reports one error** (`errors.last()`). "Report every failing assertion" therefore holds only in the LSP and `diagnose_*`. Printing all errors from the CLI is a separate change.
-- **`.out` goes to stderr, not stdout as the brief asked** (because the ROM's default output is stdout). It also prints nothing when pass 1 fails. Confirm both.
-- **Strict `.if` check vs. the reference quirk** (§2.3). The quirk means a line three levels deep under a false `.if` is assembled, yet an `.assert` there is skipped. Chosen: "never fire in a branch the author wrote as false". The alternative is to match `if_suppressed()` exactly, as `.table` does.
+- **`.out` goes to stderr, not stdout as the brief asked** (settled). It also prints nothing when pass 1 fails.
+- **Strict `.if` check vs. the reference quirk** (§2.3, settled: strict). A line three levels deep under a false `.if` is assembled, yet an `.assert` there is skipped.
 - **LSP taint rule:**
   - It hides some real failures in the editor; the CLI build is still authoritative.
   - It adds `Symbol.approx` to the shared symbol table.
@@ -373,3 +373,10 @@ A failure inside a `.for` body gets the existing `for-iteration-suffix`. `$detai
 - `crates/nessemble-core/src/lib.rs`
 - `crates/nessemble-cli/src/main.rs`
 - `crates/nessemble-i18n/locales/en-US.ftl`
+
+---
+
+## Decisions settled with the maintainer
+
+1. `.out` prints to **stderr** (Q4).
+2. `.assert` and `.error` use the **strict** `.if` test: they never run in any branch written as false, however deeply nested. `.table` keeps `if_suppressed()` (§2.3).

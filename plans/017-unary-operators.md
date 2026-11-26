@@ -466,3 +466,9 @@ When this ships, update this plan's status line and add an "As built" section.
 - `crates/nessemble-core/src/ast.rs`
 - `crates/nessemble-core/src/assemble.rs`
 - `docs/src/syntax.md`
+
+---
+
+## Decisions settled with the maintainer
+
+1. Results stay ordinary signed integers. A mask such as `AND #~$80`, which falls outside the byte range, is documented with the `LOW(~$80)` workaround; there is no 8-bit special case (§8).

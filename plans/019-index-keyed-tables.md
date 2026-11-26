@@ -489,3 +489,9 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
 - `crates/nessemble-core/src/tooling.rs`
 - `crates/nessemble-lsp/src/lib.rs`
 - also `crates/nessemble-core/src/preprocess.rs`, `crates/nessemble-core/src/lexer.rs`, `crates/nessemble-core/src/lib.rs`, `crates/nessemble-i18n/locales/en-US.ftl`, `crates/nessemble-isa/src/lib.rs`, `docs/src/syntax.md`
+
+---
+
+## Decisions settled with the maintainer
+
+1. A table indexed from a base other than 0 must state its count or use an enum (`.table 24, 1`); there is no `.table , FIRST` form (§2.2, §11 Q3).

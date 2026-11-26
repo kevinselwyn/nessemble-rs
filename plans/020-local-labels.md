@@ -21,7 +21,8 @@ An `@name` label becomes local to the nearest global label above it in the same 
 
 ### 2.2 What opens a scope (decided, with three clarifications)
 
-- Any executed label definition that isn't `@`-prefixed or anonymous opens a scope, including `name\i:` (pasted per iteration) and `name\@:` (in macro bodies).
+- Any executed label definition that isn't `@`-prefixed or anonymous opens a scope, including `name\i:` (pasted per iteration).
+- **Labels generated with `\@` (`name\@:` in a macro body) do not open a scope** *(settled with the maintainer; reverses the brief's original rule)*. They are expansion-private names, and letting them open scopes would make the caller's later `@done` resolve under the macro's label. Detection: a label whose name came from pasting `\@`, i.e. any `Name` with a `\@` segment, marked by the preprocessor on the token (`Token.expansion != 0` together with a pasted `\@` part).
 - **A label inside a false `.if` opens nothing**, exactly as it defines nothing.
 - **`.rs` reservations do not open a scope** *(refinement)*. They are variables, not code, even though the listing files them under `[labels]`.
 - Constants, `.org`, `.phase`/`.dephase`, `.segment`, `.prg`/`.chr`, `.enum` and anonymous labels neither open nor close a scope.
@@ -52,7 +53,7 @@ Each include gets its own file id from the preprocessor, and a file included twi
 - **Privates can't be qualified from outside the expansion.**
 - **Privates are flagged `from_macro`,** so `-l` hides them unless `--mlist` is given.
 - **`.for` interaction:** a macro whose body defines `@x` and is invoked inside a `.for` body is one expansion, so it collides across iterations. This matches plan 016 §3 for `label\@`. It is reported with the existing `label-in-for`, using the display name `@x`.
-- **Decided-rule consequence:** a body's `name\@:` opens a scope at the call site (§8, R2).
+- **A body's `name\@:` does not open a scope** (§2.2), so a caller's `@done` after the macro call still resolves in the caller's scope.
 
 ### 2.6 Custom pseudo-op emitted source *(refinement; not in the brief's list)*
 
@@ -244,7 +245,7 @@ Same harness as `for_loops.rs`: `bytes`/`error`/`sym`, plus temporary directorie
 14. `.ifdef @x` (true and false branches); `BANK(p1@x)`.
 15. Emitted source, using the custom resolver as in `emit_source.rs`: a source with `@l:`/`DEX`/`BNE @l`, invoked twice in `p1`, gives `ca d0 fd ca d0 fd`.
 16. A label in a false `.if` opens no scope.
-17. A body's `name\@:` opens a scope at the call site. This pins the decided rule and its consequence (§8, R2).
+17. A body's `name\@:` does **not** open a scope: `p1:`/`.macro wait`/`BNE @done`/`@done:` resolves `@done` as `p1@done`. A plain `name:` in a macro body still opens one.
 
 **Errors (line and exact text):**
 - Every row of §5, plus:
@@ -321,12 +322,12 @@ Same harness as `for_loops.rs`: `bytes`/`error`/`sym`, plus temporary directorie
     **Behavior change:** `@name` labels are now local to the nearest label above them, so routines can reuse names like `@loop` and `@done`; reference another routine's with `routine@name`. Code that used an `@` label as a global now gets an error suggesting the qualified name.
     ```
   - Phase 2 (LSP), `minor`: "The editor understands `@local` labels: scope-aware go-to-definition, references, rename, outline and `@` completion."
-  - This is a **behavior change**. `minor` follows the owner's framing that today's semantics are broken; strict semver would say `major` (R1).
+  - This is a **behavior change**, released as `minor` (R1, settled).
 
 ## 8. Risks and open questions
 
-- **R1. Version bump.** This breaks programs that use `@` as globals, and `@x = …` constants now error. Owner to confirm `minor` (bug-fix framing) or `major`.
-- **R2. Decided rule vs macros.** A body's `name\@:` opens a scope at the call site. After `.macro wait` (which defines `spin\@:`), the caller's later `@done` resolves under `spin7` and fails. The hint points at `p1@done`, so it is visible, but it is a trap. Plan 016 encourages exactly such macro labels. Suggest the owner reconsider "`\@`-generated labels don't open scopes". This plan implements the decided rule and pins it with test 17.
+- **R1. Version bump — settled: `minor`.** This breaks programs that use `@` as globals, and `@x = …` constants now error; the changeset is framed as a fix of broken semantics and marked as a behaviour change.
+- **R2. `\@` labels and scopes — settled.** `\@`-generated labels do not open scopes (§2.2). A plain global label defined in a macro body still does; the docs say to use `name\@:` for macro-internal labels.
 - **R3. Local constants** (`@len = 4`) are deferred and are an error in v1.
 - **R4. Emitted-source privacy** (§2.6) goes beyond the brief. The alternative (caller's scope) lets a caller reference emitted `@x` but makes repeated invocations collide.
 - **R5. Private display** `p1@spin\@7` in `--mlist`: a format choice that external list consumers may need to accept.
@@ -334,7 +335,7 @@ Same harness as `for_loops.rs`: `bytes`/`error`/`sym`, plus temporary directorie
 - **R7. Existing lint gap:** an anonymous `:` line also makes routine effects "unknown". Not fixed here, since it is outside the brief; plan 022's emitted-stream walk removes it.
 - **R8. Formatter:** the blank line inserted after `RTS` before `@x:` visually splits a routine. A possible follow-up is to skip it for locals; that would change format output, so it is not done here.
 - **R9. Call-site reporting** covers only the new local diagnostics, plus those of plans 019 and 021, all through the shared `call_line`. Older diagnostics raised inside macro bodies still report the body line, which breaks the house rule today. The companion bugfix can adopt `call_line` for them.
-- **R10. LSP scope is textual.** It ignores `.if` suppression and scopes opened inside macro expansions (R2), so it can disagree with the assembler in those cases. Diagnostics stay authoritative.
+- **R10. LSP scope is textual.** It ignores `.if` suppression and global labels defined inside macro expansions, so it can disagree with the assembler in those cases. Diagnostics stay authoritative.
 - **R11. Performance:** `find_symbol` is a linear scan, and locals add symbols. The hint scan runs only on error. A `HashMap` index would be a separate change.
 - **R12. Out of scope, listed for follow-up:**
   - a "did you mean `p1@loc`" hint for `JMP p1.loc` (today assembles as `JMP p1`; the companion makes it an error);
@@ -350,3 +351,10 @@ Same harness as `for_loops.rs`: `bytes`/`error`/`sym`, plus temporary directorie
 - `crates/nessemble-core/src/lexer.rs`
 - `crates/nessemble-core/src/tooling.rs`
 - `crates/nessemble-lsp/src/lib.rs`
+
+---
+
+## Decisions settled with the maintainer
+
+1. The changeset is `minor`, marked as a behaviour change (R1).
+2. Labels generated with `\@` do not open a scope; this reverses that part of the brief's decided rule (§2.2, R2).

@@ -609,3 +609,12 @@ The three inert entries in otherwise live categories (two fall-through, one unre
 - `crates/nessemble-lsp/src/lib.rs`
 
 Also touched: `crates/nessemble-core/src/preprocess.rs`, `crates/nessemble-core/src/lexer.rs`, `crates/nessemble-core/src/ast.rs`, `crates/nessemble-core/src/parse.rs`, `crates/nessemble-core/src/lib.rs`, `crates/nessemble-cli/src/custom.rs`, `crates/nessemble-cli/src/lsp.rs`, `docs/src/usage.md`, `docs/src/editor.md`, `docs/src/upgrading.md`, and the new files `crates/nessemble-core/src/program.rs`, `crates/nessemble-core/src/clobbers.rs` and `crates/nessemble-core/tests/clobber_analysis.rs`.
+
+---
+
+## Decisions settled with the maintainer
+
+1. `unused-lint-ignore` defaults to `warn` (§8.4 Q1).
+2. Returning through a pushed address (`RTS` dispatch) is reported as `unverifiable-clobbers`, the same as an indirect jump (§8.2).
+3. The key is `"entry"`, root-level only, taking a string or an array (§8.4 Q5).
+4. The plain build does not read `entry` or `assemble.pseudo` in this plan (§8.4 Q4).
