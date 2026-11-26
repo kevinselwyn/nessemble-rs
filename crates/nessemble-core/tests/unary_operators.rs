@@ -172,7 +172,7 @@ fn out_of_range_complements_warn_under_the_range_rule() {
     // The documented workaround.
     let a = assembly("  AND #LOW(~$80)\n");
     assert_eq!(a.rom, [0x29, 0x7F]);
-    assert!(a.warnings.is_empty());
+    assert_eq!(rules(&a), []);
 }
 
 #[test]
