@@ -101,7 +101,7 @@ The check runs on the preprocessed flat stream, so a table may contain `.include
 ### 3.6 How values appear in messages
 
 - **Index and key values** print as `$NN` for 0–255 and `$NNNN` above that. Negative values print in decimal.
-- **The key's text** comes from a small `Expr` printer, because the parser keeps no source text. A symbol prints as its name. A binary expression prints with operands that are themselves binary in parentheses. A numeric-literal key drops the redundant "(value)". (Plan 021 needs the same printer for assertion messages; whichever lands first adds `Expr::source_text`.)
+- **The key's text** comes from a small `Expr` printer, because the parser keeps no source text. A symbol prints as its name. A binary expression prints with operands that are themselves binary in parentheses. A numeric-literal key drops the redundant "(value)". (This is the `Display for Expr` shared with plan 021.)
 
 ### 3.7 Emitted source *(proposed)*
 
@@ -121,8 +121,8 @@ A custom pseudo-instruction's `emit_source` may not contain `.table`, `.endtable
 
 - `Stmt::Tag(Expr)` is a **marker statement**: one `Line` of its own, executed before the statement that shares its source line. This is better than wrapping (`Stmt::Tagged(Expr, Box<Stmt>)`), because a macro call's tag and the macro's expanded lines are separate token runs (§4.2). With a marker, "entry runs from tag to next tag" is literal.
 - `Pseudo::Table(Option<Expr>, Option<Expr>)` and `Pseudo::EndTable`.
-- `Line` gains `call_line: u32`. It is 0 for a line written in the file, or the line of the outermost `.macro` call for an expanded line (§4.3).
-- `impl Expr { pub(crate) fn source_text(&self) -> String }` for messages (§3.6).
+- `Line` gains `call_line: Option<u32>`: `None` for a line written in the file, or the line of the outermost `.macro` call for an expanded line (§4.3). Shared with plan 021.
+- `impl fmt::Display for Expr` for messages (§3.6), with the rendering rules of plan 021 §2.5. Shared with plan 021; whichever lands first adds it.
 
 ### 4.2 Statement parser — `crates/nessemble-core/src/parse.rs` [shared]
 
@@ -151,9 +151,9 @@ A custom pseudo-instruction's `emit_source` may not contain `.table`, `.endtable
 ### 4.3 Token and preprocessor — `lexer.rs`, `preprocess.rs` [shared]
 
 - **Lexer.** No change to lexing rules. `[`, `]` and `.table` already lex as `OpenBrack`, `CloseBrack` and `Pseudo("table")`.
-- **Token.** `Token` gains `call_line: u32` (0 by default; the lexer emits 0). This is needed so diagnostics for tagged lines or untagged bytes coming from a macro expansion name the **call site**, as the brief requires. Today a macro body's tokens carry the body's definition line (observed: an out-of-range branch in a body reports the body line).
-- **`substitute`/`mk`.** These stamp `call_line` with the invoking `.macro` token's `call_line`, or with its `line` if that is 0. So nested expansions keep the outermost author's line.
-- **Existing diagnostics don't change.** Only table diagnostics read `call_line`. If the companion arg-count bugfix brings its own call-site mechanism, use that instead and drop this field. Plan 021 (assertions) needs the same call-site field.
+- **Token.** `Token` gains `call_line: Option<u32>` (the lexer emits `None`), with a `Token::new(tok, line, file)` helper to limit churn. One field, shared with plan 021. This is needed so diagnostics for tagged lines or untagged bytes coming from a macro expansion name the **call site**, as the brief requires. Today a macro body's tokens carry the body's definition line (observed: an out-of-range branch in a body reports the body line).
+- **`substitute`/`mk`.** These stamp `call_line` with the invoking `.macro` token's `call_line`, or with its `line` if that is `None`. So nested expansions keep the outermost author's line.
+- **Existing diagnostics don't change.** Only table diagnostics read `call_line`. If the companion arg-count bugfix brings its own call-site mechanism, use that instead and drop this field. Plan 021 (assertions) uses the same field.
 - **Tagged `.macrodef`.** In `handle_directive`, if anything other than `Endl`/`Indent` was emitted for the current line before `.macrodef`, report the existing preprocessor diagnostic style with `tag-before-block` naming `.macrodef`.
 
 ### 4.4 Assembler — `crates/nessemble-core/src/assemble.rs`
@@ -194,7 +194,7 @@ On pass 1, and when suppressed, `.table` does nothing; parse-time pairing guaran
 
 This is one branch on the hot path, and only when a table is open.
 
-**`.endtable`**: if a table is open, move it into `self.defer(DeferredCheck::Table(t))`. If it has no entries, report `table-empty`.
+**`.endtable`**: if a table is open, move it into `self.defer(origin_of_table_line, DeferredCheck::Table(t))`. If it has no entries, report `table-empty`.
 
 **Layout directives.** `Pseudo::Org`, `Prg`, `Chr`, `Segment` and `InesTrn` with a table open report `table-layout`.
 
@@ -229,31 +229,44 @@ Given the `EntryRec`s, `FIRST`, `STEP` and the spec:
 
 ### 5.2 The final-pass hook, shared with `.assert` (plan 021)
 
+This is the **reconciled interface** agreed with plan 021. This plan merges first, so it introduces the hook; plan 021 adds its variants.
+
 ```rust
+/// Where a deferred check reports: the line the author wrote.
+pub(crate) struct Origin {
+    pub file: u32,
+    pub line: u32,              // `call_line` for a macro expansion, else the line itself
+    pub suffix: Option<String>, // `.for` iteration suffix captured at record time
+}
 /// A check that needs settled symbol values and runs exactly once per build.
 pub(crate) struct Deferred {
-    pub file: u32,            // author's file id
-    pub line: u32,            // author's line (call site for macro expansions)
-    pub suffix: Option<String>, // `.for` iteration suffix captured at record time
+    pub origin: Origin,
     pub check: DeferredCheck,
 }
 pub(crate) enum DeferredCheck {
     Table(OpenTable),
-    // Plan 021 adds its assertion variant here.
+    // Plan 021 adds `Assert { .. }` and `Error { .. }`.
 }
 impl Assembler {
-    /// Queue a check. No-op unless `self.pass == FINAL_PASS` (2) and not `if_suppressed()`,
-    /// so it can be called unconditionally from statement execution and still record once per build.
-    fn defer(&mut self, check: DeferredCheck, file: u32, line: u32);
-    /// Drain `deferred` in source order, reporting via `error_at`. Called exactly once:
+    /// The current author origin: `cur_call_line.unwrap_or(cur_line)`, plus `loop_counters()`.
+    fn origin(&self) -> Origin;
+    /// Queue a check. No-op unless `self.pass == FINAL_PASS` (2), so recording happens once per
+    /// build. The *caller* applies its own suppression rule before calling: `.table` uses
+    /// `if_suppressed()` so it agrees with `write_byte`; `.assert`/`.error` use the stricter
+    /// all-levels test (plan 021 §2.3).
+    fn defer(&mut self, origin: Origin, check: DeferredCheck);
+    /// Drain `deferred` in queue order, reporting via `report_at`. Called exactly once:
     /// in `run()` after pass 2 + `validate_ines()` when pass 2 produced no errors, and in
     /// `diagnostics()` after pass 2 unconditionally. In non-collect mode it stops at the first
     /// error, so `run()`'s `errors.last()` is that first error.
     fn run_deferred(&mut self);
-    /// Report at an explicit (file, line), appending `suffix`, with the same dedup as `error`.
-    fn error_at(&mut self, file: u32, line: u32, suffix: Option<&str>, message: String);
+    /// Report at an explicit origin, appending its suffix, de-duplicated by
+    /// (file, line, message without suffix) like `error`.
+    fn report_at(&mut self, origin: &Origin, message: String);
 }
 ```
+
+Plan 018's `error_at(file, line, msg)` for pass-1 enum diagnostics is `report_at` with no suffix; whichever plan lands first adds it.
 
 Contract for both users:
 
@@ -261,7 +274,7 @@ Contract for both users:
 - A check may instead carry an `Expr` to evaluate in `run_deferred`. The symbol table is complete there, but loop counters are not available, so anything using `\i` must be evaluated at record time.
 - Nothing is queued on pass 1. The queue is cleared at the start of each `run()` and `diagnostics()`.
 
-Plan 021 must reconcile its own hook design with this one; see that plan's §8 and the orchestration notes in the PR.
+Entries and the table record are evaluated at record time on pass 2, so `.table` needs no drain-time evaluator; plan 021 adds the side-effect-free `eval_final` for assertions.
 
 ### 5.3 Key sets: consuming plan 018's enum registry
 
