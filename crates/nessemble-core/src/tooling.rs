@@ -989,6 +989,12 @@ fn parse_data_line(line: &str) -> Option<(String, String, Vec<String>)> {
     if lexemes.iter().any(|l| l.kind == LexKind::Comment) {
         return None;
     }
+    // A trailing comma continues the operand list onto the next line, so this
+    // line is only the start of one statement: re-rendering it on its own would
+    // drop the comma and strand the continuation as a statement of its own.
+    if ends_with_operand_comma(line, &lexemes) {
+        return None;
+    }
     let indent = line[..first.start].to_string();
     let args = line[first.end..].trim();
     let values: Vec<String> = args
@@ -5880,5 +5886,28 @@ data:
             "{:?}",
             findings[0]
         );
+    }
+    #[test]
+    fn format_keeps_a_data_list_continued_onto_the_next_line() {
+        // The trailing comma used to be dropped by consolidation, leaving `2, 3`
+        // as a statement of its own, which no longer assembles.
+        let src = "lbl:\n  .db 1,\n2, 3\n  .lobytes x\n";
+        let out = format(src);
+        assert_eq!(out, "lbl:\n.db 1,\n    2, 3\n.lobytes x\n");
+        assert_eq!(format(&out), out);
+        // Lines around it still consolidate, but never into it.
+        let src = ".db 0\n.db 9\n.db 1,\n  2\n.db 3\n.db 4\n";
+        assert_eq!(format(src), ".db 0, 9\n.db 1,\n    2\n.db 3, 4\n");
+    }
+
+    #[test]
+    fn format_preserves_the_bytes_of_a_continued_data_list() {
+        let src = "lbl:\n  .db 1,\n2, 3\n  .dw $1234,\n    $5678\n  .color $FF0000,\n$00FF00\n";
+        let opts = crate::Options::default();
+        let before = crate::assemble(src, &opts).expect("original assembles").rom;
+        let after = crate::assemble(&format(src), &opts)
+            .expect("formatted assembles")
+            .rom;
+        assert_eq!(before, after);
     }
 }
