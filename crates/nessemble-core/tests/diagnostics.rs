@@ -324,7 +324,7 @@ fn a_twelve_line_custom_pseudo_call_still_receives_every_argument() {
     )
     .unwrap();
     assert_eq!(a.rom, (0u8..12).collect::<Vec<_>>());
-    assert!(a.warnings.is_empty());
+    assert!(a.warnings.is_empty(), "{:?}", a.warnings);
 }
 
 // ─── 3. Macro argument count ───────────────────────────────────────────────
@@ -590,7 +590,8 @@ fn duplicate_rules_are_configurable_independently() {
     let mut rules = AsmRules::default();
     rules.set(AsmRule::DuplicateSymbol, RuleSeverity::Off);
     rules.set(AsmRule::DuplicateSymbolSameValue, RuleSeverity::Off);
-    assert!(run_with(src, rules).unwrap().warnings.is_empty());
+    let warnings = run_with(src, rules).unwrap().warnings;
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -748,7 +749,8 @@ fn an_out_of_range_line_in_a_loop_or_macro_warns_once() {
 fn out_of_range_is_configurable() {
     let mut rules = AsmRules::default();
     rules.set(AsmRule::ValueOutOfRange, RuleSeverity::Off);
-    assert!(run_with(".db 300\n", rules).unwrap().warnings.is_empty());
+    let warnings = run_with(".db 300\n", rules).unwrap().warnings;
+    assert!(warnings.is_empty(), "{warnings:?}");
 
     let mut rules = AsmRules::default();
     rules.set(AsmRule::ValueOutOfRange, RuleSeverity::Error);

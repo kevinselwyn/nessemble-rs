@@ -1880,7 +1880,7 @@ fn a_label_with_content_fails_with_the_reference_framing() {
         stderr,
         "Error in `t.asm` on line 1: a label must be on a line of its own; move `.db 1` to the next line\n"
     );
-    assert!(bytes.is_empty());
+    assert!(bytes.is_empty(), "{bytes:02x?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
