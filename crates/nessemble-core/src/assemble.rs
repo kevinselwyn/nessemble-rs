@@ -14,7 +14,7 @@ use nessemble_i18n::t;
 use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
 
 use crate::ast::{
-    BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo, Stmt,
+    BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo, Stmt, UnOp,
 };
 use crate::diagnostic::{AsmRule, AsmRules, Diag, Expansion, RuleSeverity};
 
@@ -2402,6 +2402,15 @@ impl Assembler {
                 let rhs = self.eval(b);
                 Self::apply(lhs, *op, rhs)
             }
+            Expr::Unary(op, e) => Self::apply_unary(*op, self.eval(e)),
+        }
+    }
+
+    fn apply_unary(op: UnOp, v: i64) -> i64 {
+        match op {
+            UnOp::Neg => v.wrapping_neg(),
+            UnOp::Compl => !v,
+            UnOp::Not => i64::from(v == 0),
         }
     }
 
@@ -2599,6 +2608,7 @@ fn literal_eval(expr: &Expr) -> Option<i64> {
         Expr::High(e) => Some((literal_eval(e)? >> 8) & 0xFF),
         Expr::Low(e) => Some(literal_eval(e)? & 0xFF),
         Expr::Binary(a, op, b) => Some(Assembler::apply(literal_eval(a)?, *op, literal_eval(b)?)),
+        Expr::Unary(op, e) => Some(Assembler::apply_unary(*op, literal_eval(e)?)),
     }
 }
 

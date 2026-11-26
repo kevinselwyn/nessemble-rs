@@ -1,9 +1,7 @@
 # nessemble-rs: A Plan for Unary Operators (`-`, `~`, `!`)
 
-> Status: **Proposed.** Points marked **decided** were settled with the
-> maintainer. Points marked **proposed** are this plan's own choices, and §8
-> lists them for sign-off. Suggested merge position: first of the six plans
-> 018–023.
+> Status: **Shipped.** Built as designed; the few deviations found while
+> building are recorded in [As built](#as-built).
 
 ---
 
@@ -472,3 +470,36 @@ When this ships, update this plan's status line and add an "As built" section.
 ## Decisions settled with the maintainer
 
 1. Results stay ordinary signed integers. A mask such as `AND #~$80`, which falls outside the byte range, is documented with the `LOW(~$80)` workaround; there is no 8-bit special case (§8).
+
+---
+
+## As built
+
+Shipped as §3 describes: `Tok::Tilde`/`Tok::Bang` in the lexer,
+`UnOp`/`Expr::Unary` in the AST, `parse_unary` in front of `parse_primary`, and
+`apply_unary` shared by `Assembler::eval` and `literal_eval`. The §8 proposed
+points were taken as written: `-a->b` is `-(a->b)`, no new diagnostic text, and
+`LDA !` no longer reports an unknown register.
+
+Deviations and findings:
+
+- **`LDA !` (unindented) is not the §5 case.** An unindented `LDA` is read as a
+  constant definition, so the line reports plan 017's ``unexpected `!` after
+  `LDA` `` message. The indented `  LDA !` reports `expected expression` as §5
+  says, and the tests use that form.
+- **Dangling operator at end of line.** As on 2.27.0 for `.if 1 +`, an
+  expression left dangling at the end of a line is reported on the line of the
+  *next* token (`.if !` followed by `.endif` reports the `.endif` line). This is
+  pre-existing parser behaviour and is not changed here; the §5 tests use a
+  final line.
+- **Anonymous-label regression bytes** were taken from the 2.27.0 binary with
+  the last line spelled `.dw :- + 0 - 1` (2.27.0 cannot parse `:- + -1`); the
+  two group identically.
+- **`tok_text`** (the token-quoting helper plan 017 added in `parse.rs`) gained
+  `~` and `!` spellings; it matches `Tok` exhaustively.
+- **Tests.** Lexer and parser unit tests in their modules; integration tests in
+  `crates/nessemble-core/tests/unary_operators.rs`; the prewarm case in
+  `tests/prewarm.rs`; format, highlight and lint tests in `tooling.rs`; an LSP
+  diagnostics and semantic-token test in `nessemble-lsp`. The corpus goldens
+  pass unchanged. The reference-corpus ROM-hash check (§6.4) is the
+  maintainer's to run before merge.

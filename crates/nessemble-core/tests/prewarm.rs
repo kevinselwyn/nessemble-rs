@@ -162,3 +162,11 @@ fn a_parse_failure_yields_no_candidates_rather_than_an_error() {
     let candidates = prewarm_candidates(".db 1 +\n", &Options::default());
     assert_eq!(candidates, [] as [nessemble_core::PrewarmCandidate; 0]);
 }
+
+#[test]
+fn a_unary_literal_argument_is_a_candidate() {
+    // `plans/018-unary-operators.md`: `-1`, `~0`, `!0` are literals.
+    let candidates = prewarm_candidates(".probe -1, ~0, !0\n", &Options::default());
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].ints, vec![-1, -1, 1]);
+}
