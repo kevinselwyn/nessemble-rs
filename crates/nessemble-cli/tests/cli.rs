@@ -1992,3 +1992,34 @@ fn nessemblerc_assemble_rules_apply_and_flags_override_them() {
     assert!(stderr.contains("invalid severity `loud`"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ─── Value enums (plans/019-value-enums.md) ──────────────────────────────────
+
+const OP_ENUM: &str = ".enum $00, 1, OP\nOP_YIELD\nOP_DRAW\nOP_FRAME\n.endenum\n";
+
+#[test]
+fn a_named_enum_lists_its_members_and_count() {
+    let dir = diag_project("enum-list", &[("t.asm", OP_ENUM)]);
+    let (code, stderr, _) = assemble_in(&dir, &["-l", "t.txt"]);
+    assert_eq!((code, stderr.as_str()), (0, ""));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("t.txt")).unwrap(),
+        "[constants]\n0000 = OP_YIELD\n0001 = OP_DRAW\n0002 = OP_FRAME\n0003 = OP_COUNT\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unterminated_named_enum_fails_with_the_reference_framing() {
+    let dir = diag_project(
+        "enum-open",
+        &[("t.asm", ".db 0\n.enum $00, 1, OP\nOP_YIELD\n")],
+    );
+    let (code, stderr, _) = assemble_in(&dir, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        stderr,
+        "Error in `t.asm` on line 2: `.enum OP` has no matching `.endenum`\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

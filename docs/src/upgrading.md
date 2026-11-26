@@ -12,6 +12,40 @@ around them changed. This page covers what a 1.x user needs to know.
   byte-for-byte identical to 1.x output. The one behavioral change is how
   relative filenames are resolved — see [Include & asset paths](#include--asset-paths).
 
+## `.enum` blocks (value enums)
+
+The release that adds value enums (bare member names and named enums; see
+[`.enum`](syntax.md#enum)) changes what two kinds of line inside an `.enum`
+mean. Neither is common, and a block made only of `NAME .rs N` lines is
+unaffected.
+
+- **A bare name inside an `.enum` is now a member.** It takes the counter's
+  value and advances it, like `NAME .rs 1`. Before, it was silently a constant
+  equal to `1`:
+
+  ```nessemble
+  .enum $10
+  FIRST     ; was $01, now $10
+  SECOND    ; was $01, now $11
+  .endenum
+  ```
+
+  This includes pasted names in a `.for` body (`SLOT\i` gave every slot `1`).
+
+- **`NAME = expr` inside an `.enum` now resets the counter** to `expr + STEP`.
+  Before, it defined the constant and left the counter where it was:
+
+  ```nessemble
+  .enum $10, 2
+  FOO .rs 1   ; $10
+  BAR .rs 1   ; $12
+  QQ = 5      ; $05
+  ZZ .rs 1    ; was $14, now $07
+  .endenum
+  ```
+
+  To keep the old values, move the `=` line outside the block.
+
 ## Include & asset paths
 
 - In 1.x, every filename-based directive resolved its path against a single

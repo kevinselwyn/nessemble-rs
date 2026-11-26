@@ -104,6 +104,16 @@ macrodef-in-for = `.macrodef` is not allowed inside a `.for` body
 for-if-unbalanced = A conditional opened in a `.for` body must close in the same body (an `.if` and its `.endif` straddle the `.endfor`)
 for-iteration-suffix = { $message } (in `.for` iteration { $counters })
 
+## Enums (`.enum` / `.endenum`)
+
+enum-member-twice = Enum member `{ $name }` is defined twice in the same `.enum`
+enum-member-invalid = Expected an `.enum` member name (two or more letters, digits or `_`, not starting with a digit)
+enum-name-twice = Enum `{ $name }` is already defined on line { $line } of `{ $file }`
+enum-name-invalid = The `.enum` name must be a name, as in `.enum $00, 1, OP`
+enum-nested-named = An `.enum` cannot be opened inside another `.enum` when either is named; close the `.enum` on line { $line } with `.endenum` first
+enum-unterminated = `.enum { $name }` has no matching `.endenum`
+enum-member-indented = Unknown opcode `{ $mnemonic }` (an `.enum` member must start in the first column)
+
 ## Diagnostic framing (CLI)
 
 error-line = Error in `{ $file }` on line { $line }: { $message }

@@ -1,8 +1,7 @@
 # nessemble-rs: A Plan for Value Enums (bare names in `.enum`)
 
-> Status: **Proposed.** Points marked decided were settled with the
-> maintainer. Proposed points are settled here with reasons and listed again in
-> §8 for the maintainer to confirm. Provides the enum registry consumed by
+> Status: **Shipped.** Built as designed; the deviations found while building
+> are recorded in [As built](#as-built). Provides the enum registry consumed by
 > [plan 020](020-index-keyed-tables.md) (`.table NAME`).
 
 ---
@@ -355,3 +354,52 @@ This file uses the same helpers as `for_loops.rs` (`bytes`, `assembly`, `error`,
 ## Decisions settled with the maintainer
 
 1. `NAME = expr` inside `.enum` resets the counter in every enum, named or not, and ships as **its own release-notes item**, separate from the bare-name change, in both the changeset and `upgrading.md` (§2.3, Q3).
+
+---
+
+## As built
+
+Shipped as §3 describes. `Pseudo::Enum { start, step, name }` in the AST; the
+parser takes the optional third argument and tracks `enum_depth` for E2; the
+assembler keeps an `OpenEnum` frame plus the `enums` / `enum_index` registry,
+routes bare names, `=` members and `.rs` members through one `enum_member`
+helper, and exposes the registry as `Assembly::enums` (and
+`Assembler::enums()`), with `enum_info` ready for plan 020. The §8 proposed
+points were taken as written.
+
+Deviations and findings:
+
+- **Macro diagnostics point into the body.** §2.6 and test 11 say a member
+  diagnostic from a macro expansion names the call site. Since plan 017,
+  every diagnostic on an expanded line names the macro body's line, with a
+  note for each `.macro` call (`in expansion of macro `ONE` at t.asm line 6`).
+  The enum diagnostics follow that rule like any other, and the test pins the
+  body line plus the note.
+- **A one-letter enum name is E5.** A single letter lexes as a register token,
+  not a name, so `.enum 0, 1, E` reports E5, which matches the E2 wording
+  ("two or more letters"). The tests use two-letter names.
+- **Suppressed named enums raise nothing.** A named `.enum` inside a false
+  conditional skips E4 and E7 as well as recording, and an unterminated one
+  there does not raise E8.
+- **E9 applies in every `.enum`**, named or not: any implied-operand line whose
+  mnemonic exists in no mode.
+- **The E4 location** is resolved from the stored `.enum` file and line with no
+  macro expansion, so for an enum written inside a macro body it names the
+  expanded line rather than the body line. No test depends on this.
+- **Formatter tests.** Two final-newline tests formatted a column-1 `nop`,
+  which the assembler reads as a constant. They now format `  nop`, since a
+  column-1 lone name now keeps its column (§3.6).
+- **LSP.** There is no `prepareRename` handler, so the `NAME_COUNT` refusal is
+  a `RequestFailed` error response to `textDocument/rename` carrying the §3.7
+  message. Go-to-definition prefers a symbol over an enum name of the same
+  spelling, so `OP = 3` beside `.enum 0, 1, OP` resolves to the constant.
+- **`upgrading.md`** had no per-release section, so the two behaviour changes
+  went into a new "`.enum` blocks (value enums)" section, each with before and
+  after values. They also ship as two separate changesets, per the maintainer
+  decision.
+- **Tests.** Integration tests are in `crates/nessemble-core/tests/value_enums.rs`
+  (which includes the no-source-map-spans check). Parser and formatter unit
+  tests are in their modules, LSP tests are in `nessemble-lsp`, and CLI tests
+  for `-l` and E8 are in `cli.rs`. The corpus goldens pass unchanged. The
+  maintainer still needs to run the reference-corpus ROM-hash check before
+  merge.

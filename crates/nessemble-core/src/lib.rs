@@ -21,7 +21,8 @@ mod preprocess;
 pub mod tooling;
 
 pub use assemble::{
-    crc_32, CustomOutput, CustomResolver, ListSymbol, PrewarmCandidate, SourceMap, SourceSpan,
+    crc_32, CustomOutput, CustomResolver, EnumInfo, EnumMember, ListSymbol, PrewarmCandidate,
+    SourceMap, SourceSpan,
 };
 pub use diagnostic::{AsmRule, AsmRules, Diag, RuleSeverity};
 pub use paths::{
@@ -95,6 +96,8 @@ pub struct Assembly {
     pub symbols: Vec<ListSymbol>,
     /// Byte-exact source map, or `None` unless [`Options::source_map`] was set.
     pub source_map: Option<SourceMap>,
+    /// Every named `.enum`, in source order (`plans/019-value-enums.md`).
+    pub enums: Vec<EnumInfo>,
 }
 
 /// Render the list-file (`-l`) contents from the defined symbols, mirroring the
@@ -638,6 +641,7 @@ fn assemble_impl(
         warnings: asm.take_warnings(),
         symbols,
         source_map,
+        enums: asm.enums().to_vec(),
     })
 }
 

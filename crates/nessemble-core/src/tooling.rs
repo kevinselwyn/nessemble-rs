@@ -609,7 +609,7 @@ fn format_line(source: &str, line: &[Lexeme], opts: &FormatOptions, indent: &str
             .to_string();
     }
 
-    let instruction_line = is_indented(source, &sig, opts);
+    let instruction_line = is_indented(source, &sig, opts, first_sig > 0);
     let lead = if instruction_line { indent } else { "" };
     let body = build_body(source, line, first_sig, opts, instruction_line);
     format!("{lead}{body}").trim_end().to_string()
@@ -741,12 +741,25 @@ fn cased_lexeme(source: &str, lx: &Lexeme, opts: &FormatOptions, is_mnemonic: bo
 /// (`name = …`) sit at column 0 (returns `false`); instructions are indented
 /// (returns `true`). Directives follow [`FormatOptions::indent_directives`]:
 /// pinned to column 0 by default, indented like instructions when enabled.
-fn is_indented(source: &str, sig: &[&Lexeme], opts: &FormatOptions) -> bool {
+fn is_indented(
+    source: &str,
+    sig: &[&Lexeme],
+    opts: &FormatOptions,
+    written_indented: bool,
+) -> bool {
     let first = sig[0];
     match first.kind {
         LexKind::Directive => opts.indent_directives,
         LexKind::Ident => {
             let n = name_lexemes(source, sig);
+            // A lone name (plus an optional comment) means different things in
+            // column 1 (a constant, or an `.enum` member) and indented (an
+            // implied-operand instruction), so it keeps the side it was
+            // written on: moving it would change the assembled bytes
+            // (`plans/019-value-enums.md` §3.6).
+            if sig.get(n).is_none_or(|l| l.kind == LexKind::Comment) {
+                return written_indented;
+            }
             let is_const = sig.get(n).is_some_and(|l| is_punct(source, l, "="));
             !(is_named_label(source, sig) || is_const || is_label_with_content(source, sig, n))
         }
@@ -3191,10 +3204,34 @@ mod tests {
     }
 
     #[test]
+    fn format_keeps_a_lone_name_on_the_side_it_was_written() {
+        // Column 1: a constant / `.enum` member. Indented: an instruction.
+        assert_eq!(format("FLAG\n"), "FLAG\n");
+        assert_eq!(format("FLAG ; c\n"), "FLAG ; c\n");
+        assert_eq!(format("ROW\\i\n"), "ROW\\i\n");
+        assert_eq!(format(" RTS\n"), "    RTS\n");
+    }
+
+    #[test]
+    fn format_leaves_the_value_enum_example_alone() {
+        let src = ".enum $00, 1, OP\nOP_YIELD\nOP_DRAW ; redraw\nOP_FRAME\n.endenum\n";
+        let once = format(src);
+        assert_eq!(once, src);
+        assert_eq!(format(&once), once);
+        let raw = crate::Options {
+            nes: false,
+            ..crate::Options::default()
+        };
+        let before = crate::assemble(src, &raw).expect("assembles").symbols;
+        let after = crate::assemble(&once, &raw).expect("assembles").symbols;
+        assert_eq!(before, after);
+    }
+
+    #[test]
     fn format_ensures_a_final_newline_by_default() {
         // Pass 5 (finalNewline, default on) adds the missing trailing newline.
-        assert_eq!(format("nop"), "    nop\n");
-        assert_eq!(format("nop\n"), "    nop\n");
+        assert_eq!(format("  nop"), "    nop\n");
+        assert_eq!(format("  nop\n"), "    nop\n");
     }
 
     #[test]
@@ -3203,8 +3240,8 @@ mod tests {
             final_newline: false,
             ..FormatOptions::default()
         };
-        assert_eq!(format_with("nop", &opts), "    nop");
-        assert_eq!(format_with("nop\n", &opts), "    nop\n");
+        assert_eq!(format_with("  nop", &opts), "    nop");
+        assert_eq!(format_with("  nop\n", &opts), "    nop\n");
     }
 
     #[test]
