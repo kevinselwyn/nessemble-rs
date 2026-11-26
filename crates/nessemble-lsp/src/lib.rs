@@ -67,8 +67,8 @@ use lsp_types::{
 use nessemble_core::tooling::{self, LexKind, RuleSeverity};
 use nessemble_core::{
     diagnose_project_with, diagnose_source_with, lenient_custom_resolver, match_nes_color,
-    parse_pseudo_mapping, Diag, ListSymbol, Options, ProjectDiagnostics, NES_PALETTE,
-    PROJECT_ROOT_PREFIX,
+    parse_pseudo_mapping, Diag, ListSymbol, Options, ProjectDiagnostics, TableEntryInfo,
+    NES_PALETTE, PROJECT_ROOT_PREFIX,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
@@ -135,7 +135,49 @@ fn doc_kind(uri: &Url, language_id: &str) -> DocKind {
 struct Document {
     text: String,
     symbols: Vec<ListSymbol>,
+    /// The `.table` entries the last assembly checked, for hovers.
+    tables: DocTables,
     kind: DocKind,
+}
+
+/// The checked `.table` entries that concern one document
+/// (`plans/020-index-keyed-tables.md` §6): those whose tag is in it, and those
+/// whose `.table` line is.
+#[derive(Default, Clone)]
+struct DocTables {
+    tags: Vec<TableEntryInfo>,
+    heads: Vec<TableEntryInfo>,
+}
+
+impl DocTables {
+    /// The entries of `all` whose tag or `.table` is in a file named in `names`.
+    fn select(all: &[TableEntryInfo], names: &HashSet<&str>) -> Self {
+        DocTables {
+            tags: all
+                .iter()
+                .filter(|t| names.contains(t.file.as_str()))
+                .cloned()
+                .collect(),
+            heads: all
+                .iter()
+                .filter(|t| names.contains(t.table_file.as_str()))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    fn extend(&mut self, other: DocTables) {
+        for t in other.tags {
+            if !self.tags.contains(&t) {
+                self.tags.push(t);
+            }
+        }
+        for t in other.heads {
+            if !self.heads.contains(&t) {
+                self.heads.push(t);
+            }
+        }
+    }
 }
 
 /// In-memory server state: every open document, keyed by URI, kept in sync with
@@ -186,6 +228,7 @@ impl Server {
                     Document {
                         text: p.text_document.text,
                         symbols: Vec::new(),
+                        tables: DocTables::default(),
                         kind,
                     },
                 );
@@ -228,6 +271,7 @@ impl Server {
         if !results.changed_symbols.is_empty() {
             if let Some(doc) = self.documents.get_mut(changed) {
                 doc.symbols = results.changed_symbols;
+                doc.tables = results.changed_tables;
             }
         }
 
@@ -394,9 +438,16 @@ impl Server {
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
         symbols.dedup_by(|a, b| a.name == b.name);
 
+        let changed_norm = normalize(&changed_path);
+        let mut tables = DocTables::default();
+        for r in &runs {
+            tables.extend(r.tables_for(&changed_norm));
+        }
+
         DiagResults {
             per_file,
             changed_symbols: symbols,
+            changed_tables: tables,
         }
     }
 
@@ -436,6 +487,7 @@ impl Server {
         DiagResults {
             per_file,
             changed_symbols: Vec::new(),
+            changed_tables: DocTables::default(),
         }
     }
 
@@ -761,11 +813,44 @@ impl Server {
                 range: Some(range),
             });
         }
+        // A `.table` entry's `[KEY]` tag reports how its entry checked out,
+        // after the key's own symbol hover when the cursor is on a name.
+        if let Some(tag_range) = tag_range_at(&doc.text, pos) {
+            if let Some(tag_md) = tag_hover(&doc.tables, &doc.text, pos.line) {
+                let ident = token_at(&doc.text, pos).filter(|t| t.kind == LexKind::Ident);
+                let plain = ident.as_ref().and_then(|t| {
+                    ident_hover(
+                        t.text,
+                        &doc.text,
+                        &doc.symbols,
+                        self.signature_for(uri, t.text).as_ref(),
+                    )
+                });
+                let value = match plain {
+                    Some(md) => format!("{md}\n\n{tag_md}"),
+                    None => tag_md,
+                };
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
+                    }),
+                    range: Some(ident.map_or(tag_range, |t| t.range)),
+                });
+            }
+        }
         let token = token_at(&doc.text, pos)?;
         let markdown = match token.kind {
             // A custom pseudo-op directive shows the script it maps to (and
             // its `custom` function's doc comment, if any); a built-in
             // directive shows its own description.
+            LexKind::Directive if token.text.eq_ignore_ascii_case(".table") => {
+                let md = directive_hover(token.text)?;
+                match table_head_hover(&doc.tables, pos.line) {
+                    Some(head) => format!("{md}\n\n{head}"),
+                    None => md,
+                }
+            }
             LexKind::Directive => {
                 directive_hover(token.text).or_else(|| self.custom_directive_hover(token.text))?
             }
@@ -1203,6 +1288,8 @@ struct Analysis {
     /// for completion and hover. Empty when a syntax error blocked semantic
     /// analysis.
     symbols: Vec<ListSymbol>,
+    /// This buffer's checked `.table` entries.
+    tables: DocTables,
 }
 
 /// Scan `text` (the buffer at `uri`) for *all* errors and warnings — with
@@ -1235,9 +1322,11 @@ fn analyze(uri: &Url, text: &str, known_custom: &HashSet<String>) -> Analysis {
             text,
         ));
     }
+    let names: HashSet<&str> = std::iter::once(top_name.as_str()).collect();
     Analysis {
         diagnostics,
         symbols: found.symbols,
+        tables: DocTables::select(&found.tables, &names),
     }
 }
 
@@ -1247,6 +1336,7 @@ fn analyze(uri: &Url, text: &str, known_custom: &HashSet<String>) -> Analysis {
 struct DiagResults {
     per_file: HashMap<Url, Vec<Diagnostic>>,
     changed_symbols: Vec<ListSymbol>,
+    changed_tables: DocTables,
 }
 
 /// Single-file fallback: analyze just the changed buffer (no project context),
@@ -1258,6 +1348,7 @@ fn single_file(changed: &Url, text: &str, known_custom: &HashSet<String>) -> Dia
     DiagResults {
         per_file,
         changed_symbols: analysis.symbols,
+        changed_tables: analysis.tables,
     }
 }
 
@@ -1269,6 +1360,7 @@ struct Run {
     files: Vec<String>,
     norm_paths: Vec<PathBuf>,
     symbols: Vec<ListSymbol>,
+    tables: Vec<TableEntryInfo>,
 }
 
 impl From<ProjectDiagnostics> for Run {
@@ -1280,11 +1372,24 @@ impl From<ProjectDiagnostics> for Run {
             files: pd.files,
             norm_paths,
             symbols: pd.symbols,
+            tables: pd.tables,
         }
     }
 }
 
 impl Run {
+    /// This run's `.table` entries that concern the file at `dpath`.
+    fn tables_for(&self, dpath: &Path) -> DocTables {
+        let names: HashSet<&str> = self
+            .files
+            .iter()
+            .zip(&self.norm_paths)
+            .filter(|(_, p)| p.as_path() == dpath)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        DocTables::select(&self.tables, &names)
+    }
+
     /// This run's diagnostics for the file at normalized path `dpath`, tagged
     /// with severity. A diagnostic belongs to `dpath` when its file name matches
     /// one whose resolved path is `dpath`.
@@ -2363,6 +2468,145 @@ fn token_at(text: &str, pos: Position) -> Option<Located<'_>> {
     })
 }
 
+/// `$NN` for 0–255, `$NNNN` above that, decimal when negative — how the
+/// assembler's table diagnostics print keys.
+fn table_hex(v: i64) -> String {
+    if v < 0 {
+        v.to_string()
+    } else if v <= 0xFF {
+        format!("${v:02X}")
+    } else {
+        format!("${v:04X}")
+    }
+}
+
+fn bytes_word(n: usize) -> &'static str {
+    if n == 1 {
+        "byte"
+    } else {
+        "bytes"
+    }
+}
+
+/// The range of the `[KEY]` tag starting the 0-based `pos.line`, when `pos` is
+/// inside it.
+fn tag_range_at(text: &str, pos: Position) -> Option<Range> {
+    let line = text.lines().nth(pos.line as usize)?;
+    let lexemes = tooling::lex(line);
+    let sig: Vec<&tooling::Lexeme> = lexemes
+        .iter()
+        .filter(|l| l.kind != LexKind::Whitespace)
+        .collect();
+    let n = tooling::tag_lexemes(line, &sig);
+    if n == 0 {
+        return None;
+    }
+    let start = utf16_len(&line[..sig[0].start]);
+    let end = utf16_len(&line[..sig[n - 1].end]);
+    (start..=end)
+        .contains(&pos.character)
+        .then(|| Range::new(Position::new(pos.line, start), Position::new(pos.line, end)))
+}
+
+/// The key text written inside the tag on the 0-based `line`.
+fn tag_key_text(text: &str, line: u32) -> Option<String> {
+    let src = text.lines().nth(line as usize)?.trim_start();
+    let inner = src.strip_prefix('[')?;
+    let mut depth = 1usize;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(inner[..i].trim().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Hover markdown for the tag on the 0-based `line`, from the last
+/// assembly's checked entries (`plans/020-index-keyed-tables.md` §6).
+fn tag_hover(tables: &DocTables, text: &str, line: u32) -> Option<String> {
+    use std::fmt::Write as _;
+    let entries: Vec<&TableEntryInfo> = tables.tags.iter().filter(|t| t.line == line + 1).collect();
+    let first = entries.first()?;
+    if entries.len() > 1 {
+        let lo = entries.iter().map(|t| t.index).min().unwrap_or(0);
+        let hi = entries.iter().map(|t| t.index).max().unwrap_or(0);
+        let mut md = format!(
+            "{} entries from this line ({}–{}) of the table on line {}",
+            entries.len(),
+            table_hex(lo),
+            table_hex(hi),
+            first.table_line
+        );
+        let bad = entries.iter().filter(|t| !t.ok).count();
+        if bad > 0 {
+            let _ = write!(md, " · {bad} out of place or the wrong size");
+        }
+        return Some(md);
+    }
+    let key = tag_key_text(text, line).unwrap_or_default();
+    let literal = key.starts_with(['$', '%']) || key.starts_with(|c: char| c.is_ascii_digit());
+    let mut md = if literal || key.is_empty() {
+        table_hex(first.key)
+    } else {
+        format!("`{key}` = {}", table_hex(first.key))
+    };
+    let _ = write!(
+        md,
+        " · entry {} of the table on line {} · {} {}",
+        table_hex(first.index),
+        first.table_line,
+        first.size,
+        bytes_word(first.size)
+    );
+    if first.key != first.index {
+        let _ = write!(md, " · expected tag {}", table_hex(first.index));
+    } else if first.table_entries > 1 && first.size != first.table_size {
+        let _ = write!(
+            md,
+            " · entries in this table are {} {}",
+            first.table_size,
+            bytes_word(first.table_size)
+        );
+    }
+    Some(md)
+}
+
+/// Hover markdown for the `.table` on the 0-based `line`: its resolved form.
+fn table_head_hover(tables: &DocTables, line: u32) -> Option<String> {
+    let entries: Vec<&TableEntryInfo> = tables
+        .heads
+        .iter()
+        .filter(|t| t.table_line == line + 1)
+        .collect();
+    let first = entries.first()?;
+    let lo = entries.iter().map(|t| t.index).min().unwrap_or(0);
+    let hi = entries.iter().map(|t| t.index).max().unwrap_or(0);
+    let keyed = first
+        .keyed_by
+        .as_ref()
+        .map_or_else(String::new, |name| format!(" keyed by `{name}`"));
+    Some(format!(
+        "{} {}{keyed} ({}–{}), {} {} each",
+        first.table_entries,
+        if first.table_entries == 1 {
+            "entry"
+        } else {
+            "entries"
+        },
+        table_hex(lo),
+        table_hex(hi),
+        first.table_size,
+        bytes_word(first.table_size)
+    ))
+}
+
 /// Hover markdown for a directive: its spelling and the shared catalog
 /// description of the group it belongs to.
 fn directive_hover(name: &str) -> Option<String> {
@@ -3000,9 +3244,11 @@ enum BlockTag {
     Macro,
     If,
     For,
+    Table,
 }
 
-/// Foldable regions: `.macrodef`…`.endm`, `.if*`…`.endif` and `.for`…`.endfor` blocks (nested via
+/// Foldable regions: `.macrodef`…`.endm`, `.if*`…`.endif`, `.for`…`.endfor` and
+/// `.table`…`.endtable` blocks (nested via
 /// a stack), subroutine bodies (a label definition down to the first blank
 /// line), plus runs of two or more consecutive line comments.
 fn folding_ranges(text: &str) -> Vec<FoldingRange> {
@@ -3028,6 +3274,8 @@ fn folding_ranges(text: &str) -> Vec<FoldingRange> {
             Some("macrodef") => stack.push((BlockTag::Macro, i)),
             Some("if" | "ifdef" | "ifndef") => stack.push((BlockTag::If, i)),
             Some("for") => stack.push((BlockTag::For, i)),
+            Some("table") => stack.push((BlockTag::Table, i)),
+            Some("endtable") => close_block(&mut stack, BlockTag::Table, i, &mut ranges),
             Some("endm") => close_block(&mut stack, BlockTag::Macro, i, &mut ranges),
             Some("endfor") => close_block(&mut stack, BlockTag::For, i, &mut ranges),
             Some("endif") => close_block(&mut stack, BlockTag::If, i, &mut ranges),
@@ -6252,5 +6500,82 @@ mod tests {
         }
         assert!(ls.iter().any(|l| l == "main"));
         assert!(ls.iter().any(|l| l == ".for") && ls.iter().any(|l| l == ".endfor"));
+    }
+    // -- `.table` (plans/020-index-keyed-tables.md §6) -----------------------
+
+    const TABLE_DOC: &str = concat!(
+        "OP_YIELD = 0\n",          // 0
+        "OP_DRAW = 1\n",           // 1
+        "OP_SFX = 5\n",            // 2
+        ".table\n",                // 3
+        "[OP_YIELD] .dw $1234\n",  // 4
+        "[OP_DRAW]  .dw $5678\n",  // 5
+        "[OP_SFX]   .dw $9ABC\n",  // 6
+        ".endtable\n",             // 7
+        ".table 8, $10\n",         // 8
+        ".for 0, 7\n",             // 9
+        "    [$10+\\i] .db \\i\n", // 10
+        ".endfor\n",               // 11
+        ".endtable\n",             // 12
+    );
+
+    #[test]
+    fn hover_on_a_tag_reports_its_entry() {
+        let md = hover_markdown("file:///t.asm", TABLE_DOC, Position::new(5, 0)).unwrap();
+        assert_eq!(
+            md,
+            "`OP_DRAW` = $01 · entry $01 of the table on line 4 · 2 bytes"
+        );
+        // On the key's name, the symbol hover comes first.
+        let md = hover_markdown("file:///t.asm", TABLE_DOC, Position::new(5, 3)).unwrap();
+        assert!(md.contains("OP_DRAW"), "{md}");
+        assert!(
+            md.ends_with("`OP_DRAW` = $01 · entry $01 of the table on line 4 · 2 bytes"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn hover_on_a_misplaced_tag_names_the_expected_key() {
+        let md = hover_markdown("file:///t.asm", TABLE_DOC, Position::new(6, 0)).unwrap();
+        assert_eq!(
+            md,
+            "`OP_SFX` = $05 · entry $02 of the table on line 4 · 2 bytes · expected tag $02"
+        );
+    }
+
+    #[test]
+    fn hover_on_a_tag_in_a_for_loop_counts_its_entries() {
+        let md = hover_markdown("file:///t.asm", TABLE_DOC, Position::new(10, 5)).unwrap();
+        assert_eq!(
+            md,
+            "8 entries from this line ($10–$17) of the table on line 9"
+        );
+    }
+
+    #[test]
+    fn hover_on_table_shows_its_resolved_form() {
+        let md = hover_markdown("file:///t.asm", TABLE_DOC, Position::new(3, 2)).unwrap();
+        assert!(md.contains("check an indexed table"), "{md}");
+        assert!(md.ends_with("3 entries ($00–$02), 2 bytes each"), "{md}");
+        let src = ".enum 0, 1, OP\nOP_A\nOP_B\n.endenum\n.table OP\n[OP_A] .db 0\n[OP_B] .db 1\n.endtable\n";
+        let md = hover_markdown("file:///e.asm", src, Position::new(4, 2)).unwrap();
+        assert!(
+            md.ends_with("2 entries keyed by `OP` ($00–$01), 1 byte each"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn folding_ranges_cover_tables() {
+        let ranges = folding_ranges(TABLE_DOC);
+        let region = |a: u32, b: u32| {
+            ranges.iter().any(|r| {
+                r.start_line == a && r.end_line == b && r.kind == Some(FoldingRangeKind::Region)
+            })
+        };
+        assert!(region(3, 7));
+        assert!(region(8, 12));
+        assert!(region(9, 11));
     }
 }

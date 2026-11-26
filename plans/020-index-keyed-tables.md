@@ -1,10 +1,9 @@
 # nessemble-rs: A Plan for Index-Keyed Tables (`.table` / `.endtable`)
 
-> Status: **Proposed.** The decided points from the brief are settled. Every
-> point marked *(proposed)* is this plan's choice and is collected in §11 for
-> the maintainer to confirm. Phases 1–2 ship on their own; Phase 3 (the enum
-> form) consumes the registry from [plan 019](019-value-enums.md). The
-> final-pass hook in §5.2 is shared with [plan 022](022-assertions.md).
+> Status: **Implemented** (all three phases). The *(proposed)* points shipped
+> as written; §12 lists where the implementation differs in detail. Phase 3
+> (the enum form) consumes the registry from [plan 019](019-value-enums.md).
+> The final-pass hook in §5.2 is shared with [plan 022](022-assertions.md).
 
 ---
 
@@ -490,6 +489,35 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
 - also `crates/nessemble-core/src/preprocess.rs`, `crates/nessemble-core/src/lexer.rs`, `crates/nessemble-core/src/lib.rs`, `crates/nessemble-i18n/locales/en-US.ftl`, `crates/nessemble-isa/src/lib.rs`, `docs/src/syntax.md`
 
 ---
+
+## 12. As shipped
+
+Where the implementation differs from, or settles details left open by, the
+sections above:
+
+- **Undefined names in keys.** Tag keys and `.table`'s `COUNT`/`FIRST` are also
+  evaluated (and discarded) on pass 1, so a name nothing defines is registered
+  and reported as "symbol not defined" on pass 2 like any other. A bare
+  identifier as `.table`'s first argument is not evaluated on pass 1, so an enum
+  name never becomes an undefined symbol.
+- **Run-once in strict mode.** `report_at` records nothing once an error exists
+  outside collect mode, so `run()`'s `errors.last()` is the first deferred error
+  even when one table has several. Plan 019's `error_at` was left as is rather
+  than rewritten on top of `report_at`.
+- **Messages.** The literal-key form of `table-tag-index` is its own key,
+  `table-tag-index-literal`. `table-for-unbalanced` and `table-if-unbalanced`
+  each name their own block. A tag missing its `]` is `tag-unclosed`. The index
+  in `table-entry-size` / `table-entry-empty` is the key that position calls
+  for (`FIRST + n·STEP`), the same number `table-tag-index` prints.
+- **`TableEntryInfo`** also carries `table_file`, `table_size`,
+  `table_entries` and `keyed_by`, so the LSP's `.table` hover needs no second
+  structure. `ok` is "the tag equals its position's key and the size is right"
+  for every entry, not only up to the first reported mismatch.
+- **Formatter.** A bare tag line, like a directive, is indented only when
+  `indentDirectives` is set. An operand list continued by a trailing comma after
+  a tag is aligned under its first argument, past the tag.
+- **LSP.** The multi-entry hover on a `.for` tag also names the table's line:
+  "8 entries from this line ($10–$17) of the table on line 9".
 
 ## Decisions settled with the maintainer
 

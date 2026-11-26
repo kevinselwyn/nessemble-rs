@@ -115,8 +115,14 @@ Once connected, the server provides:
   [`@/`](syntax.md#project-root-relative-paths) path this doubles as "what root
   did it pick?": a `.nessemblerc` added anywhere above the file changes the
   answer, and this is where that becomes visible without a build.
-- **Folding** — macro (`.macrodef`…`.endm`), conditional (`.if*`…`.endif`) and
-  loop (`.for`…`.endfor`) blocks, and runs of consecutive comments, can be collapsed.
+  Hovering a [`.table`](syntax.md#table) entry's `[KEY]` tag shows the key's
+  value, the entry it is in and its size — and, when it is out of place, the
+  key that position expects; a tag inside a `.for` counts the entries the loop
+  makes. Hovering `.table` itself shows the table's resolved form, such as
+  "40 entries keyed by `OP` ($00–$27), 2 bytes each".
+- **Folding** — macro (`.macrodef`…`.endm`), conditional (`.if*`…`.endif`),
+  loop (`.for`…`.endfor`) and table (`.table`…`.endtable`) blocks, and runs of
+  consecutive comments, can be collapsed.
 - **Rename** — renaming a symbol updates its definition and every use across the
   open buffers.
 - **Code actions** — convert a numeric literal between hexadecimal, decimal, and

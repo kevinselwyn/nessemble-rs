@@ -291,6 +291,9 @@ Reformats nessemble assembly source in an opinionated, [Prettier][prettier]-styl
 way: consistent indentation and comma spacing, `.db`/`.dw`/`.color` data
 consolidated a fixed number of values per line, a blank line after each
 `RTS`/`RTI`, collapsed runs of blank lines, and a normalized final newline.
+Inside a [`.table`](syntax.md#table), the statements after the `[KEY]` tags are
+aligned into one column, one space past the widest tag, and the table's other
+statement lines are padded to the same column.
 Formatting is **cosmetic only** — the assembled ROM is never changed.
 
 ```text
