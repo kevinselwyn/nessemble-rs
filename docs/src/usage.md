@@ -32,6 +32,8 @@ Options:
       --max-operations <n>    cap each pseudo-op script's Rhai operation count
       --time-scripts          report per-directive script call count and wall time
   -c, --check                 check syntax only
+  -W <rule=off|warn|error>    set an assembler diagnostic's severity, overriding `.nessemblerc`
+      --warnings-as-errors    report every assembler warning as an error
   -v, --version               display program version
   -L, --license               display program license
   -h, --help                  Print help
@@ -147,9 +149,88 @@ timing](extending.md#runaway-script-guard-and-timing).
 
 Checks the input for syntax errors only; produces no output.
 
+### -W &lt;rule&gt;=&lt;off|warn|error&gt;
+
+Sets the severity of one of the assembler's [configurable
+diagnostics](#diagnostics), overriding the project's
+[`.nessemblerc`](#assemble). Repeatable; later flags win.
+
+```text
+nessemble game.asm -W value-out-of-range=error -W duplicate-symbol-same-value=off
+```
+
+An unknown rule or level is a usage error.
+
+### --warnings-as-errors
+
+Reports every assembler warning as an error, so the run fails (exit 1) instead
+of succeeding with warnings. This covers the [rule](#diagnostics) warnings and
+the built-in ones (`Overflowing PRG Bank`, …) alike. A rule set to `off` stays
+off.
+
 ### -v, --version / -L, --license / -h, --help
 
 Print the version, license, or usage message respectively.
+
+## Diagnostics
+
+Errors and warnings go to stderr, one per line, naming the file and line:
+
+```text
+Error in `game.asm` on line 12: a label must be on a line of its own; move `.db 1` to the next line
+Warning in `game.asm` on line 40: value 300 ($012C) does not fit in a byte; emitting $2C  [value-out-of-range]
+```
+
+A run with only warnings succeeds (exit 0); any error fails it (exit 1). A
+diagnostic may be followed by indented `note:` lines with supporting locations.
+On a line produced by a `.macro`, the diagnostic names the macro body line, and
+a note names each call that expanded it:
+
+```text
+Error in `game.asm` on line 2: a label must be on a line of its own; move `NOP` to the next line
+  note: in expansion of macro `MAC` at game.asm line 9
+```
+
+### Always errors
+
+These describe source that cannot mean what it says, so they are not
+configurable:
+
+- **A label with content on its line** (`foo: .db 1`, `: NOP`). A label must be
+  on a line of its own; a trailing comment is fine.
+- **Tokens left over after a complete statement** (`.db 1 2 3`, `LDA $10
+  garbage`, `QQ = 1 2`). For a data directive the message suggests the comma
+  that is probably missing; for an unindented instruction (which the language
+  reads as a constant definition), it suggests indenting it.
+- **A macro called with the wrong number of arguments.** A macro takes as many
+  arguments as the highest `\N` its body uses (0 if none), counting a `\N`
+  inside an `.if` too. The error is at the call, with a note naming the
+  definition. A body that reads `\#` handles its own count and is never checked;
+  `\@` and the loop counters `\i` `\j` `\k` are not arguments.
+
+### Configurable warnings
+
+Each has a stable rule id, shown at the end of the warning. Every rule defaults
+to `warn`; set it to `off`, `warn`, or `error` per project in
+[`.nessemblerc`](#assemble) or per run with [`-W`](#-w-ruleoffwarnerror).
+Changing a severity never changes what a successful assembly emits: the
+duplicate rules keep last-definition-wins, and `value-out-of-range` still emits
+the narrowed value.
+
+| Rule id | Default | Reports |
+| --- | --- | --- |
+| `duplicate-symbol` | `warn` | A label or constant redefined with a different value or kind (label vs. constant), and any `.macrodef` of a macro that already exists. The warning is at the new definition and names the one it replaces. |
+| `duplicate-symbol-same-value` | `warn` | A symbol redefined with the same value and kind — a label placed by an includer and again, at the same address, by the file it includes. Harmless, so a project can turn it off without losing `duplicate-symbol`. |
+| `value-out-of-range` | `warn` | A value narrowed to fit a field it does not fit: a byte (`.db`, `.byte`, a `.fill` value, an `.ascii` character plus its offset, an `#immediate`) outside `-128…255`; a word (`.dw`, `.word`) outside `-32768…65535`; a zero-page operand (`<x`, `[x, X]`, `[x], Y`) outside `0…255`; an absolute operand outside `0…65535`. |
+
+Not reported: a name made unique per expansion or iteration (`wait_\@:`,
+`row\i:`), anonymous `:` labels, and a file `.include`d twice (each of its
+lines is still one definition). `LOW()`, `HIGH()`, `.lobytes`, `.hibytes` and
+explicit masks (`(x) & $FF`) are the way to narrow on purpose and are never
+range-checked; the check sees the final value, after `.phase`, once every symbol
+is known.
+
+`nessemble reference diagnostics` lists the rules offline.
 
 ## Commands
 
@@ -186,9 +267,9 @@ anything, so the next build recomputes what it needs.
 ### reference [&lt;category&gt;] [&lt;term&gt;]
 
 Prints reference information from locally bundled data. With no arguments it
-lists the categories (`instructions`, `directives`, `script`); with a category it
-lists its entries; with a term it prints the details (e.g. `reference
-instructions LDA`).
+lists the categories (`instructions`, `directives`, `script`, `diagnostics`); with
+a category it lists its entries; with a term it prints the details (e.g.
+`reference instructions LDA`, `reference diagnostics value-out-of-range`).
 
 The `script` category is the host API a [custom pseudo-op
 script](extending.md) can call, grouped by domain:
@@ -785,5 +866,30 @@ directory can loosen or disable a rule for its files:
   ]
 }
 ```
+
+### assemble
+
+The assembler's [configurable diagnostics](#configurable-warnings) are set under
+an `assemble` key, discovered from the file being assembled (or the current
+directory for stdin). Each value is `"off"`, `"warn"`, or `"error"`; unknown
+rules and levels are rejected, as is any other key in the block.
+
+```json
+{
+  "assemble": {
+    "rules": {
+      "duplicate-symbol": "error",
+      "duplicate-symbol-same-value": "off",
+      "value-out-of-range": "warn"
+    }
+  }
+}
+```
+
+[`-W`](#-w-ruleoffwarnerror) flags override these for one run. The `assemble`
+block is project-wide (an assembly is one program), so it is not allowed inside
+`overrides`. The same severities apply to `nessemble coverage` and to the
+editor's diagnostics. Because assembling now reads `.nessemblerc`, a malformed
+one fails the build with its error rather than being ignored.
 
 [prettier]: https://prettier.io

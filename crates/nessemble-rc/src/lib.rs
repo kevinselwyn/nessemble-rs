@@ -1,4 +1,5 @@
-//! `.nessemblerc` configuration for the `format` and `lint` subcommands.
+//! `.nessemblerc` configuration for the `format` and `lint` subcommands, and
+//! the severities of the assembler's configurable diagnostics (`assemble`).
 //!
 //! A prettier-style JSON config, discovered by walking up from the file (or
 //! directory) being processed. Keys are strict (`deny_unknown_fields`): an
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 use nessemble_core::tooling::{
     Case, FormatOptions, IndentStyle, RuleId, RuleSeverity, SeverityMap,
 };
+use nessemble_core::{AsmRule, AsmRules};
 use regex_lite::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -267,12 +269,47 @@ struct RcOverride {
     options: RcOptions,
 }
 
+/// The `assemble` block of a `.nessemblerc`: the severity of each of the
+/// assembler's configurable diagnostics (see [`AsmRule`]). Project-wide only —
+/// an assembly is one program, so it has no per-glob `overrides`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RcAssemble {
+    /// Rule id → `"off"` / `"warn"` / `"error"`.
+    #[serde(default)]
+    rules: BTreeMap<String, String>,
+}
+
+/// Parse one assembler rule setting, as written in `assemble.rules` or a
+/// `-W <rule>=<level>` flag.
+fn parse_asm_rule(rule: &str, level: &str) -> Result<(AsmRule, RuleSeverity), String> {
+    let id = AsmRule::from_id(rule).ok_or_else(|| {
+        let known: Vec<&str> = AsmRule::ALL.iter().map(|r| r.id()).collect();
+        format!(
+            "unknown assembler rule `{rule}` (expected one of: {})",
+            known.join(", ")
+        )
+    })?;
+    Ok((id, parse_severity(rule, level)?))
+}
+
+/// Parse a `-W <rule>=<off|warn|error>` command-line setting.
+pub fn parse_asm_rule_flag(flag: &str) -> Result<(AsmRule, RuleSeverity), String> {
+    let (rule, level) = flag
+        .split_once('=')
+        .ok_or_else(|| format!("`-W {flag}` must be `<rule>=<off|warn|error>`"))?;
+    parse_asm_rule(rule.trim(), level.trim())
+}
+
 /// The full `.nessemblerc` document.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RcConfig {
     #[serde(default)]
     extensions: Option<Vec<String>>,
+    /// Severities of the assembler's configurable diagnostics.
+    #[serde(default)]
+    assemble: Option<RcAssemble>,
     #[serde(default)]
     overrides: Vec<RcOverride>,
     #[serde(flatten)]
@@ -289,6 +326,8 @@ pub struct Config {
     ignore: Vec<String>,
     overrides: Vec<(String, RcOptions)>,
     lint_overrides: Vec<(String, LintDelta)>,
+    /// `assemble.rules`, validated.
+    assemble_rules: Vec<(AsmRule, RuleSeverity)>,
     root: PathBuf,
 }
 
@@ -312,6 +351,7 @@ impl Config {
             ignore: Vec::new(),
             overrides: Vec::new(),
             lint_overrides: Vec::new(),
+            assemble_rules: Vec::new(),
             root,
         }
     }
@@ -358,6 +398,16 @@ impl Config {
             overrides.push((ov.files, ov.options));
         }
 
+        let mut assemble_rules = Vec::new();
+        if let Some(asm) = &rc.assemble {
+            for (rule, level) in &asm.rules {
+                assemble_rules.push(
+                    parse_asm_rule(rule, level)
+                        .map_err(|e| format!("in `{}` assemble: {e}", path.display()))?,
+                );
+            }
+        }
+
         let extensions = rc.extensions.map_or_else(
             || vec!["asm".to_string()],
             |list| list.iter().map(|e| normalize_ext(e)).collect(),
@@ -370,6 +420,7 @@ impl Config {
             ignore: Vec::new(),
             overrides,
             lint_overrides,
+            assemble_rules,
             root: dir_of(path),
         })
     }
@@ -406,6 +457,17 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// The assembler rule severities: the defaults with the project's
+    /// `assemble.rules` applied. Command-line `-W` flags go on top of this.
+    #[must_use]
+    pub fn assemble_rules(&self) -> AsmRules {
+        let mut rules = AsmRules::default();
+        for (rule, severity) in &self.assemble_rules {
+            rules.set(*rule, *severity);
+        }
+        rules
     }
 
     /// Whether `file`'s extension is in the configured set (directory walks).
@@ -677,6 +739,7 @@ mod tests {
                 .map(|o| (o.files, o.options))
                 .collect(),
             lint_overrides: Vec::new(),
+            assemble_rules: Vec::new(),
             root: PathBuf::from("."),
         };
         // A non-matching file keeps the base (off); a matching one gets the
@@ -838,6 +901,7 @@ mod tests {
             ignore: Vec::new(),
             overrides: Vec::new(),
             lint_overrides,
+            assemble_rules: Vec::new(),
             root: PathBuf::from("."),
         };
         assert_eq!(
@@ -854,5 +918,86 @@ mod tests {
                 .get(RuleId::RequireBlockComment),
             RuleSeverity::Off
         );
+    }
+
+    // ─── Assembler rules ──────────────────────────────────────────────────────
+
+    /// Write `json` as a `.nessemblerc` in a fresh directory and load it.
+    fn load(json: &str) -> Result<Config, String> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nessemble-rc-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".nessemblerc");
+        std::fs::write(&path, json).unwrap();
+        let config = Config::from_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        config
+    }
+
+    #[test]
+    fn assemble_rules_default_to_warn() {
+        let rules = load("{}").unwrap().assemble_rules();
+        for rule in AsmRule::ALL {
+            assert_eq!(rules.get(rule), RuleSeverity::Warn);
+        }
+    }
+
+    #[test]
+    fn assemble_rules_map_from_config_alongside_lint() {
+        let rules = load(
+            r#"{
+                "indentDirectives": true,
+                "lint": { "rules": { "require-block-comment": "warn" } },
+                "assemble": { "rules": {
+                    "duplicate-symbol": "error",
+                    "duplicate-symbol-same-value": "off",
+                    "value-out-of-range": "warn"
+                } }
+            }"#,
+        )
+        .unwrap()
+        .assemble_rules();
+        assert_eq!(rules.get(AsmRule::DuplicateSymbol), RuleSeverity::Error);
+        assert_eq!(
+            rules.get(AsmRule::DuplicateSymbolSameValue),
+            RuleSeverity::Off
+        );
+        assert_eq!(rules.get(AsmRule::ValueOutOfRange), RuleSeverity::Warn);
+    }
+
+    #[test]
+    fn assemble_rule_errors_are_reported() {
+        let err = load(r#"{"assemble":{"rules":{"duplicate-symbols":"error"}}}"#)
+            .err()
+            .unwrap();
+        assert!(
+            err.contains("unknown assembler rule `duplicate-symbols`"),
+            "{err}"
+        );
+        assert!(load(r#"{"assemble":{"rules":{"duplicate-symbol":"loud"}}}"#).is_err());
+        assert!(load(r#"{"assemble":{"rulez":{}}}"#).is_err());
+        // A lint rule is not an assembler rule, and vice versa.
+        assert!(load(r#"{"assemble":{"rules":{"require-block-comment":"warn"}}}"#).is_err());
+        assert!(load(r#"{"lint":{"rules":{"duplicate-symbol":"warn"}}}"#).is_err());
+    }
+
+    #[test]
+    fn w_flags_parse() {
+        assert_eq!(
+            parse_asm_rule_flag("value-out-of-range=error").unwrap(),
+            (AsmRule::ValueOutOfRange, RuleSeverity::Error)
+        );
+        assert_eq!(
+            parse_asm_rule_flag("duplicate-symbol-same-value=off").unwrap(),
+            (AsmRule::DuplicateSymbolSameValue, RuleSeverity::Off)
+        );
+        assert!(parse_asm_rule_flag("value-out-of-range").is_err());
+        assert!(parse_asm_rule_flag("nope=warn").is_err());
+        assert!(parse_asm_rule_flag("value-out-of-range=loud").is_err());
     }
 }

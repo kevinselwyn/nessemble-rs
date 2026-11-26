@@ -1841,3 +1841,154 @@ fn without_time_scripts_no_report_is_printed() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(!stderr.contains("Script timing:"));
 }
+
+// ─── Assembler diagnostics (plans/017-assembler-diagnostics.md) ──────────────
+
+/// A fresh project directory holding `files`, for one diagnostics test.
+fn diag_project(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("nessemble-diag-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    dir
+}
+
+/// Run `nessemble t.asm -o t.bin <extra…>` in `dir`: (exit code, stderr, bytes).
+fn assemble_in(dir: &std::path::Path, extra: &[&str]) -> (i32, String, Vec<u8>) {
+    let _ = std::fs::remove_file(dir.join("t.bin"));
+    let out = bin()
+        .current_dir(dir)
+        .args(["t.asm", "-o", "t.bin"])
+        .args(extra)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+        std::fs::read(dir.join("t.bin")).unwrap_or_default(),
+    )
+}
+
+#[test]
+fn a_label_with_content_fails_with_the_reference_framing() {
+    let dir = diag_project("label", &[("t.asm", "foo: .db 1\n")]);
+    let (code, stderr, bytes) = assemble_in(&dir, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        stderr,
+        "Error in `t.asm` on line 1: a label must be on a line of its own; move `.db 1` to the next line\n"
+    );
+    assert!(bytes.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_macro_arity_error_prints_its_note() {
+    let dir = diag_project(
+        "arity",
+        &[(
+            "t.asm",
+            ".macrodef MAC\n    .db \\1, \\2, \\3\n.endm\n    .macro MAC, $05\n",
+        )],
+    );
+    let (code, stderr, _) = assemble_in(&dir, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        stderr,
+        "Error in `t.asm` on line 4: macro `MAC` takes 3 arguments (it uses \\1-\\3), but this call passes 1\n  note: `MAC` is defined at t.asm line 1\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rule_warnings_print_their_rule_id_and_exit_zero() {
+    let dir = diag_project("warn", &[("t.asm", "foo:\n    .db 1\nfoo:\n    .db 300\n")]);
+    let (code, stderr, bytes) = assemble_in(&dir, &[]);
+    assert_eq!(code, 0);
+    assert_eq!(bytes, vec![1, 0x2C]);
+    assert_eq!(
+        stderr,
+        "Warning in `t.asm` on line 3: `foo` is already defined at t.asm line 1 (as a label at $0000); this definition replaces it  [duplicate-symbol]\n\
+         Warning in `t.asm` on line 4: value 300 ($012C) does not fit in a byte; emitting $2C  [value-out-of-range]\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn w_flags_and_warnings_as_errors_set_severities() {
+    let dir = diag_project(
+        "flags",
+        &[("t.asm", "foo:\n    .db 1\nfoo:\n    .db 300\n")],
+    );
+
+    let (code, stderr, _) = assemble_in(&dir, &["-W", "value-out-of-range=error"]);
+    assert_eq!(code, 1);
+    assert!(stderr.ends_with(
+        "Error in `t.asm` on line 4: value 300 ($012C) does not fit in a byte; emitting $2C  [value-out-of-range]\n"
+    ), "{stderr}");
+
+    let (code, stderr, _) = assemble_in(
+        &dir,
+        &["-W", "value-out-of-range=off", "-W", "duplicate-symbol=off"],
+    );
+    assert_eq!((code, stderr.as_str()), (0, ""));
+
+    let (code, stderr, _) = assemble_in(&dir, &["--warnings-as-errors"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.starts_with("Error in `t.asm` on line 3:"),
+        "{stderr}"
+    );
+
+    let (code, stderr, _) = assemble_in(&dir, &["-W", "no-such-rule=error"]);
+    assert_eq!(code, 129);
+    assert!(
+        stderr.contains("unknown assembler rule `no-such-rule`"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn nessemblerc_assemble_rules_apply_and_flags_override_them() {
+    let dir = diag_project(
+        "rc",
+        &[
+            (
+                ".nessemblerc",
+                r#"{ "assemble": { "rules": {
+                    "duplicate-symbol": "error",
+                    "duplicate-symbol-same-value": "off"
+                } } }"#,
+            ),
+            ("t.asm", "foo:\nfoo:\n    .db 1\nfoo:\n"),
+        ],
+    );
+    // `foo` redefined at the same address (off), then at a different one (error).
+    let (code, stderr, _) = assemble_in(&dir, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        stderr,
+        "Error in `t.asm` on line 4: `foo` is already defined at t.asm line 2 (as a label at $0000); this definition replaces it  [duplicate-symbol]\n"
+    );
+    // The command line wins over the file.
+    let (code, stderr, bytes) = assemble_in(&dir, &["-W", "duplicate-symbol=warn"]);
+    assert_eq!((code, bytes), (0, vec![1]));
+    assert!(
+        stderr.starts_with("Warning in `t.asm` on line 4:"),
+        "{stderr}"
+    );
+
+    // A malformed `assemble` block is reported, not ignored.
+    std::fs::write(
+        dir.join(".nessemblerc"),
+        r#"{ "assemble": { "rules": { "duplicate-symbol": "loud" } } }"#,
+    )
+    .unwrap();
+    let (code, stderr, _) = assemble_in(&dir, &[]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("invalid severity `loud`"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

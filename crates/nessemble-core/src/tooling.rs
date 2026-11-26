@@ -748,7 +748,7 @@ fn is_indented(source: &str, sig: &[&Lexeme], opts: &FormatOptions) -> bool {
         LexKind::Ident => {
             let n = name_lexemes(source, sig);
             let is_const = sig.get(n).is_some_and(|l| is_punct(source, l, "="));
-            !(is_named_label(source, sig) || is_const)
+            !(is_named_label(source, sig) || is_const || is_label_with_content(source, sig, n))
         }
         LexKind::Punct if is_punct(source, first, ":") => false,
         _ => true,
@@ -768,6 +768,22 @@ fn is_named_label(source: &str, sig: &[&Lexeme]) -> bool {
     sig.first().is_some_and(|l| l.kind == LexKind::Ident)
         && sig.get(n).is_some_and(|l| is_punct(source, l, ":"))
         && sig.get(n + 1).is_none_or(|l| l.kind == LexKind::Comment)
+}
+
+/// Whether `sig` is a `name: <more>` line — a label with content after it,
+/// which the assembler rejects ("a label must be on a line of its own"). The
+/// colon touches the name, and what follows is not the `+`/`-` of a `:+`/`:-`
+/// branch operand. The formatter leaves such a line at column 0 rather than
+/// indenting it as an instruction, so its label stays where it was written.
+fn is_label_with_content(source: &str, sig: &[&Lexeme], n: usize) -> bool {
+    let (Some(name), Some(colon)) = (sig.get(n - 1), sig.get(n)) else {
+        return false;
+    };
+    is_punct(source, colon, ":")
+        && name.end == colon.start
+        && sig
+            .get(n + 1)
+            .is_some_and(|l| !is_punct(source, l, "+") && !is_punct(source, l, "-"))
 }
 
 /// How many lexemes the symbol name starting `sig[0]` spans: 1 for a plain name,
@@ -3120,6 +3136,22 @@ mod tests {
         // at column 0; only the `:+`/`:-` *operand* form is an instruction.
         let src = ":\n    LDA <$01\nloop:\n    BNE :-\n";
         assert_eq!(format(src), ":\n    LDA <$01\nloop:\n    BNE :-\n");
+    }
+
+    #[test]
+    fn format_leaves_a_label_with_content_at_column_0() {
+        // `foo: .db 1` is an assembler error (a label must be on a line of its
+        // own). Formatting must not indent it into an instruction-looking line:
+        // it stays put, and assembles to the same error before and after.
+        assert_eq!(format("foo: .db 1\n"), "foo: .db 1\n");
+        assert_eq!(format("    foo: NOP\n"), "foo: NOP\n");
+        // A `:+`/`:-` operand is still an instruction.
+        assert_eq!(format("BEQ :+\n"), "    BEQ :+\n");
+        for src in ["foo: .db 1\n", "    foo: NOP\n"] {
+            let before = crate::assemble(src, &crate::Options::default()).unwrap_err();
+            let after = crate::assemble(&format(src), &crate::Options::default()).unwrap_err();
+            assert_eq!(before.0.message, after.0.message);
+        }
     }
 
     #[test]
