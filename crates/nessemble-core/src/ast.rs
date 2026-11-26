@@ -126,7 +126,14 @@ pub enum Pseudo {
     Checksum(Expr),
     Random(Vec<RandTerm>),
     Color(Vec<Expr>),
-    Enum(Expr, Option<Expr>),
+    /// `.enum START[, STEP[, NAME]]` (`plans/019-value-enums.md`): open a
+    /// block of sequential constants. A `NAME` records the enum in the
+    /// assembler's enum registry and defines `NAME_COUNT`.
+    Enum {
+        start: Expr,
+        step: Option<Expr>,
+        name: Option<String>,
+    },
     Endenum,
     /// `<label> .rs <size>`.
     Rs(String, Expr),

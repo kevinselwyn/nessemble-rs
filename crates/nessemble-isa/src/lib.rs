@@ -88,7 +88,10 @@ pub const DIRECTIVES: &[(&str, &str)] = &[
     (".checksum", "emit a CRC-32 of preceding data"),
     (".random", "emit pseudo-random bytes"),
     (".color", "emit nearest NES palette indices"),
-    (".enum / .endenum", "assign incrementing constants"),
+    (
+        ".enum / .endenum",
+        "assign sequential constants (bare names, `.rs`, `=` resets); a named enum defines NAME_COUNT",
+    ),
     (".rs / .rsset", "reserve sequential storage"),
     (
         ".if / .ifdef / .ifndef / .else / .endif",

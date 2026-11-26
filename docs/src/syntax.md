@@ -382,7 +382,7 @@ Read more about 6502 addressing modes
 | [.endfor](#loops)      | End a [`.for`](#loops) block                                                        |
 | [.endif](#endif)       | End [`.if`](#if)/[`.ifdef`](#ifdef)/[`.ifndef`](#ifndef) statement                  |
 | [.endm](#endm)         | End [`.macrodef`](#macrodef)                                                        |
-| [.enum](#enum)         | Start enumerated variable declarations                                              |
+| [.enum](#enum)         | Start a block of sequential constants                                               |
 | [.fill](#fill)         | Fill with bytes                                                                     |
 | [.font](#font)         | Generate font character tile                                                        |
 | [.for](#loops)         | Repeat a block, unrolled                                                            |
@@ -796,12 +796,9 @@ Usage:
 Example:
 
 ```nessemble
-.enum $0080
-
-TEST_0 .rs 1
-TEST_1 .rs 2
-TEST_2 .rs 1
-
+.enum $00, 1, OP
+OP_YIELD
+OP_DRAW
 .endenum
 ```
 
@@ -848,28 +845,68 @@ See the section on [Macros](#macros) for more information.
 
 ### .enum
 
-Start enumerated variable declarations.
+Start a block of sequential constants, closed by [`.endenum`](#endenum).
 
 Usage:
 
 ```nessemble
-.enum START[, INC]
+.enum START[, STEP[, NAME]]
 ```
 
-* `START` - Number, required. Value at which to start enumerating.
-* `, INC` - Number, optional. Amount to increment after each enumeration.
+* `START` - Number, required. The value of the first member.
+* `, STEP` - Number, optional (default `1`). How far the counter moves for each
+  member. It may be zero or negative.
+* `, NAME` - Name, optional. Names the enum, which defines `NAME_COUNT`. A
+  named enum needs `STEP` written out, even when it is `1`.
+
+Each line in the block is one member:
+
+| Form           | Value   | Counter afterwards |
+| -------------- | ------- | ------------------ |
+| `NAME`         | counter | counter + STEP     |
+| `NAME .rs N`   | counter | counter + N × STEP |
+| `NAME = expr`  | `expr`  | `expr` + STEP      |
+| `NAME\i`       | counter | counter + STEP (inside a [`.for`](#for)) |
+
+The forms can be mixed, and a member line can carry a trailing comment.
+
+**A bare member name must start in the first column.** As everywhere else, an
+indented word is an instruction, so `  NOP` inside an `.enum` still assembles
+to `$EA`, and an indented `  OP_DRAW` is reported as an unknown opcode with a
+hint to move it to the first column. Outside an `.enum`, a bare name is still a
+constant equal to `1`.
+
+`NAME = expr` gives that member the value `expr` and restarts the counter from
+there, as in C: the next member is `expr + STEP`.
 
 Example:
 
 ```nessemble
-.enum $0080
-
-TEST_0 .rs 1
-TEST_1 .rs 2
-TEST_2 .rs 1
-
+.enum $00, 1, OP
+OP_YIELD          ; $00
+OP_DRAW           ; $01
+OP_FRAME          ; $02
+OP_SPECIAL = $10  ; $10
+OP_AFTER          ; $11
 .endenum
+
+    LDA #OP_COUNT ; 5
 ```
+
+A named enum defines one constant, `NAME_COUNT` (the name followed by
+`_COUNT`), equal to the number of members. It can be used before the enum, like
+any constant. The name itself is not a symbol: it cannot be used in an
+expression, `.ifdef OP` is false, and a constant called `OP` can sit alongside
+`.enum $00, 1, OP`. Members do not need to share the name as a prefix.
+
+Notes:
+
+* Members inside a false [`.if`](#if) are not defined and not counted, but
+  still move the counter, as `.rs` always has.
+* An `.enum` inside another resets the counter, and the first `.endenum` closes
+  both. When either one is named, nesting is an error.
+* A named `.enum` without a matching `.endenum` is an error; defining the same
+  name twice is an error, as is defining one member twice in a named enum.
 
 ### .fill
 

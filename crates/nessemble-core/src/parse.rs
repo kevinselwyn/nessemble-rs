@@ -32,6 +32,7 @@ pub fn parse(tokens: Vec<Token>, sources: &[&str]) -> Result<Vec<Line>, ParseErr
         toks: tokens,
         pos: 0,
         sources,
+        enum_depth: 0,
     }
     .parse_program()?;
     match validate_loops(&lines).into_iter().next() {
@@ -49,6 +50,7 @@ pub fn parse_recovering(tokens: Vec<Token>, sources: &[&str]) -> (Vec<Line>, Vec
         toks: tokens,
         pos: 0,
         sources,
+        enum_depth: 0,
     }
     .parse_program_recovering();
     errors.extend(validate_loops(&lines));
@@ -122,6 +124,10 @@ struct Parser<'a> {
     pos: usize,
     /// Source text per file id, for quoting statements in diagnostics.
     sources: &'a [&'a str],
+    /// Open `.enum` blocks, flat like the assembler's model (`.endenum` resets
+    /// it to zero). Only used to word the error for a member line that cannot
+    /// be a name (`plans/019-value-enums.md` §3.2).
+    enum_depth: u32,
 }
 
 impl Parser<'_> {
@@ -401,6 +407,7 @@ impl Parser<'_> {
                     }
                 }
             }
+            _ if self.enum_depth > 0 && !indented => self.err(t!("enum-member-invalid")),
             _ => self.err("unexpected token at start of statement"),
         }
     }
@@ -534,16 +541,30 @@ impl Parser<'_> {
             "fill" => Pseudo::Fill(self.parse_expr_list()?),
             "checksum" => Pseudo::Checksum(self.parse_expr()?),
             "color" => Pseudo::Color(self.parse_expr_list()?),
-            "endenum" => Pseudo::Endenum,
+            "endenum" => {
+                self.enum_depth = 0;
+                Pseudo::Endenum
+            }
             "enum" => {
                 let start = self.parse_expr()?;
-                let inc = if matches!(self.peek(), Some(Tok::Comma)) {
+                let mut step = None;
+                let mut name = None;
+                if matches!(self.peek(), Some(Tok::Comma)) {
                     self.pos += 1;
-                    Some(self.parse_expr()?)
-                } else {
-                    None
-                };
-                Pseudo::Enum(start, inc)
+                    step = Some(self.parse_expr()?);
+                    if matches!(self.peek(), Some(Tok::Comma)) {
+                        self.pos += 1;
+                        match self.peek().cloned() {
+                            Some(Tok::Text(n)) => {
+                                self.pos += 1;
+                                name = Some(n);
+                            }
+                            _ => return self.err(t!("enum-name-invalid")),
+                        }
+                    }
+                }
+                self.enum_depth += 1;
+                Pseudo::Enum { start, step, name }
             }
             "rsset" => Pseudo::Rsset(self.parse_expr()?),
             "random" => Pseudo::Random(self.parse_rand_terms()?),
@@ -1023,6 +1044,46 @@ mod tests {
 
     fn nums(vals: &[i64]) -> Vec<Expr> {
         vals.iter().map(|v| Expr::Num(*v)).collect()
+    }
+
+    fn parse_err(src: &str) -> ParseError {
+        let toks = Lexer::new(src).tokenize();
+        parse(toks, &[src]).expect_err("parse fails")
+    }
+
+    #[test]
+    fn enum_takes_an_optional_name() {
+        match first_stmt(".enum $00, 1, OP\n") {
+            Stmt::Pseudo(Pseudo::Enum { start, step, name }) => {
+                assert_eq!(start, Expr::Num(0));
+                assert_eq!(step, Some(Expr::Num(1)));
+                assert_eq!(name.as_deref(), Some("OP"));
+            }
+            other => panic!("expected .enum, got {other:?}"),
+        }
+        assert!(matches!(
+            first_stmt(".enum $10, 2\n"),
+            Stmt::Pseudo(Pseudo::Enum {
+                name: None,
+                step: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn enum_name_must_be_a_name() {
+        let e = parse_err(".enum 0, 1, 5\n");
+        assert_eq!(e.message, t!("enum-name-invalid"));
+    }
+
+    #[test]
+    fn enum_member_must_be_a_name() {
+        let e = parse_err(".enum 0\nAA\n$10\n.endenum\n");
+        assert_eq!((e.line, e.message), (3, t!("enum-member-invalid")));
+        // Outside an enum, the generic message.
+        let e = parse_err(".enum 0\n.endenum\n$10\n");
+        assert_eq!(e.message, "unexpected token at start of statement");
     }
 
     #[test]

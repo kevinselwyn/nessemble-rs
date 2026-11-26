@@ -262,6 +262,61 @@ impl Default for Ines {
     }
 }
 
+/// One named `.enum` (`plans/019-value-enums.md` §3.3). Recorded on pass 1;
+/// read-only on pass 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumInfo {
+    pub name: String,
+    /// Where the `.enum` was written (a file id and line, for diagnostics that
+    /// point at it).
+    pub file: u32,
+    pub line: u32,
+    /// Value of the first member, or the evaluated `START` when empty.
+    pub start: i64,
+    pub step: i64,
+    /// Recorded members in declaration order.
+    pub members: Vec<EnumMember>,
+    /// `members[i].value == start + i*step` for every `i`.
+    pub contiguous: bool,
+}
+
+/// One recorded member of a named `.enum`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumMember {
+    pub name: String,
+    pub value: i64,
+    /// Counter units consumed: 1 for a bare name, `N` for `.rs N`, 1 for `=`.
+    pub size: i64,
+    pub file: u32,
+    pub line: u32,
+}
+
+impl EnumInfo {
+    /// The number of recorded members (the value of `NAME_COUNT`).
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.members.len()
+    }
+}
+
+/// The `.enum` block currently open, while the assembler walks its body.
+struct OpenEnum {
+    name: Option<String>,
+    /// The `.enum` line's site, so diagnostics and `NAME_COUNT` point at it.
+    file: u32,
+    line: u32,
+    expansion: u32,
+    from_macro: bool,
+    /// Opened inside a false conditional: records nothing.
+    suppressed: bool,
+    /// The evaluated `START` argument.
+    start: i64,
+    step: i64,
+    members: Vec<EnumMember>,
+    /// Member names defined so far, and whether any definition was bare.
+    seen: HashMap<String, bool>,
+}
+
 /// The assembler state for a single run.
 pub struct Assembler {
     nes: bool,
@@ -299,6 +354,12 @@ pub struct Assembler {
     enum_active: bool,
     enum_value: i64,
     enum_inc: i64,
+    /// The `.enum` being walked (see [`OpenEnum`]); `None` outside one.
+    open_enum: Option<OpenEnum>,
+    /// The enum registry: every named `.enum`, in source order. Built on pass
+    /// 1 and never cleared, like `symbols`.
+    enums: Vec<EnumInfo>,
+    enum_index: HashMap<String, usize>,
     rsset: i64,
 
     // Conditional-assembly state (`.if`/`.ifdef`/`.ifndef`/`.else`/`.endif`):
@@ -508,6 +569,9 @@ impl Assembler {
             enum_active: false,
             enum_value: 0,
             enum_inc: 0,
+            open_enum: None,
+            enums: Vec::new(),
+            enum_index: HashMap::new(),
             rsset: 0,
             if_stack: Vec::new(),
             loop_stack: Vec::new(),
@@ -652,6 +716,7 @@ impl Assembler {
         self.pass = 1;
         self.reset_state();
         self.run_pass(lines);
+        self.check_unterminated_enum();
         if let Some(d) = self.errors.last() {
             return Err(d.clone());
         }
@@ -690,6 +755,7 @@ impl Assembler {
         self.enum_active = false;
         self.enum_value = 0;
         self.enum_inc = 0;
+        self.open_enum = None;
         self.rsset = 0;
         self.if_stack.clear();
         self.loop_stack.clear();
@@ -1112,6 +1178,181 @@ impl Assembler {
             .join(", ")
     }
 
+    // -- enums (`plans/019-value-enums.md`) ----------------------------------
+
+    /// Execute `.enum START[, STEP[, NAME]]`: start the counter and open a
+    /// fresh [`OpenEnum`] frame. An unnamed `.enum` inside another replaces
+    /// the open frame (the flat model: the first `.endenum` closes both).
+    fn exec_enum(&mut self, start: &Expr, step: Option<&Expr>, name: Option<&String>) {
+        let suppressed = self.if_suppressed();
+        if self.pass == 1 && !suppressed {
+            if let Some(open) = &self.open_enum {
+                if name.is_some() || open.name.is_some() {
+                    let line = open.line;
+                    self.error(t!("enum-nested-named", line = line));
+                }
+            }
+            if let Some(n) = name {
+                if let Some(&i) = self.enum_index.get(n) {
+                    let (file, line) = (self.enums[i].file, self.enums[i].line);
+                    let at = self.diag_at(file, line, 0);
+                    self.error(t!(
+                        "enum-name-twice",
+                        name = n.as_str(),
+                        line = at.line,
+                        file = at.file
+                    ));
+                }
+            }
+        }
+        let start = self.eval(start);
+        let step = step.map_or(1, |e| self.eval(e));
+        self.enum_active = true;
+        self.enum_value = start;
+        self.enum_inc = step;
+        self.open_enum = Some(OpenEnum {
+            name: name.cloned(),
+            file: self.cur_file,
+            line: self.cur_line,
+            expansion: self.cur_expansion,
+            from_macro: self.cur_from_macro,
+            suppressed,
+            start,
+            step,
+            members: Vec::new(),
+            seen: HashMap::new(),
+        });
+    }
+
+    /// Execute `.endenum`: close the counter, and on pass 1 record a named
+    /// enum in the registry and define its `NAME_COUNT`.
+    fn exec_endenum(&mut self) {
+        self.enum_active = false;
+        self.enum_value = 0;
+        self.enum_inc = 0;
+        let Some(open) = self.open_enum.take() else {
+            return;
+        };
+        let Some(name) = open.name else {
+            return;
+        };
+        if self.pass != 1 || open.suppressed || self.enum_index.contains_key(&name) {
+            return;
+        }
+        let start = open.members.first().map_or(open.start, |m| m.value);
+        let contiguous = (0i64..)
+            .zip(&open.members)
+            .all(|(i, m)| m.value == start + i * open.step);
+        let count = open.members.len() as i64;
+        self.enum_index.insert(name.clone(), self.enums.len());
+        self.enums.push(EnumInfo {
+            name: name.clone(),
+            file: open.file,
+            line: open.line,
+            start,
+            step: open.step,
+            members: open.members,
+            contiguous,
+        });
+        // `NAME_COUNT` is defined where `NAME` is written, so a collision
+        // (`duplicate-symbol`) points at the `.enum` line.
+        let saved = (self.cur_file, self.cur_line, self.cur_expansion);
+        (self.cur_file, self.cur_line, self.cur_expansion) = (open.file, open.line, open.expansion);
+        self.define_symbol(
+            &format!("{name}_COUNT"),
+            count,
+            SymType::Constant,
+            open.from_macro,
+        );
+        (self.cur_file, self.cur_line, self.cur_expansion) = saved;
+    }
+
+    /// Define one `.enum` member `name` with `value`, consuming `size` counter
+    /// units: bare names (`bare`), `NAME .rs N` and `NAME = expr` all come
+    /// here. The counter moves to `value + size * STEP` on both passes, even in
+    /// a false conditional, as `.rs` always has.
+    fn enum_member(&mut self, name: &Name, value: i64, size: i64, bare: bool) {
+        let resolved = match name {
+            Name::Plain(n) => {
+                self.add_symbol(n, value, SymType::Enum);
+                Some(n.clone())
+            }
+            Name::Pasted(base, depth) => {
+                let pasted = self.paste_name(base, *depth);
+                if let Some(n) = &pasted {
+                    self.define_pasted(n, SymType::Enum, Some(value));
+                }
+                pasted
+            }
+        };
+        self.enum_value = value + size * self.enum_inc;
+        let Some(member) = resolved else {
+            return;
+        };
+        if self.pass != 1 || self.if_suppressed() {
+            return;
+        }
+        let (file, line) = (self.cur_file, self.cur_line);
+        let Some(open) = self.open_enum.as_mut() else {
+            return;
+        };
+        if open.suppressed {
+            return;
+        }
+        let named = open.name.is_some();
+        let twice = if let Some(prev_bare) = open.seen.get_mut(&member) {
+            let dup = named || bare || *prev_bare;
+            *prev_bare |= bare;
+            dup
+        } else {
+            open.seen.insert(member.clone(), bare);
+            false
+        };
+        if named {
+            open.members.push(EnumMember {
+                name: member.clone(),
+                value,
+                size,
+                file,
+                line,
+            });
+        }
+        if twice {
+            self.error(t!("enum-member-twice", name = member.as_str()));
+        }
+    }
+
+    /// At the end of pass 1, report a named `.enum` left open.
+    fn check_unterminated_enum(&mut self) {
+        let Some(open) = self.open_enum.take() else {
+            return;
+        };
+        let Some(name) = open.name else {
+            return;
+        };
+        if open.suppressed {
+            return;
+        }
+        self.error_at(
+            open.file,
+            open.line,
+            open.expansion,
+            t!("enum-unterminated", name = name.as_str()),
+        );
+    }
+
+    /// The enum registry entry for `name`, for `.table NAME` (plan 020).
+    #[allow(dead_code)]
+    pub(crate) fn enum_info(&self, name: &str) -> Option<&EnumInfo> {
+        self.enum_index.get(name).map(|&i| &self.enums[i])
+    }
+
+    /// Every named `.enum`, in source order.
+    #[must_use]
+    pub fn enums(&self) -> &[EnumInfo] {
+        &self.enums
+    }
+
     // -- error helpers ------------------------------------------------------
 
     fn error(&mut self, message: impl Into<String>) {
@@ -1145,6 +1386,26 @@ impl Assembler {
             self.cur_line,
             self.cur_expansion,
             message,
+        )
+    }
+
+    /// Report `message` at a stored site rather than the current line.
+    fn error_at(&mut self, file: u32, line: u32, expansion: u32, message: impl Into<String>) {
+        let saved = (self.cur_file, self.cur_line, self.cur_expansion);
+        (self.cur_file, self.cur_line, self.cur_expansion) = (file, line, expansion);
+        self.error(message);
+        (self.cur_file, self.cur_line, self.cur_expansion) = saved;
+    }
+
+    /// The diagnostic location of a stored site (its display file and line).
+    fn diag_at(&self, file: u32, line: u32, expansion: u32) -> Diag {
+        crate::diagnostic::locate(
+            &self.files,
+            &self.expansions,
+            file,
+            line,
+            expansion,
+            String::new(),
         )
     }
 
@@ -1255,17 +1516,22 @@ impl Assembler {
         let Some(name) = self.paste_name(base, depth) else {
             return;
         };
+        self.define_pasted(&name, kind, value);
+    }
+
+    /// Define the already-pasted name `name` (see [`Self::add_pasted_symbol`]).
+    fn define_pasted(&mut self, name: &str, kind: SymType, value: Option<i64>) {
         if self.pass == 1
             && !self.if_suppressed()
             && self
-                .find_symbol(&name)
+                .find_symbol(name)
                 .is_some_and(|id| self.symbols[id].kind != SymType::Undefined)
         {
-            self.error(t!("for-paste-defined", name = name.as_str()));
+            self.error(t!("for-paste-defined", name = name));
             return;
         }
         let value = value.unwrap_or_else(|| self.address_offset());
-        self.define_symbol(&name, value, kind, true);
+        self.define_symbol(name, value, kind, true);
     }
 
     fn define_symbol(&mut self, name: &str, value: i64, kind: SymType, from_macro: bool) {
@@ -1563,6 +1829,15 @@ impl Assembler {
             Stmt::Label(Name::Pasted(base, depth)) => {
                 self.add_pasted_symbol(base, *depth, SymType::Label, None);
             }
+            Stmt::Constant(name, expr) if self.enum_active => {
+                // Inside an `.enum`, a bare name takes the counter (like
+                // `NAME .rs 1`) and `NAME = expr` resets it to `expr + STEP`.
+                let (value, bare) = match expr {
+                    Some(e) => (self.eval(e), false),
+                    None => (self.enum_value, true),
+                };
+                self.enum_member(name, value, 1, bare);
+            }
             Stmt::Constant(name, expr) => {
                 let value = match expr {
                     Some(e) => self.eval(e),
@@ -1703,19 +1978,10 @@ impl Assembler {
                     self.write_byte(idx);
                 }
             }
-            Pseudo::Enum(v, inc) => {
-                self.enum_active = true;
-                self.enum_value = self.eval(v);
-                self.enum_inc = match inc {
-                    Some(e) => self.eval(e),
-                    None => 1,
-                };
+            Pseudo::Enum { start, step, name } => {
+                self.exec_enum(start, step.as_ref(), name.as_ref());
             }
-            Pseudo::Endenum => {
-                self.enum_active = false;
-                self.enum_value = 0;
-                self.enum_inc = 0;
-            }
+            Pseudo::Endenum => self.exec_endenum(),
             Pseudo::Rsset(e) => {
                 self.rsset = self.eval(e);
             }
@@ -1723,8 +1989,7 @@ impl Assembler {
                 let size = self.eval(size);
                 if self.enum_active {
                     let value = self.enum_value;
-                    self.add_symbol(label, value, SymType::Enum);
-                    self.enum_value += size * self.enum_inc;
+                    self.enum_member(&Name::Plain(label.clone()), value, size, false);
                 } else {
                     let value = self.rsset;
                     self.add_symbol(label, value, SymType::Rs);
@@ -2263,6 +2528,14 @@ impl Assembler {
         let mnem = instr.mnemonic.clone();
         match instr.operand.clone() {
             Operand::Implied => {
+                if self.enum_active
+                    && !OPCODES
+                        .iter()
+                        .any(|o| o.mnemonic.eq_ignore_ascii_case(&mnem))
+                {
+                    self.error(t!("enum-member-indented", mnemonic = mnem.as_str()));
+                    return;
+                }
                 if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Implied) {
                     self.write_byte(op);
                 }
