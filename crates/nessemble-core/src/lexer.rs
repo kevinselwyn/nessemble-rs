@@ -5,7 +5,8 @@
 //! stream is behaviorally identical. A hand-written lexer (rather than `logos`)
 //! is used here for precise control over the context-sensitive pieces
 //! (leading-indentation, `<` as a zero-page prefix vs. comparison operator, and
-//! bracket-based indirect addressing).
+//! bracket-based indirect addressing). `-` is unary or binary by position,
+//! which the parser decides.
 
 /// A lexical token kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,10 @@ pub enum Tok {
     Lte,
     Gte,
     Arrow,
+    /// `~`: unary bitwise complement.
+    Tilde,
+    /// `!`: unary logical not. (`!=` lexes as [`Tok::NotEqu`] first.)
+    Bang,
 
     High,
     Low,
@@ -320,6 +325,8 @@ impl<'a> Lexer<'a> {
                     b']' => Tok::CloseBrack,
                     b'<' => Tok::Lt,
                     b'>' => Tok::Gt,
+                    b'~' => Tok::Tilde,
+                    b'!' => Tok::Bang,
                     _ => return None,
                 };
                 (single, 1)
@@ -612,5 +619,32 @@ mod tests {
             vec![Tok::Pseudo("inesprg".into()), Tok::Number(1)]
         );
         assert_eq!(kinds("test:"), vec![Tok::Text("test".into()), Tok::Colon]);
+    }
+
+    #[test]
+    fn unary_operator_tokens() {
+        assert_eq!(kinds("-1"), vec![Tok::Minus, Tok::Number(1)]);
+        assert_eq!(kinds("~1"), vec![Tok::Tilde, Tok::Number(1)]);
+        assert_eq!(kinds("!0"), vec![Tok::Bang, Tok::Number(0)]);
+        assert_eq!(kinds("!~-"), vec![Tok::Bang, Tok::Tilde, Tok::Minus]);
+    }
+
+    #[test]
+    fn two_character_operators_win_over_unary() {
+        assert_eq!(kinds("!="), vec![Tok::NotEqu]);
+        assert_eq!(kinds("->"), vec![Tok::Arrow]);
+        assert_eq!(
+            kinds("ab!=-1"),
+            vec![
+                Tok::Text("ab".into()),
+                Tok::NotEqu,
+                Tok::Minus,
+                Tok::Number(1)
+            ]
+        );
+        assert_eq!(
+            kinds(":---"),
+            vec![Tok::Colon, Tok::Minus, Tok::Minus, Tok::Minus]
+        );
     }
 }

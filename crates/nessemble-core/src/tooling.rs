@@ -5505,4 +5505,59 @@ data:
         };
         assert_eq!(lint(src, &opts), [] as [crate::tooling::Finding; 0]);
     }
+
+    // ─── Unary operators (plans/018-unary-operators.md) ───────────────────────
+
+    #[test]
+    fn format_leaves_unary_operators_as_written() {
+        for src in [
+            "    LDA #-1\n",
+            ".db -4, ~$0F, !0\n",
+            ".db 4 - -2\n",
+            "    BNE :-\n",
+        ] {
+            assert_eq!(format(src), src);
+            assert_eq!(format(&format(src)), src, "idempotent");
+        }
+    }
+
+    #[test]
+    fn format_merges_data_with_unary_values() {
+        assert_eq!(format(".db -4\n.db ~1\n"), ".db -4, ~1\n");
+    }
+
+    #[test]
+    fn highlight_classes_unary_operators_as_operators() {
+        let classes: Vec<TokenClass> = highlight("    LDA #-1\n")
+            .into_iter()
+            .map(|t| t.class)
+            .collect();
+        assert_eq!(
+            classes,
+            vec![
+                TokenClass::Instruction,
+                TokenClass::Operator,
+                TokenClass::Operator,
+                TokenClass::Number
+            ]
+        );
+        for src in [".db ~1\n", ".db !1\n"] {
+            let toks = highlight(src);
+            assert_eq!(toks[1].class, TokenClass::Operator, "{src}");
+            assert_eq!(toks[2].class, TokenClass::Number, "{src}");
+        }
+    }
+
+    #[test]
+    fn lint_treats_a_negative_immediate_like_its_hex_spelling() {
+        let routine = |imm: &str| {
+            lint_routines(&format!(
+                "; @nessemble-clobbers A\ndraw:\n    LDA #{imm}\n    LDX #{imm}\n    RTS\n"
+            ))
+        };
+        let negative = routine("-1");
+        let hex = routine("$FF");
+        assert_eq!(rules_of(&negative), rules_of(&hex));
+        assert_eq!(rules_of(&negative), vec![RuleId::UndeclaredClobber]);
+    }
 }

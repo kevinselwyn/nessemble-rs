@@ -53,11 +53,80 @@ Binary, decimal, octal, hexadecimal, and ASCII character are all valid numbers.
 | &lt;=  | Less than or equals    |
 | &gt;=  | Greater than or equals |
 
+### Unary Operators
+
+| Symbol | Description                        |
+|--------|------------------------------------|
+| -      | Negate                             |
+| ~      | Bitwise NOT (complement)           |
+| !      | Logical NOT (1 if zero, else 0)    |
+
+A unary operator is written directly before its operand, anywhere an expression
+is allowed: data, operands (`#-1`, `<-off`), definitions, `.if`, `.for` bounds,
+macro and custom pseudo-instruction arguments. Unary operators bind tighter than
+any binary operator, and they may be stacked: `- -4` is 4, `!!x` is 0 or 1, and
+`~-1` is 0.
+
+Example:
+
+```nessemble
+.db -4
+.dw -40
+    LDA #-1
+.db ~$0F
+```
+
+Output:
+
+```text
+00000000  fc d8 ff a9 ff f0                                 |......|
+00000006
+```
+
+Try it:
+
+<nessemble-assembler>
+.db -4
+.dw -40
+    LDA #-1
+.db ~$0F
+</nessemble-assembler>
+
+`!` applies to its operand only: `!FLAG == 0` is `(!FLAG) == 0`. To negate a
+comparison, parenthesise it: `!(FLAG == 0)`.
+
+### Evaluation order
+
+Binary operators all share one precedence level and group strictly right to
+left: `20 - 2 - 1` is `20 - (2 - 1)`, which is 19, and `2*3 - 1` is
+`2 * (3 - 1)`, which is 4. Use parentheses to group otherwise. Unary operators
+sit above all of them, so `4 - -2` is 6 and `-2 * 3` is `(-2) * 3`, which is -6.
+
+### Signed values in data
+
+Expression values are signed integers. A value is narrowed to the byte or word
+it is stored in, so `.db -4` emits `$FC` and `.dw -40` emits `$FFD8`. A byte
+accepts `-128` to `255` and a word `-32768` to `65535`; anything outside warns
+(see [Diagnostics](usage.md#configurable-warnings)) and emits the narrowed
+value anyway.
+
+`~` complements every bit, so `~$80` is -129, outside the byte range:
+`AND #~$80` warns. Write `AND #LOW(~$80)` to keep only the low byte.
+
+> **`.db 1 -2` is one value.** It reads as `1 - 2` and emits a single `$FF`.
+> Separate list items with commas: `.db 1, -2`.
+
+> **`:- - 1` is not `(:-) - 1`.** The `-` run after a colon is all part of the
+> anonymous reference, so `:- - 1` reads as `:--` followed by a stray `1`.
+> Write `(:-) - 1` or `:- + -1`.
+
 ### Special
 
 | Symbol | Description                   |
 |--------|-------------------------------|
 | -&gt;  | Accessor (functions like `+`) |
+
+`->` belongs to its operand, so `-sprite->coord_x` is `-(sprite->coord_x)`.
 
 ## Labels
 
@@ -157,6 +226,11 @@ Try it:
     BNE :-
     BRK
 </nessemble-assembler>
+
+The `-`s after a colon all belong to the reference, even with spaces between
+them: `:- - 1` is `:--` followed by a stray `1`. To subtract from a backward
+reference, write `(:-) - 1` or `:- + -1` (see
+[Unary Operators](#unary-operators)).
 
 ## Mnemonics
 
@@ -557,6 +631,20 @@ can be wrapped across several indented lines:
 The same line-continuation rule applies to every comma-separated data directive
 (`.dw`, `.fill`, `.color`, `.hibytes`, `.lobytes`, and `.defchr`).
 
+Negative values are stored as two's complement (see
+[Unary Operators](#unary-operators)):
+
+```nessemble
+.db -1, ~$0F
+```
+
+Output:
+
+```text
+00000000  ff f0                                             |..|
+00000002
+```
+
 
 ### .defchr
 
@@ -661,6 +749,19 @@ Try it:
 <nessemble-assembler>
 .dw $1234, $5678
 </nessemble-assembler>
+
+A negative value is stored as a 16-bit two's complement word:
+
+```nessemble
+.dw -40
+```
+
+Output:
+
+```text
+00000000  d8 ff                                             |..|
+00000002
+```
 
 ### .else
 
@@ -802,6 +903,13 @@ Try it:
 .fill 16
 </nessemble-assembler>
 
+The value may be negative: `.fill 4, -1` emits four `$FF` bytes.
+
+```text
+00000000  ff ff ff ff                                       |....|
+00000004
+```
+
 ### .font
 
 Generate font character tile.
@@ -892,7 +1000,8 @@ Usage:
 ```
 
 * `CONDITION` - Condition, required. The code that follows will be processed if
-the condition is true. See [Comparison Operators](#comparison-operators).
+the condition is true. See [Comparison Operators](#comparison-operators), and
+[Unary Operators](#unary-operators) for `!` (`.if !FLAG`).
 
 Example:
 
@@ -2255,7 +2364,7 @@ Output:
 ```
 
 The assembler evaluates expressions strictly right to left with no operator
-precedence, so the outer counter is parenthesised: `(\j*8)+\i`.
+precedence (see [Evaluation order](#evaluation-order)), so the outer counter is parenthesised: `(\j*8)+\i`.
 
 Using `\j` or `\k` without that many enclosing loops, or `\i` outside any loop,
 is an error.

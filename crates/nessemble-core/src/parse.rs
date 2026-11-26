@@ -9,7 +9,7 @@ use nessemble_i18n::t;
 
 use crate::ast::{
     AsciiArg, BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo,
-    RandTerm, Stmt,
+    RandTerm, Stmt, UnOp,
 };
 use crate::lexer::{Span, Tok, Token};
 
@@ -768,7 +768,7 @@ impl Parser<'_> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        let left = self.parse_primary()?;
+        let left = self.parse_unary()?;
         if let Some(op) = self.peek().and_then(binop) {
             self.pos += 1;
             let right = self.parse_expr()?; // right-associative
@@ -776,6 +776,20 @@ impl Parser<'_> {
         } else {
             Ok(left)
         }
+    }
+
+    /// A primary with any number of prefix operators (`-`, `~`, `!`) in front.
+    /// Only reached where an operand is expected, so `-` after an operand is
+    /// still binary.
+    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let op = match self.peek() {
+            Some(Tok::Minus) => UnOp::Neg,
+            Some(Tok::Tilde) => UnOp::Compl,
+            Some(Tok::Bang) => UnOp::Not,
+            _ => return self.parse_primary(),
+        };
+        self.pos += 1;
+        Ok(Expr::Unary(op, Box::new(self.parse_unary()?)))
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -940,6 +954,8 @@ fn tok_text(tok: &Tok) -> String {
         Tok::Lte => "<=",
         Tok::Gte => ">=",
         Tok::Arrow => "->",
+        Tok::Tilde => "~",
+        Tok::Bang => "!",
         Tok::High => "HIGH",
         Tok::Low => "LOW",
         Tok::Bank => "BANK",
@@ -1148,5 +1164,86 @@ mod tests {
     fn custom_pseudo_trailing_comma_at_eof_stops() {
         let (_, args) = custom_args("    .foo $01, $02,\n");
         assert_eq!(args.len(), 2);
+    }
+
+    fn expr(src: &str) -> Expr {
+        let mut list = db_list(&format!(".db {src}\n"));
+        assert_eq!(list.len(), 1, "{list:?}");
+        list.remove(0)
+    }
+
+    fn un(op: UnOp, e: Expr) -> Expr {
+        Expr::Unary(op, Box::new(e))
+    }
+
+    fn bin(a: Expr, op: BinOp, b: Expr) -> Expr {
+        Expr::Binary(Box::new(a), op, Box::new(b))
+    }
+
+    fn sym(name: &str) -> Expr {
+        Expr::Symbol(name.into())
+    }
+
+    #[test]
+    fn unary_binds_tighter_than_binary() {
+        assert_eq!(
+            expr("-2*3"),
+            bin(un(UnOp::Neg, Expr::Num(2)), BinOp::Mul, Expr::Num(3))
+        );
+        assert_eq!(
+            expr("4 - -2"),
+            bin(Expr::Num(4), BinOp::Sub, un(UnOp::Neg, Expr::Num(2)))
+        );
+    }
+
+    #[test]
+    fn unary_operators_stack() {
+        assert_eq!(expr("- -4"), un(UnOp::Neg, un(UnOp::Neg, Expr::Num(4))));
+        assert_eq!(expr("--4"), un(UnOp::Neg, un(UnOp::Neg, Expr::Num(4))));
+        assert_eq!(expr("!!five"), un(UnOp::Not, un(UnOp::Not, sym("five"))));
+        assert_eq!(expr("~-1"), un(UnOp::Compl, un(UnOp::Neg, Expr::Num(1))));
+    }
+
+    #[test]
+    fn unary_applies_to_functions_and_accessor_chains() {
+        assert_eq!(
+            expr("-LOW(five)"),
+            un(UnOp::Neg, Expr::Low(Box::new(sym("five"))))
+        );
+        // `->` is part of the operand: `-(sp->cx)`.
+        assert_eq!(
+            expr("-sp->cx"),
+            un(UnOp::Neg, bin(sym("sp"), BinOp::Add, sym("cx")))
+        );
+    }
+
+    fn operand(src: &str) -> Operand {
+        match first_stmt(src) {
+            Stmt::Instruction(i) => i.operand,
+            other => panic!("expected an instruction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anonymous_references_still_eat_their_minus_run() {
+        assert_eq!(
+            operand("  BNE :-\n"),
+            Operand::Absolute(Expr::LocalBackward(1))
+        );
+        assert_eq!(
+            operand("  BNE :---\n"),
+            Operand::Absolute(Expr::LocalBackward(3))
+        );
+    }
+
+    #[test]
+    fn ascii_negate_offset_is_unchanged() {
+        match first_stmt(".ascii \"A\" -1\n") {
+            Stmt::Pseudo(Pseudo::Ascii(a)) => {
+                assert!(a.negate);
+                assert_eq!(a.offset, Some(Expr::Num(1)));
+            }
+            other => panic!("expected .ascii, got {other:?}"),
+        }
     }
 }

@@ -5932,6 +5932,20 @@ mod tests {
     }
 
     #[test]
+    fn unary_operators_assemble_without_diagnostics() {
+        let uri = Url::parse("file:///unary.asm").unwrap();
+        let src = ".db -1, ~$0F, !0\n    LDA #-1\n";
+        let analysis = analyze(&uri, src, &HashSet::new());
+        assert_eq!(analysis.diagnostics, [] as [Diagnostic; 0]);
+        let op = tooling::TokenClass::Operator.wire_id();
+        let types: Vec<_> = semantic_tokens(".db -1\n")
+            .iter()
+            .map(|t| t.token_type)
+            .collect();
+        assert_eq!(types[1], op);
+    }
+
+    #[test]
     fn pasted_definitions_are_definitions_of_the_pasted_name() {
         let defs = definitions(FOR_DOC);
         let pasted = defs.iter().find(|d| d.name == "row\\i").expect("row\\i");

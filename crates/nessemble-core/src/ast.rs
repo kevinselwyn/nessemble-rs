@@ -2,7 +2,8 @@
 
 /// Binary operators. All share a single precedence level and are
 /// right-associative, matching the reference (bison) grammar's default
-/// shift-based conflict resolution.
+/// shift-based conflict resolution. Unary operators ([`UnOp`]) bind tighter
+/// than all of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -24,6 +25,18 @@ pub enum BinOp {
     Ge,
 }
 
+/// Prefix (unary) operators. They bind tighter than every [`BinOp`] and stack
+/// (`- -4`, `!!x`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnOp {
+    /// `-x`: arithmetic negation (wrapping).
+    Neg,
+    /// `!x`: logical not, `1` if `x == 0`, else `0`.
+    Not,
+    /// `~x`: bitwise complement of all 64 bits.
+    Compl,
+}
+
 /// An expression tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
@@ -38,6 +51,8 @@ pub enum Expr {
     Low(Box<Expr>),
     Bank(String),
     Binary(Box<Expr>, BinOp, Box<Expr>),
+    /// A prefix operator applied to its operand.
+    Unary(UnOp, Box<Expr>),
     /// A `.for` loop counter: depth 0 is `\i` (innermost loop), 1 is `\j`, 2 is
     /// `\k`. Evaluated against the assembler's loop stack.
     LoopIndex(u8),
