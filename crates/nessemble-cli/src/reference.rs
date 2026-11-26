@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use nessemble_core::AsmRule;
 use nessemble_i18n::t;
 use nessemble_isa::{DIRECTIVES, OPCODES};
 use nessemble_script_api::{in_domain, lookup_ignore_case, Domain, ScriptApi};
@@ -22,19 +23,53 @@ pub fn run(term1: Option<&str>, term2: Option<&str>) -> (String, u8) {
             "instructions" | "instruction" | "opcodes" => (list_instructions(), 0),
             "directives" | "pseudos" | "pseudo" => (list_directives(), 0),
             "script" | "scripts" | "scripting" => (list_script_api(), 0),
+            "diagnostics" | "diagnostic" | "rules" => (list_diagnostics(), 0),
             other => (t!("reference-not-found", term = other) + "\n", 1),
         },
         (Some(cat), Some(term)) => match cat.to_ascii_lowercase().as_str() {
             "instructions" | "instruction" | "opcodes" => instruction_detail(term),
             "directives" | "pseudos" | "pseudo" => directive_detail(term),
             "script" | "scripts" | "scripting" => script_detail(term),
+            "diagnostics" | "diagnostic" | "rules" => diagnostic_detail(term),
             other => (t!("reference-not-found", term = other) + "\n", 1),
         },
     }
 }
 
 fn list_categories() -> String {
-    "Categories:\n  instructions\n  directives\n  script\n".to_string()
+    "Categories:\n  instructions\n  directives\n  script\n  diagnostics\n".to_string()
+}
+
+/// The assembler's configurable diagnostics: rule id, default severity, and
+/// what each reports. Set one with `-W <rule>=<level>` or a `.nessemblerc`'s
+/// `assemble.rules`.
+fn list_diagnostics() -> String {
+    let width = AsmRule::ALL.iter().map(|r| r.id().len()).max().unwrap_or(0);
+    let indent = 2 + width + 2 + 6;
+    let mut out = String::from("Diagnostics (default severity):\n");
+    for rule in AsmRule::ALL {
+        let summary = wrap(rule.summary(), LINE_WIDTH.saturating_sub(indent), indent);
+        let _ = writeln!(out, "  {:<width$}  warn  {summary}", rule.id());
+    }
+    out.push_str(
+        "\nSet with `-W <rule>=off|warn|error` or `.nessemblerc` `assemble.rules`;\n\
+         `--warnings-as-errors` raises every warning to an error.\n",
+    );
+    out
+}
+
+fn diagnostic_detail(term: &str) -> (String, u8) {
+    match AsmRule::from_id(&term.to_ascii_lowercase()) {
+        Some(rule) => (
+            format!(
+                "{}\n  default: warn\n  {}\n",
+                rule.id(),
+                wrap(rule.summary(), LINE_WIDTH - 2, 2)
+            ),
+            0,
+        ),
+        None => (t!("reference-not-found", term = term) + "\n", 1),
+    }
 }
 
 fn list_instructions() -> String {
@@ -256,5 +291,21 @@ mod tests {
             wrapped.split_whitespace().collect::<Vec<_>>(),
             ["one", "two", "three", "four", "five", "six", "seven"]
         );
+    }
+
+    #[test]
+    fn diagnostics_category_lists_every_rule() {
+        let (out, code) = run(Some("diagnostics"), None);
+        assert_eq!(code, 0);
+        for rule in AsmRule::ALL {
+            assert!(out.contains(rule.id()), "{out}");
+        }
+        let (out, code) = run(Some("diagnostics"), Some("value-out-of-range"));
+        assert_eq!(code, 0);
+        assert!(
+            out.starts_with("value-out-of-range\n  default: warn\n"),
+            "{out}"
+        );
+        assert_eq!(run(Some("diagnostics"), Some("nope")).1, 1);
     }
 }

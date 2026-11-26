@@ -13,6 +13,7 @@ pub use nessemble_isa as isa;
 mod assemble;
 pub mod ast;
 pub mod coverage;
+mod diagnostic;
 mod lexer;
 mod parse;
 mod paths;
@@ -20,8 +21,9 @@ mod preprocess;
 pub mod tooling;
 
 pub use assemble::{
-    crc_32, CustomOutput, CustomResolver, Diag, ListSymbol, PrewarmCandidate, SourceMap, SourceSpan,
+    crc_32, CustomOutput, CustomResolver, ListSymbol, PrewarmCandidate, SourceMap, SourceSpan,
 };
+pub use diagnostic::{AsmRule, AsmRules, Diag, RuleSeverity};
 pub use paths::{
     find_project_root, project_root, resolve_path_arg, PathArgError, PROJECT_MARKERS,
     PROJECT_ROOT_PREFIX,
@@ -49,6 +51,10 @@ pub struct Options {
     /// overriding discovery. `None` (the default) walks up from the entry file
     /// looking for a [`PROJECT_MARKERS`] file — see [`project_root`].
     pub project_root: Option<PathBuf>,
+    /// Severity of each configurable assembler diagnostic, and whether every
+    /// warning is reported as an error (`-W`, `--warnings-as-errors`, and a
+    /// `.nessemblerc`'s `assemble.rules`). See [`AsmRule`].
+    pub rules: AsmRules,
 }
 
 impl Default for Options {
@@ -59,6 +65,7 @@ impl Default for Options {
             empty_byte: 0xFF,
             source_map: false,
             project_root: None,
+            rules: AsmRules::default(),
         }
     }
 }
@@ -172,11 +179,11 @@ pub fn assemble_file_with(
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
     let source = std::fs::read_to_string(path).map_err(|e| {
-        AssembleError(Diag {
-            file: display_name(path),
-            line: 0,
-            message: format!("Could not open `{}`: {e}", path.display()),
-        })
+        AssembleError(Diag::new(
+            display_name(path),
+            0,
+            format!("Could not open `{}`: {e}", path.display()),
+        ))
     })?;
     let base = path
         .parent()
@@ -228,10 +235,11 @@ fn prewarm_candidates_impl(
     top_name: &str,
     root: Option<PathBuf>,
 ) -> Vec<PrewarmCandidate> {
-    let Ok(pre) = preprocess::preprocess(source, base, top_name, root) else {
+    let Ok(mut pre) = preprocess::preprocess(source, base, top_name, root) else {
         return Vec::new();
     };
-    let Ok(lines) = parse::parse(pre.tokens) else {
+    let sources = source_refs(&pre.sources);
+    let Ok(lines) = parse::parse(std::mem::take(&mut pre.tokens), &sources) else {
         return Vec::new();
     };
     assemble::prewarm_candidates(&lines, &pre.dirs, pre.root.as_deref())
@@ -336,7 +344,7 @@ fn diagnose_impl(
     let root = resolve_root(options, Some(&base));
     let top_name = display_name(path);
 
-    let pre = match preprocess::preprocess_with(source, base, &top_name, root, overlay) {
+    let mut pre = match preprocess::preprocess_with(source, base, &top_name, root, overlay) {
         Ok(pre) => pre,
         Err(diag) => {
             return Diagnostics {
@@ -347,17 +355,14 @@ fn diagnose_impl(
         }
     };
 
-    let (lines, parse_errors) = parse::parse_recovering(pre.tokens);
+    let sources = source_refs(&pre.sources);
+    let (lines, parse_errors) = parse::parse_recovering(std::mem::take(&mut pre.tokens), &sources);
     if !parse_errors.is_empty() {
         // Syntax errors block semantic analysis (missing symbols would cascade),
         // so report them alone.
         let errors = parse_errors
             .into_iter()
-            .map(|e| Diag {
-                file: pre.files.get(e.file as usize).cloned().unwrap_or_default(),
-                line: e.line,
-                message: e.message,
-            })
+            .map(|e| parse_diag(&pre.files, &pre.expansions, e))
             .collect();
         return Diagnostics {
             errors,
@@ -366,18 +371,7 @@ fn diagnose_impl(
         };
     }
 
-    let mut asm = assemble::Assembler::new(
-        options.nes,
-        options.undocumented,
-        options.empty_byte,
-        assemble::SourceTables {
-            files: pre.files,
-            dirs: pre.dirs,
-            paths: pre.paths,
-            root: pre.root,
-        },
-        custom,
-    );
+    let mut asm = new_assembler(options, pre.into_tables(), custom);
     let (errors, warnings) = asm.diagnostics(&lines);
     Diagnostics {
         errors,
@@ -436,7 +430,7 @@ pub fn diagnose_project_with(
     let root = resolve_root(options, Some(&base));
     let top_name = display_name(path);
 
-    let pre = match preprocess::preprocess_with(source, base, &top_name, root, Some(overlay)) {
+    let mut pre = match preprocess::preprocess_with(source, base, &top_name, root, Some(overlay)) {
         Ok(pre) => pre,
         Err(diag) => {
             // Preprocessing failed (e.g. a missing include); report the single
@@ -453,15 +447,12 @@ pub fn diagnose_project_with(
     let files = pre.files.clone();
     let paths = pre.paths.clone();
 
-    let (lines, parse_errors) = parse::parse_recovering(pre.tokens);
+    let sources = source_refs(&pre.sources);
+    let (lines, parse_errors) = parse::parse_recovering(std::mem::take(&mut pre.tokens), &sources);
     if !parse_errors.is_empty() {
         let errors = parse_errors
             .into_iter()
-            .map(|e| Diag {
-                file: files.get(e.file as usize).cloned().unwrap_or_default(),
-                line: e.line,
-                message: e.message,
-            })
+            .map(|e| parse_diag(&pre.files, &pre.expansions, e))
             .collect();
         return ProjectDiagnostics {
             errors,
@@ -472,18 +463,7 @@ pub fn diagnose_project_with(
         };
     }
 
-    let mut asm = assemble::Assembler::new(
-        options.nes,
-        options.undocumented,
-        options.empty_byte,
-        assemble::SourceTables {
-            files: pre.files,
-            dirs: pre.dirs,
-            paths: pre.paths,
-            root: pre.root,
-        },
-        custom,
-    );
+    let mut asm = new_assembler(options, pre.into_tables(), custom);
     let (errors, warnings) = asm.diagnostics(&lines);
     ProjectDiagnostics {
         errors,
@@ -492,6 +472,37 @@ pub fn diagnose_project_with(
         files,
         paths,
     }
+}
+
+/// Borrow each file's source text, for the parser's diagnostics.
+fn source_refs(sources: &[String]) -> Vec<&str> {
+    sources.iter().map(String::as_str).collect()
+}
+
+/// Report a parse error at its statement, in the macro body it was expanded
+/// from (if any) with the calls that expanded it as notes.
+fn parse_diag(
+    files: &[String],
+    expansions: &[diagnostic::Expansion],
+    e: parse::ParseError,
+) -> Diag {
+    diagnostic::locate(files, expansions, e.file, e.line, e.expansion, e.message)
+}
+
+/// An assembler for `options` over a preprocessed program's tables.
+fn new_assembler(
+    options: &Options,
+    tables: assemble::SourceTables,
+    custom: CustomResolver,
+) -> assemble::Assembler {
+    assemble::Assembler::new(
+        options.nes,
+        options.undocumented,
+        options.empty_byte,
+        tables,
+        options.rules.clone(),
+        custom,
+    )
 }
 
 /// The project root a `@/`-prefixed filename argument resolves against, for an
@@ -587,7 +598,10 @@ fn is_directive_name(name: &str) -> bool {
 /// arbitrary code from a workspace just to analyze a buffer — so the bytes a
 /// custom pseudo-op would emit are not modeled, and addresses after it may be
 /// approximate.
-#[allow(clippy::implicit_hasher)] // callers use the standard HashSet.
+// `implicit_hasher`: callers use the standard HashSet. `must_use_candidate`:
+// the boxed `Fn` returned is already `#[must_use]`, so newer clippy rejects a
+// second one (`double_must_use`) while older clippy still suggests adding it.
+#[allow(clippy::implicit_hasher, clippy::must_use_candidate)]
 pub fn lenient_custom_resolver(known: std::collections::HashSet<String>) -> CustomResolver {
     Box::new(move |name, _ints, _texts, _base, _root| {
         if known.contains(name) {
@@ -609,26 +623,12 @@ fn assemble_impl(
     root: Option<PathBuf>,
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
-    let pre = preprocess::preprocess(source, base_dir, top_name, root).map_err(AssembleError)?;
-    let lines = parse::parse(pre.tokens).map_err(|e| {
-        AssembleError(Diag {
-            file: pre.files.get(e.file as usize).cloned().unwrap_or_default(),
-            line: e.line,
-            message: e.message,
-        })
-    })?;
-    let mut asm = assemble::Assembler::new(
-        options.nes,
-        options.undocumented,
-        options.empty_byte,
-        assemble::SourceTables {
-            files: pre.files,
-            dirs: pre.dirs,
-            paths: pre.paths,
-            root: pre.root,
-        },
-        custom,
-    );
+    let mut pre =
+        preprocess::preprocess(source, base_dir, top_name, root).map_err(AssembleError)?;
+    let sources = source_refs(&pre.sources);
+    let lines = parse::parse(std::mem::take(&mut pre.tokens), &sources)
+        .map_err(|e| AssembleError(parse_diag(&pre.files, &pre.expansions, e)))?;
+    let mut asm = new_assembler(options, pre.into_tables(), custom);
     asm.set_record_source_map(options.source_map);
     let rom = asm.run(&lines).map_err(AssembleError)?;
     let symbols = asm.list_symbols();

@@ -16,6 +16,7 @@ use nessemble_isa::{AddressingMode, Opcode, META_UNDOCUMENTED, OPCODES};
 use crate::ast::{
     BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo, Stmt,
 };
+use crate::diagnostic::{AsmRule, AsmRules, Diag, Expansion, RuleSeverity};
 
 const BANK_PRG: i64 = 0x4000;
 const BANK_CHR: i64 = 0x2000;
@@ -76,17 +77,6 @@ fn ram_shift(bytes: i64) -> i64 {
     ram_shift_checked(bytes).unwrap_or(0)
 }
 
-/// A diagnostic (error) with a source-file display name, 1-based source line,
-/// and message, matching the reference tool's wording.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Diag {
-    /// Display name of the file the diagnostic refers to (the basename of the
-    /// top-level input, or the raw path of an included file).
-    pub file: String,
-    pub line: u32,
-    pub message: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SymType {
     Undefined,
@@ -96,6 +86,42 @@ enum SymType {
     Rs,
     /// A `.rs` reservation inside an `.enum` block (listed as a constant).
     Enum,
+}
+
+/// A field a value is narrowed to fit when it is encoded, for the
+/// `value-out-of-range` check ([`Assembler::check_range`]).
+#[derive(Debug, Clone, Copy)]
+enum Field {
+    /// A data byte (`.db`, `.fill`, `.ascii`) or an immediate operand.
+    Byte,
+    /// A data word (`.dw`).
+    Word,
+    /// A zero-page address operand (`<x`, `[x, X]`, `[x], Y`).
+    ZeroPage,
+    /// An absolute address operand.
+    Absolute,
+}
+
+impl Field {
+    /// The values accepted without a warning. Data fields take
+    /// two's-complement negatives too; address fields do not.
+    fn range(self) -> (i64, i64) {
+        match self {
+            Field::Byte => (-128, 255),
+            Field::Word => (-32768, 65535),
+            Field::ZeroPage => (0, 255),
+            Field::Absolute => (0, 65535),
+        }
+    }
+
+    fn name(self) -> String {
+        t!(match self {
+            Field::Byte => "field-byte",
+            Field::Word => "field-word",
+            Field::ZeroPage => "field-zero-page",
+            Field::Absolute => "field-absolute",
+        })
+    }
 }
 
 /// A contiguous run of emitted ROM bytes attributed to a single source line —
@@ -151,6 +177,13 @@ struct Symbol {
     bank: usize,
     /// Set when the symbol was defined on a macro-expanded source line.
     from_macro: bool,
+    /// Where the symbol was last defined (display file, line), for naming it
+    /// when a later definition replaces it. `None` until it is defined.
+    defined_at: Option<(String, u32)>,
+    /// The source site of that definition — (file id, line, expansion) — so a
+    /// file included twice, which re-runs the very same definition, is not
+    /// mistaken for a second one.
+    site: (u32, u32, u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,6 +330,20 @@ pub struct Assembler {
     pass: u8,
     errors: Vec<Diag>,
     warnings: Vec<Diag>,
+    /// Configured severity of each [`AsmRule`].
+    rules: AsmRules,
+    /// Rule diagnostics already reported, keyed by (display file, line, rule),
+    /// so each source location reports a rule once — whichever pass, loop
+    /// iteration, or macro expansion reaches it again.
+    rule_seen: std::collections::HashSet<(String, u32, AsmRule)>,
+    /// Rule diagnostics raised before assembly (by the preprocessor), reported
+    /// at their configured severity when the run starts.
+    pending: Vec<Diag>,
+    /// The `.macro` expansion table (see [`Expansion`]), for locating
+    /// diagnostics on macro-expanded lines.
+    expansions: Vec<Expansion>,
+    /// The expansion the current source line came from (`0` for none).
+    cur_expansion: u32,
     aborted: bool,
     /// When set, a hard error records a diagnostic but does **not** abort the
     /// run, so multiple problems can be collected in one pass (for tooling
@@ -407,6 +454,10 @@ pub(crate) struct SourceTables {
     pub dirs: Vec<PathBuf>,
     pub paths: Vec<PathBuf>,
     pub root: Option<PathBuf>,
+    /// The preprocessor's `.macro` expansion table.
+    pub expansions: Vec<Expansion>,
+    /// Rule diagnostics the preprocessor raised (see [`Assembler::pending`]).
+    pub pending: Vec<Diag>,
 }
 
 /// Why a media importer (`.incbin`/`.incpng`/…) could not produce bytes: either
@@ -426,6 +477,7 @@ impl Assembler {
         undocumented: bool,
         empty_byte: u8,
         tables: SourceTables,
+        rules: AsmRules,
         custom: CustomResolver,
     ) -> Self {
         let SourceTables {
@@ -433,6 +485,8 @@ impl Assembler {
             dirs,
             paths,
             root,
+            expansions,
+            pending,
         } = tables;
         Assembler {
             nes,
@@ -466,6 +520,11 @@ impl Assembler {
             pass: 1,
             errors: Vec::new(),
             warnings: Vec::new(),
+            rules,
+            rule_seen: std::collections::HashSet::new(),
+            pending,
+            expansions,
+            cur_expansion: 0,
             aborted: false,
             collect_all: false,
             cur_line: 1,
@@ -486,6 +545,7 @@ impl Assembler {
     /// The output bytes are discarded — this is for diagnostics only.
     pub fn diagnostics(&mut self, lines: &[Line]) -> (Vec<Diag>, Vec<Diag>) {
         self.collect_all = true;
+        self.report_pending();
         // Pass 1: build symbols and size the ROM (best effort past errors).
         self.pass = 1;
         self.reset_state();
@@ -584,6 +644,10 @@ impl Assembler {
     /// Run both passes over the parsed program, returning the output bytes
     /// (including the iNES header in NES mode) or the diagnostic to report.
     pub fn run(&mut self, lines: &[Line]) -> Result<Vec<u8>, Diag> {
+        self.report_pending();
+        if let Some(d) = self.errors.last() {
+            return Err(d.clone());
+        }
         // Pass 1: build symbols, size the ROM.
         self.pass = 1;
         self.reset_state();
@@ -885,6 +949,7 @@ impl Assembler {
                 self.cur_line = line.line;
                 self.cur_file = line.file;
                 self.cur_from_macro = line.from_macro;
+                self.cur_expansion = line.expansion;
             }
             match &line.stmt {
                 Stmt::Pseudo(Pseudo::For(start, end)) => i = self.exec_for(lines, i, start, end),
@@ -1066,18 +1131,21 @@ impl Assembler {
                 counters = self.loop_counters()
             );
         }
-        self.errors.push(Diag {
-            file: self.file_name(),
-            line: self.cur_line,
-            message,
-        });
+        let diag = self.diag_here(message);
+        self.errors.push(diag);
     }
 
-    fn file_name(&self) -> String {
-        self.files
-            .get(self.cur_file as usize)
-            .cloned()
-            .unwrap_or_default()
+    /// A diagnostic at the current source line: in the macro body it was
+    /// expanded from (if any), with the expanding calls as notes.
+    fn diag_here(&self, message: impl Into<String>) -> Diag {
+        crate::diagnostic::locate(
+            &self.files,
+            &self.expansions,
+            self.cur_file,
+            self.cur_line,
+            self.cur_expansion,
+            message,
+        )
     }
 
     fn hard_error(&mut self, message: impl Into<String>) {
@@ -1089,11 +1157,84 @@ impl Assembler {
     }
 
     fn warning(&mut self, message: impl Into<String>) {
-        self.warnings.push(Diag {
-            file: self.file_name(),
-            line: self.cur_line,
-            message: message.into(),
-        });
+        if self.rules.warnings_as_errors {
+            self.error(message);
+            return;
+        }
+        let diag = self.diag_here(message);
+        self.warnings.push(diag);
+    }
+
+    /// Report `message` under `rule` at the current line, at the rule's
+    /// configured severity: dropped when `off`, a warning when `warn`, and a
+    /// hard error when `error`. Each source location reports a rule once.
+    fn rule_diag(&mut self, rule: AsmRule, message: impl Into<String>) {
+        let mut diag = self.diag_here(message);
+        diag.rule = Some(rule);
+        self.report_rule(diag);
+    }
+
+    /// Report a diagnostic already tagged with its rule (see [`Self::rule_diag`]).
+    fn report_rule(&mut self, diag: Diag) {
+        let Some(rule) = diag.rule else {
+            return;
+        };
+        let severity = self.rules.effective(rule);
+        if severity == RuleSeverity::Off
+            || !self.rule_seen.insert((diag.file.clone(), diag.line, rule))
+        {
+            return;
+        }
+        if severity == RuleSeverity::Error {
+            self.errors.push(diag);
+            if !self.collect_all {
+                self.aborted = true;
+            }
+        } else {
+            self.warnings.push(diag);
+        }
+    }
+
+    /// Report the rule diagnostics the preprocessor raised, once per run.
+    fn report_pending(&mut self) {
+        for diag in std::mem::take(&mut self.pending) {
+            self.report_rule(diag);
+        }
+    }
+
+    /// Warn (`value-out-of-range`) when `value` does not fit `field` and is
+    /// about to be narrowed to fit it. Checked on the final pass only, where
+    /// every value is known, and never in a false conditional (nothing is
+    /// emitted there).
+    fn check_range(&mut self, value: i64, field: Field) {
+        if self.pass != 2 || self.if_suppressed() {
+            return;
+        }
+        let (min, max) = field.range();
+        if (min..=max).contains(&value) {
+            return;
+        }
+        let (name, emitted) = match field {
+            Field::Byte | Field::ZeroPage => (field.name(), format!("${:02X}", value & 0xFF)),
+            Field::Word | Field::Absolute => (field.name(), format!("${:04X}", value & 0xFFFF)),
+        };
+        let message = if value < 0 {
+            t!(
+                "value-out-of-range-negative",
+                value = value,
+                field = name,
+                emitted = emitted
+            )
+        } else {
+            t!(
+                "value-out-of-range",
+                value = value,
+                hex = format!("${value:04X}"),
+                field = name,
+                emitted = emitted
+            )
+        };
+        self.rule_diag(AsmRule::ValueOutOfRange, message);
     }
 
     // -- symbol table -------------------------------------------------------
@@ -1141,12 +1282,27 @@ impl Assembler {
         } else {
             self.find_symbol(name)
         };
+        // Where this definition is, recorded only for a real definition (an
+        // undefined forward reference registers a placeholder, not a site).
+        let here = (kind != SymType::Undefined).then(|| {
+            let d = self.diag_here(String::new());
+            (d.file, d.line)
+        });
+        let site = self.cur_site();
         match existing {
             Some(id) => {
-                self.symbols[id].value = value;
-                self.symbols[id].bank = bank;
-                self.symbols[id].kind = kind;
-                self.symbols[id].from_macro = from_macro;
+                if kind != SymType::Undefined && self.symbols[id].kind != SymType::Undefined {
+                    self.report_redefinition(id, value, kind, bank, site);
+                }
+                let sym = &mut self.symbols[id];
+                sym.value = value;
+                sym.bank = bank;
+                sym.kind = kind;
+                sym.from_macro = from_macro;
+                if here.is_some() {
+                    sym.defined_at = here;
+                    sym.site = site;
+                }
             }
             None => self.symbols.push(Symbol {
                 name: name.to_string(),
@@ -1154,8 +1310,92 @@ impl Assembler {
                 kind,
                 bank,
                 from_macro,
+                defined_at: here,
+                site,
             }),
         }
+    }
+
+    /// Report that the definition at the current line replaces symbol `id`'s:
+    /// `duplicate-symbol-same-value` when the new one has the same kind, value,
+    /// and bank (harmless), `duplicate-symbol` otherwise. Resolution is
+    /// unchanged either way — the last definition still wins.
+    ///
+    /// The same definition seen again — the same line of the same file, from
+    /// the same expansion (a file `.include`d twice) — with the same value is
+    /// one definition, not two, and is not reported.
+    fn report_redefinition(
+        &mut self,
+        id: usize,
+        value: i64,
+        kind: SymType,
+        bank: usize,
+        site: (u32, u32, u32),
+    ) {
+        let prev = &self.symbols[id];
+        // A label's bank is part of its value (`BANK(name)`); a constant's is
+        // only where it happened to be written.
+        let located = matches!(kind, SymType::Label | SymType::Rs);
+        let same = prev.kind == kind && prev.value == value && (!located || prev.bank == bank);
+        if same && self.same_site(prev.site, site) {
+            return;
+        }
+        let (file, line) = prev.defined_at.clone().unwrap_or_default();
+        let shown = if prev.value < 0 {
+            prev.value.to_string()
+        } else {
+            format!("${:04X}", prev.value)
+        };
+        let id_key = match prev.kind {
+            SymType::Label => "duplicate-symbol-label",
+            SymType::Rs => "duplicate-symbol-rs",
+            _ => "duplicate-symbol-constant",
+        };
+        let message = t!(
+            id_key,
+            name = prev.name.as_str(),
+            file = file,
+            line = line,
+            value = shown
+        );
+        let rule = if same {
+            AsmRule::DuplicateSymbolSameValue
+        } else {
+            AsmRule::DuplicateSymbol
+        };
+        self.rule_diag(rule, message);
+    }
+
+    /// The source site of the current line: the file id its text is in (the
+    /// macro body's file for an expanded line), its line, and its expansion.
+    fn cur_site(&self) -> (u32, u32, u32) {
+        let file = match self.cur_expansion.checked_sub(1) {
+            Some(i) => self
+                .expansions
+                .get(i as usize)
+                .map_or(self.cur_file, |e| e.def_file),
+            None => self.cur_file,
+        };
+        (file, self.cur_line, self.cur_expansion)
+    }
+
+    /// Whether two sites are the same text: the same line and expansion of
+    /// the same file on disk (file ids differ when a file is included twice).
+    fn same_site(&self, a: (u32, u32, u32), b: (u32, u32, u32)) -> bool {
+        if a.1 != b.1 || a.2 != b.2 {
+            return false;
+        }
+        if a.0 == b.0 {
+            return true;
+        }
+        // Only reached for a same-value redefinition, so resolving the two
+        // paths on disk here is rare.
+        let path = |id: u32| {
+            self.paths
+                .get(id as usize)
+                .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+        };
+        path(a.0).is_some() && path(a.0) == path(b.0)
     }
 
     fn add_label(&mut self, name: &str) {
@@ -1356,7 +1596,15 @@ impl Assembler {
             Pseudo::Dephase => {
                 self.phase_delta = 0;
             }
-            Pseudo::Db(list) | Pseudo::Lobytes(list) => {
+            Pseudo::Db(list) => {
+                let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
+                for v in vals {
+                    self.check_range(v, Field::Byte);
+                    self.write_byte((v & 0xFF) as u8);
+                }
+            }
+            // `.lobytes` / `.hibytes` are the explicit way to narrow: never checked.
+            Pseudo::Lobytes(list) => {
                 let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
                 for v in vals {
                     self.write_byte((v & 0xFF) as u8);
@@ -1371,6 +1619,7 @@ impl Assembler {
             Pseudo::Dw(list) => {
                 let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
                 for v in vals {
+                    self.check_range(v, Field::Word);
                     self.write_byte((v & 0xFF) as u8);
                     self.write_byte(((v >> 8) & 0xFF) as u8);
                 }
@@ -1388,7 +1637,9 @@ impl Assembler {
                     None => 0,
                 };
                 for b in arg.text.bytes() {
-                    self.write_byte(((b as i64 + off) & 0xFF) as u8);
+                    let v = b as i64 + off;
+                    self.check_range(v, Field::Byte);
+                    self.write_byte((v & 0xFF) as u8);
                 }
             }
             Pseudo::Fill(list) => {
@@ -1399,6 +1650,9 @@ impl Assembler {
                 }
                 let count = vals[0];
                 let value = if vals.len() < 2 { 0xFF } else { vals[1] };
+                if count > 0 {
+                    self.check_range(value, Field::Byte);
+                }
                 for _ in 0..count.max(0) {
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -1754,7 +2008,7 @@ impl Assembler {
         }
 
         let tokens = crate::lexer::Lexer::new(src).tokenize();
-        let lines = match crate::parse::parse(tokens) {
+        let lines = match crate::parse::parse(tokens, &[src]) {
             Ok(lines) => lines,
             Err(e) => {
                 self.hard_error(t!(
@@ -2024,6 +2278,7 @@ impl Assembler {
             Operand::Immediate(e) => {
                 let value = self.eval(&e);
                 if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Immediate) {
+                    self.check_range(value, Field::Byte);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -2031,6 +2286,7 @@ impl Assembler {
             Operand::Indirect(e) => {
                 let value = self.eval(&e);
                 if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Indirect) {
+                    self.check_range(value, Field::Absolute);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                     self.write_byte(((value >> 8) & 0xFF) as u8);
@@ -2044,6 +2300,7 @@ impl Assembler {
                     return;
                 };
                 if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.check_range(value, Field::ZeroPage);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -2054,6 +2311,7 @@ impl Assembler {
                 // check, falling back to the 0xFF sentinel for an unknown opcode
                 // (C's `(unsigned int)(-1)` low byte).
                 let op = self.get_opcode(&mnem, AddressingMode::ZeroPage);
+                self.check_range(value, Field::ZeroPage);
                 self.write_byte(op.map_or(0xFF, |o| o.opcode));
                 self.write_byte((value & 0xFF) as u8);
             }
@@ -2065,6 +2323,7 @@ impl Assembler {
                     return;
                 };
                 if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.check_range(value, Field::ZeroPage);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -2072,6 +2331,7 @@ impl Assembler {
             Operand::Absolute(e) => {
                 let value = self.eval(&e);
                 if let Some(op) = self.get_opcode(&mnem, AddressingMode::Absolute) {
+                    self.check_range(value, Field::Absolute);
                     self.write_byte(op.opcode);
                     self.write_byte((value & 0xFF) as u8);
                     self.write_byte(((value >> 8) & 0xFF) as u8);
@@ -2090,6 +2350,7 @@ impl Assembler {
                     return;
                 };
                 if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.check_range(value, Field::Absolute);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                     self.write_byte(((value >> 8) & 0xFF) as u8);

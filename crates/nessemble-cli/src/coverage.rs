@@ -121,16 +121,24 @@ pub fn run(args: &CoverageArgs) -> u8 {
     // source already calls for, so a non-NES project with nothing but
     // pseudo-op scripts to measure isn't forced through NES mode to get there.
     let want_rom = !args.cdl.is_empty();
+    // The project's `assemble.rules` apply here exactly as they do to a build,
+    // so a source that fails to build fails to measure too.
+    let rules = match crate::resolve_assemble_rules(Some(Path::new(&args.infile)), &[], false) {
+        Ok(rules) => rules,
+        Err(code) => return code,
+    };
     let options = if want_rom {
         Options {
             nes: true,
             source_map: true,
             project_root,
+            rules,
             ..Options::default()
         }
     } else {
         Options {
             project_root,
+            rules,
             ..Options::default()
         }
     };
@@ -175,7 +183,12 @@ pub fn run(args: &CoverageArgs) -> u8 {
     let assembly = match assemble_file_with(Path::new(&args.infile), &options, resolver) {
         Ok(a) => a,
         Err(AssembleError(d)) => {
-            eprintln!("nessemble: {}: line {}: {}", args.infile, d.line, d.message);
+            eprintln!(
+                "nessemble: {}: line {}: {}",
+                args.infile,
+                d.line,
+                d.display_message()
+            );
             return RETURN_EPERM;
         }
     };

@@ -1,6 +1,6 @@
 [package]
 name = "nessemble-rc"
-description = "`.nessemblerc` project configuration for the nessemble formatter and linter"
+description = "`.nessemblerc` project configuration for the nessemble assembler, formatter and linter"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

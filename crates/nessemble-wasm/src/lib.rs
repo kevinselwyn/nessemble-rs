@@ -200,11 +200,21 @@ pub fn format(source: &str) -> String {
 /// Format a core diagnostic for display (`file: line N: message`, or just the
 /// message for file-less diagnostics).
 fn format_diag(diag: &Diag) -> String {
-    if diag.line == 0 {
-        diag.message.clone()
+    let mut out = if diag.line == 0 {
+        diag.display_message()
     } else {
-        format!("{}: line {}: {}", diag.file, diag.line, diag.message)
+        format!(
+            "{}: line {}: {}",
+            diag.file,
+            diag.line,
+            diag.display_message()
+        )
+    };
+    for note in &diag.notes {
+        out.push_str("\n  note: ");
+        out.push_str(note);
     }
+    out
 }
 
 /// Build a custom pseudo-op resolver from the requested `pseudo` map: an inline

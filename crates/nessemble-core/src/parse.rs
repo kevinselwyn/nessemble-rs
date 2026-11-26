@@ -11,20 +11,27 @@ use crate::ast::{
     AsciiArg, BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo,
     RandTerm, Stmt,
 };
-use crate::lexer::{Tok, Token};
+use crate::lexer::{Span, Tok, Token};
 
-/// A parse error with the offending 1-based line and source-file id.
+/// A parse error with the offending 1-based line, source-file id, and the
+/// macro expansion the line came from (`0` for none).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub line: u32,
     pub file: u32,
+    pub expansion: u32,
     pub message: String,
 }
 
-pub fn parse(tokens: Vec<Token>) -> Result<Vec<Line>, ParseError> {
+/// Parse `tokens`, stopping at the first error. `sources` is the text of each
+/// file the tokens' spans index (see [`crate::lexer::Span`]); diagnostics
+/// quote it. A missing entry only makes a diagnostic quote a normalized
+/// rendering of the tokens instead.
+pub fn parse(tokens: Vec<Token>, sources: &[&str]) -> Result<Vec<Line>, ParseError> {
     let lines = Parser {
         toks: tokens,
         pos: 0,
+        sources,
     }
     .parse_program()?;
     match validate_loops(&lines).into_iter().next() {
@@ -37,10 +44,11 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Line>, ParseError> {
 /// skip to the next line, continuing. Returns the successfully-parsed lines plus
 /// every error found. Used by the tooling diagnostics path; [`parse`] (strict,
 /// first-error) is unchanged.
-pub fn parse_recovering(tokens: Vec<Token>) -> (Vec<Line>, Vec<ParseError>) {
+pub fn parse_recovering(tokens: Vec<Token>, sources: &[&str]) -> (Vec<Line>, Vec<ParseError>) {
     let (lines, mut errors) = Parser {
         toks: tokens,
         pos: 0,
+        sources,
     }
     .parse_program_recovering();
     errors.extend(validate_loops(&lines));
@@ -59,6 +67,7 @@ fn validate_loops(lines: &[Line]) -> Vec<ParseError> {
     struct Open {
         line: u32,
         file: u32,
+        expansion: u32,
         if_depth: usize,
     }
     let mut errors = Vec::new();
@@ -68,12 +77,14 @@ fn validate_loops(lines: &[Line]) -> Vec<ParseError> {
         let err = |message: String| ParseError {
             line: l.line,
             file: l.file,
+            expansion: l.expansion,
             message,
         };
         match &l.stmt {
             Stmt::Pseudo(Pseudo::For(..)) => open.push(Open {
                 line: l.line,
                 file: l.file,
+                expansion: l.expansion,
                 if_depth,
             }),
             Stmt::Pseudo(Pseudo::EndFor) => match open.pop() {
@@ -99,18 +110,21 @@ fn validate_loops(lines: &[Line]) -> Vec<ParseError> {
         errors.push(ParseError {
             line: frame.line,
             file: frame.file,
+            expansion: frame.expansion,
             message: t!("for-unterminated"),
         });
     }
     errors
 }
 
-struct Parser {
+struct Parser<'a> {
     toks: Vec<Token>,
     pos: usize,
+    /// Source text per file id, for quoting statements in diagnostics.
+    sources: &'a [&'a str],
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.pos).map(|t| &t.tok)
     }
@@ -142,6 +156,14 @@ impl Parser {
             .is_some_and(|t| t.from_macro)
     }
 
+    /// The macro expansion the current token came from (`0` for none).
+    fn cur_expansion(&self) -> u32 {
+        self.toks
+            .get(self.pos)
+            .or_else(|| self.toks.last())
+            .map_or(0, |t| t.expansion)
+    }
+
     fn bump(&mut self) -> Option<Tok> {
         let t = self.toks.get(self.pos).map(|t| t.tok.clone());
         if t.is_some() {
@@ -154,8 +176,79 @@ impl Parser {
         Err(ParseError {
             line: self.cur_line(),
             file: self.cur_file(),
+            expansion: self.cur_expansion(),
             message: message.into(),
         })
+    }
+
+    /// Require that the statement which began at token `start` (and parsed
+    /// as `stmt`) ends here: anything but end-of-line left on it is an error,
+    /// since nothing would read it. A trailing comment is not a token, so it
+    /// never trips this. Every statement form ends through this one check.
+    fn expect_end(&self, start: usize, stmt: &Stmt) -> Result<(), ParseError> {
+        if matches!(self.peek(), Some(Tok::Endl) | None) {
+            return Ok(());
+        }
+        if let Stmt::Label(_) = stmt {
+            let end = self.line_end(self.pos);
+            return self.err(t!("label-content", rest = self.render(self.pos, end)));
+        }
+        let token = self.render(self.pos, self.pos + 1);
+        let statement = self.render(start, self.pos);
+        let starts_value = self.peek().is_some_and(starts_expression);
+        let message = match stmt {
+            Stmt::Pseudo(
+                Pseudo::Db(_) | Pseudo::Dw(_) | Pseudo::Hibytes(_) | Pseudo::Lobytes(_),
+            ) if starts_value => t!(
+                "unexpected-after-list",
+                token = token,
+                statement = statement
+            ),
+            Stmt::Constant(Name::Plain(name), None) if is_mnemonic(name) => t!(
+                "unexpected-after-instruction",
+                token = token,
+                statement = statement
+            ),
+            _ => t!("unexpected-after", token = token, statement = statement),
+        };
+        self.err(message)
+    }
+
+    /// Index of the end-of-line token (or the end) of the line holding `pos`.
+    fn line_end(&self, pos: usize) -> usize {
+        let mut j = pos;
+        while j < self.toks.len() && !matches!(self.toks[j].tok, Tok::Endl) {
+            j += 1;
+        }
+        j
+    }
+
+    /// The source text of tokens `from..to`, as written: each token's own text,
+    /// separated by one space wherever the source had whitespace (or a line
+    /// break) between them. Tokens sharing a span — an expanded `\N` and the
+    /// parentheses around it — are quoted once, as the `\N` the body wrote.
+    fn render(&self, from: usize, to: usize) -> String {
+        let mut out = String::new();
+        let mut prev: Option<Span> = None;
+        for t in &self.toks[from.min(self.toks.len())..to.min(self.toks.len())] {
+            if matches!(t.tok, Tok::Endl | Tok::Indent) || prev == Some(t.span) {
+                continue;
+            }
+            let src = self.sources.get(t.span.src as usize);
+            let text = src
+                .and_then(|s| s.get(t.span.start as usize..t.span.end as usize))
+                .filter(|s| !s.is_empty())
+                .map_or_else(|| tok_text(&t.tok), str::to_string);
+            if let Some(p) = prev {
+                let adjacent = p.src == t.span.src && p.end == t.span.start && src.is_some();
+                if !adjacent {
+                    out.push(' ');
+                }
+            }
+            out.push_str(&text);
+            prev = Some(t.span);
+        }
+        out
     }
 
     fn parse_program(&mut self) -> Result<Vec<Line>, ParseError> {
@@ -179,12 +272,16 @@ impl Parser {
             let line_no = self.cur_line();
             let file_no = self.cur_file();
             let from_macro = self.cur_from_macro();
+            let expansion = self.cur_expansion();
+            let start = self.pos;
             if let Some(stmt) = self.parse_stmt(indented)? {
+                self.expect_end(start, &stmt)?;
                 lines.push(Line {
                     stmt,
                     line: line_no,
                     file: file_no,
                     from_macro,
+                    expansion,
                 });
             }
             // Consume through end-of-line.
@@ -221,12 +318,18 @@ impl Parser {
             let line_no = self.cur_line();
             let file_no = self.cur_file();
             let from_macro = self.cur_from_macro();
-            match self.parse_stmt(indented) {
+            let expansion = self.cur_expansion();
+            let start = self.pos;
+            match self.parse_stmt(indented).and_then(|stmt| match stmt {
+                Some(stmt) => self.expect_end(start, &stmt).map(|()| Some(stmt)),
+                None => Ok(None),
+            }) {
                 Ok(Some(stmt)) => lines.push(Line {
                     stmt,
                     line: line_no,
                     file: file_no,
                     from_macro,
+                    expansion,
                 }),
                 Ok(None) => {}
                 Err(e) => errors.push(e),
@@ -262,11 +365,12 @@ impl Parser {
                         return Ok(Some(stmt));
                     }
                 }
-                // A label declaration is `text COLON` where the colon ends the
-                // line. A colon that begins a local-label operand (`:-`, `:+`)
-                // belongs to an instruction, so require end-of-line after it.
+                // A label declaration is `text COLON`. A colon that begins a
+                // local-label operand (`BEQ :+`, `BNE :-`) belongs to an
+                // indented instruction. Anything else after the colon is
+                // content on the label's line, which `expect_end` rejects.
                 let is_label = matches!(self.peek_at(1), Some(Tok::Colon))
-                    && matches!(self.peek_at(2), Some(Tok::Endl) | None);
+                    && !(indented && matches!(self.peek_at(2), Some(Tok::Plus | Tok::Minus)));
                 if is_label {
                     self.pos += 2;
                     return Ok(Some(Stmt::Label(Name::Plain(name))));
@@ -315,7 +419,7 @@ impl Parser {
             return self.err(t!("for-paste-multiple", name = base));
         }
         match self.peek_at(2) {
-            Some(Tok::Colon) if matches!(self.peek_at(3), Some(Tok::Endl) | None) => {
+            Some(Tok::Colon) => {
                 self.pos += 3;
                 Ok(Some(Stmt::Label(Name::Pasted(base.to_string(), depth))))
             }
@@ -780,6 +884,77 @@ fn ines_field(name: &str) -> Option<InesField> {
     })
 }
 
+/// Whether `tok` can begin an expression — a value a missing comma would
+/// have separated from the one before it.
+fn starts_expression(tok: &Tok) -> bool {
+    matches!(
+        tok,
+        Tok::Number(_)
+            | Tok::NumberArg(_)
+            | Tok::NumberArgc
+            | Tok::NumberArgu
+            | Tok::LoopIndex(_)
+            | Tok::Text(_)
+            | Tok::High
+            | Tok::Low
+            | Tok::Bank
+            | Tok::OpenParen
+            | Tok::Colon
+    )
+}
+
+/// Whether `name` is a 6502 mnemonic (in any mode, documented or not).
+fn is_mnemonic(name: &str) -> bool {
+    nessemble_isa::OPCODES
+        .iter()
+        .any(|o| o.mnemonic.eq_ignore_ascii_case(name))
+}
+
+/// A normalized spelling of `tok`, for quoting a token with no source text.
+fn tok_text(tok: &Tok) -> String {
+    let s = match tok {
+        Tok::Endl | Tok::Indent => "",
+        Tok::Plus => "+",
+        Tok::Minus => "-",
+        Tok::Pow => "**",
+        Tok::Mult => "*",
+        Tok::Div => "/",
+        Tok::And => "&",
+        Tok::Or => "|",
+        Tok::Xor => "^",
+        Tok::Rshift => ">>",
+        Tok::Lshift => "<<",
+        Tok::Mod => "%",
+        Tok::DblEqu => "==",
+        Tok::NotEqu => "!=",
+        Tok::Hash => "#",
+        Tok::Comma => ",",
+        Tok::Equ => "=",
+        Tok::Colon => ":",
+        Tok::OpenParen => "(",
+        Tok::CloseParen => ")",
+        Tok::OpenBrack => "[",
+        Tok::CloseBrack => "]",
+        Tok::Lt => "<",
+        Tok::Gt => ">",
+        Tok::Lte => "<=",
+        Tok::Gte => ">=",
+        Tok::Arrow => "->",
+        Tok::High => "HIGH",
+        Tok::Low => "LOW",
+        Tok::Bank => "BANK",
+        Tok::NumberArgc => "\\#",
+        Tok::NumberArgu => "\\@",
+        Tok::Pseudo(name) => return format!(".{name}"),
+        Tok::Number(n) => return n.to_string(),
+        Tok::NumberArg(n) => return format!("\\{n}"),
+        Tok::LoopIndex(d) => return ["\\i", "\\j", "\\k"][usize::from(*d).min(2)].to_string(),
+        Tok::Text(s) | Tok::QuotString(s) => return s.clone(),
+        Tok::CharReg(c) => return c.to_string(),
+    };
+    s.to_string()
+}
+
 fn binop(tok: &Tok) -> Option<BinOp> {
     Some(match tok {
         Tok::Plus => BinOp::Add,
@@ -819,7 +994,7 @@ mod tests {
 
     fn first_stmt(src: &str) -> Stmt {
         let toks = Lexer::new(src).tokenize();
-        let lines = parse(toks).expect("parse ok");
+        let lines = parse(toks, &[src]).expect("parse ok");
         lines.into_iter().next().expect("one line").stmt
     }
 
@@ -886,7 +1061,7 @@ mod tests {
 
     #[test]
     fn for_parses_two_bounds_and_endfor() {
-        let lines = parse(Lexer::new(".for 0, 7\n.endfor\n").tokenize()).expect("parse ok");
+        let lines = parse(Lexer::new(".for 0, 7\n.endfor\n").tokenize(), &[]).expect("parse ok");
         let stmts: Vec<_> = lines.into_iter().map(|l| l.stmt).collect();
         assert_eq!(
             stmts,

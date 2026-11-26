@@ -83,6 +83,25 @@ pub struct Token {
     pub line: u32,
     pub file: u32,
     pub from_macro: bool,
+    /// The `.macro` expansion that produced this token (a 1-based index into
+    /// the preprocessor's expansion table), or `0` for a token written
+    /// directly in a file. See [`crate::diagnostic::Expansion`].
+    pub expansion: u32,
+    /// Where the token's text is: the file id it was lexed from and its byte
+    /// range in that file's source. Diagnostics use it to quote what the user
+    /// wrote. A token the preprocessor synthesizes (the parentheses around a
+    /// substituted `\N`, say) borrows the span of the token it replaces.
+    pub span: Span,
+}
+
+/// A token's location in the source text it was lexed from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span {
+    /// Index of the source text (the preprocessor's file id).
+    pub src: u32,
+    /// Byte offsets of the token's first and one-past-last characters.
+    pub start: u32,
+    pub end: u32,
 }
 
 /// Known pseudo-op names (without the leading dot).
@@ -103,6 +122,15 @@ fn radix_val(bytes: &[u8], radix: u32) -> i64 {
         .ok()
         .and_then(|s| i64::from_str_radix(s, radix).ok())
         .unwrap_or(0)
+}
+
+/// One step of [`Lexer::next_raw`].
+enum Step {
+    /// End of input.
+    End,
+    /// Whitespace or a comment was consumed; lex again.
+    Skipped,
+    Token(Token),
 }
 
 /// The lexer over a byte slice.
@@ -142,12 +170,37 @@ impl<'a> Lexer<'a> {
             line: self.line,
             file: 0,
             from_macro: false,
+            expansion: 0,
+            span: Span::default(),
         }
     }
 
+    /// The next token, with its [`Span`] filled in.
     fn next_token(&mut self) -> Option<Token> {
         loop {
-            let c = self.peek(0)?;
+            let start = self.pos;
+            match self.next_raw() {
+                Step::End => return None,
+                Step::Skipped => {}
+                Step::Token(mut tok) => {
+                    tok.span = Span {
+                        src: 0,
+                        start: start as u32,
+                        end: self.pos as u32,
+                    };
+                    return Some(tok);
+                }
+            }
+        }
+    }
+
+    /// Lex one step: the next token, or a skipped run of whitespace or a
+    /// comment, or the end of input.
+    fn next_raw(&mut self) -> Step {
+        {
+            let Some(c) = self.peek(0) else {
+                return Step::End;
+            };
 
             // Leading indentation at the start of a line.
             if self.at_line_start && (c == b' ' || c == b'\t') {
@@ -155,7 +208,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                 }
                 self.at_line_start = false;
-                return Some(self.emit(Tok::Indent));
+                return Step::Token(self.emit(Tok::Indent));
             }
             self.at_line_start = false;
 
@@ -165,38 +218,42 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     self.line += 1;
                     self.at_line_start = true;
-                    return Some(Token {
+                    return Step::Token(Token {
                         tok: Tok::Endl,
                         line,
                         file: 0,
                         from_macro: false,
+                        expansion: 0,
+                        span: Span::default(),
                     });
                 }
                 b'\r' => {
                     // Mirror the reference: a lone CR is treated as end-of-line.
                     let line = self.line;
                     self.pos += 1;
-                    return Some(Token {
+                    return Step::Token(Token {
                         tok: Tok::Endl,
                         line,
                         file: 0,
                         from_macro: false,
+                        expansion: 0,
+                        span: Span::default(),
                     });
                 }
                 b' ' | b'\t' => {
                     self.pos += 1;
-                    continue;
+                    return Step::Skipped;
                 }
                 b';' => {
                     while !matches!(self.peek(0), None | Some(b'\n')) {
                         self.pos += 1;
                     }
-                    continue;
+                    return Step::Skipped;
                 }
                 _ => {}
             }
 
-            return Some(self.lex_significant());
+            Step::Token(self.lex_significant())
         }
     }
 
@@ -219,6 +276,8 @@ impl<'a> Lexer<'a> {
             line: self.line,
             file: 0,
             from_macro: false,
+            expansion: 0,
+            span: Span::default(),
         }
     }
 
@@ -273,6 +332,8 @@ impl<'a> Lexer<'a> {
             line,
             file: 0,
             from_macro: false,
+            expansion: 0,
+            span: Span::default(),
         })
     }
 
@@ -454,6 +515,8 @@ impl<'a> Lexer<'a> {
             line,
             file: 0,
             from_macro: false,
+            expansion: 0,
+            span: Span::default(),
         })
     }
 }

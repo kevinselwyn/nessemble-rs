@@ -30,6 +30,32 @@ nes2-console-conflict = Conflicting console type: VS, PlayChoice-10, and .inesco
 nes2-extended-console = Extended console type (.inesconsole 3) is not yet supported
 nes2-vs-ignored = VS PPU/hardware type set but console type is not VS; value ignored
 
+
+## Diagnostics for source that cannot mean what it says (always errors)
+
+label-content = a label must be on a line of its own; move `{ $rest }` to the next line
+unexpected-after = unexpected `{ $token }` after `{ $statement }`
+unexpected-after-list = unexpected `{ $token }` after `{ $statement }`; separate values with commas
+unexpected-after-instruction = unexpected `{ $token }` after `{ $statement }`; indent an instruction, or it is read as a constant definition
+macro-arity-none = macro `{ $name }` takes no arguments, but this call passes { $passed }
+macro-arity-one = macro `{ $name }` takes 1 argument (it uses \1), but this call passes { $passed }
+macro-arity = macro `{ $name }` takes { $arity } arguments (it uses \1-\{ $arity }), but this call passes { $passed }
+note-macro-defined = `{ $name }` is defined at { $file } line { $line }
+note-in-expansion = in expansion of macro `{ $name }` at { $file } line { $line }
+
+## Configurable assembler diagnostics (rules)
+
+duplicate-symbol-label = `{ $name }` is already defined at { $file } line { $line } (as a label at { $value }); this definition replaces it
+duplicate-symbol-rs = `{ $name }` is already defined at { $file } line { $line } (as a `.rs` variable at { $value }); this definition replaces it
+duplicate-symbol-constant = `{ $name }` is already defined at { $file } line { $line } (as a constant, { $value }); this definition replaces it
+macro-redefined = macro `{ $name }` is already defined at { $file } line { $line }; this definition replaces it
+value-out-of-range = value { $value } ({ $hex }) does not fit in { $field }; emitting { $emitted }
+value-out-of-range-negative = value { $value } does not fit in { $field }; emitting { $emitted }
+field-byte = a byte
+field-word = a word
+field-zero-page = a zero-page operand
+field-absolute = an absolute operand
+
 ## Media importers
 
 could-not-load-png = Could not load PNG
@@ -82,6 +108,7 @@ for-iteration-suffix = { $message } (in `.for` iteration { $counters })
 
 error-line = Error in `{ $file }` on line { $line }: { $message }
 warning-line = Warning in `{ $file }` on line { $line }: { $message }
+note-line = {"  "}note: { $message }
 no-errors = No errors
 
 ## Version
