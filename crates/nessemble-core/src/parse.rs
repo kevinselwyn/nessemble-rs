@@ -158,6 +158,17 @@ impl Parser {
         })
     }
 
+    /// A complete statement must end its line. Anything left over used to be
+    /// skipped silently, which hid mistakes such as `JMP p1.loc` (assembled as
+    /// `JMP p1`) or `.db 1 2` (one byte); it is now an error at the leftover
+    /// token's line.
+    fn expect_end_of_statement(&self) -> Result<(), ParseError> {
+        match self.peek() {
+            None | Some(Tok::Endl) => Ok(()),
+            Some(tok) => self.err(t!("trailing-tokens", token = describe_tok(tok))),
+        }
+    }
+
     fn parse_program(&mut self) -> Result<Vec<Line>, ParseError> {
         let mut lines = Vec::new();
         loop {
@@ -187,6 +198,7 @@ impl Parser {
                     from_macro,
                 });
             }
+            self.expect_end_of_statement()?;
             // Consume through end-of-line.
             while !matches!(self.peek(), Some(Tok::Endl) | None) {
                 self.pos += 1;
@@ -221,7 +233,10 @@ impl Parser {
             let line_no = self.cur_line();
             let file_no = self.cur_file();
             let from_macro = self.cur_from_macro();
-            match self.parse_stmt(indented) {
+            match self
+                .parse_stmt(indented)
+                .and_then(|stmt| self.expect_end_of_statement().map(|()| stmt))
+            {
                 Ok(Some(stmt)) => lines.push(Line {
                     stmt,
                     line: line_no,
@@ -271,6 +286,16 @@ impl Parser {
                     self.pos += 2;
                     return Ok(Some(Stmt::Label(Name::Plain(name))));
                 }
+                // `name: LDA #1` — a label with a statement after it on the same
+                // line. This used to drop the statement (and, at column 0, define
+                // `name` as the constant 1). Only `:+` / `:-` may follow a colon
+                // in an operand, so anything else after it is this mistake.
+                if matches!(self.peek_at(1), Some(Tok::Colon))
+                    && !matches!(self.peek_at(2), Some(Tok::Plus | Tok::Minus))
+                {
+                    self.pos += 2;
+                    return self.err(t!("label-not-alone", name = name.as_str()));
+                }
                 // `<label> .rs <size>` reserves a variable.
                 if matches!(self.peek_at(1), Some(Tok::Pseudo(p)) if p == "rs") {
                     self.pos += 2;
@@ -318,6 +343,11 @@ impl Parser {
             Some(Tok::Colon) if matches!(self.peek_at(3), Some(Tok::Endl) | None) => {
                 self.pos += 3;
                 Ok(Some(Stmt::Label(Name::Pasted(base.to_string(), depth))))
+            }
+            Some(Tok::Colon) if !matches!(self.peek_at(3), Some(Tok::Plus | Tok::Minus)) => {
+                self.pos += 3;
+                let name = format!("{base}\\{}", loop_counter_name(depth));
+                self.err(t!("label-not-alone", name = name.as_str()))
             }
             Some(Tok::Equ) => {
                 self.pos += 3;
@@ -750,6 +780,64 @@ impl Parser {
         }
         Ok(e)
     }
+}
+
+/// The source spelling of a loop counter at `depth` (`i`, `j` or `k`).
+fn loop_counter_name(depth: u8) -> char {
+    match depth {
+        0 => 'i',
+        1 => 'j',
+        _ => 'k',
+    }
+}
+
+/// Render a token for a diagnostic, as close to its source spelling as the
+/// token keeps. Numbers have lost their radix, so they print as `$`-hex above 9.
+fn describe_tok(tok: &Tok) -> String {
+    let s = match tok {
+        Tok::Endl => "end of line",
+        Tok::Indent => "indentation",
+        Tok::Plus => "+",
+        Tok::Minus => "-",
+        Tok::Pow => "**",
+        Tok::Mult => "*",
+        Tok::Div => "/",
+        Tok::And => "&",
+        Tok::Or => "|",
+        Tok::Xor => "^",
+        Tok::Rshift => ">>",
+        Tok::Lshift => "<<",
+        Tok::Mod => "%",
+        Tok::DblEqu => "==",
+        Tok::NotEqu => "!=",
+        Tok::Hash => "#",
+        Tok::Comma => ",",
+        Tok::Equ => "=",
+        Tok::Colon => ":",
+        Tok::OpenParen => "(",
+        Tok::CloseParen => ")",
+        Tok::OpenBrack => "[",
+        Tok::CloseBrack => "]",
+        Tok::Lt => "<",
+        Tok::Gt => ">",
+        Tok::Lte => "<=",
+        Tok::Gte => ">=",
+        Tok::Arrow => "->",
+        Tok::High => "HIGH",
+        Tok::Low => "LOW",
+        Tok::Bank => "BANK",
+        Tok::NumberArgc => "\\#",
+        Tok::NumberArgu => "\\@",
+        Tok::Pseudo(name) => return format!(".{name}"),
+        Tok::Number(n) if (0..=9).contains(n) => return n.to_string(),
+        Tok::Number(n) if *n < 0 => return n.to_string(),
+        Tok::Number(n) => return format!("${n:X}"),
+        Tok::NumberArg(n) => return format!("\\{n}"),
+        Tok::LoopIndex(depth) => return format!("\\{}", loop_counter_name(*depth)),
+        Tok::Text(s) | Tok::QuotString(s) => return s.clone(),
+        Tok::CharReg(c) => return c.to_string(),
+    };
+    s.to_string()
 }
 
 /// Map a numeric `.inesXxx` directive name to its [`InesField`]. The two

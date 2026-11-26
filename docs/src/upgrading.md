@@ -12,6 +12,22 @@ around them changed. This page covers what a 1.x user needs to know.
   byte-for-byte identical to 1.x output. The one behavioral change is how
   relative filenames are resolved — see [Include & asset paths](#include--asset-paths).
 
+## Stricter checks on existing source
+
+Later 2.x releases reject or warn about input that used to be accepted silently.
+None of them changes the bytes of a program that assembles without them:
+
+- **Errors:** a statement after a label on the same line (`start: LDA #1`, which
+  dropped the instruction); tokens left over after a complete statement
+  (`JMP start.loc`, which assembled as `JMP start`, or `.db 1 2`, which emitted
+  one byte); and a `.macro` call passing fewer or more arguments than the body
+  uses.
+- **Warnings:** a symbol defined twice so that the later definition silently
+  wins (`duplicate-symbol`), and a value that does not fit the byte, word or
+  zero-page field it is written into (`value-out-of-range`).
+
+See [Statements and values](syntax.md#statements-and-values).
+
 ## Include & asset paths
 
 - In 1.x, every filename-based directive resolved its path against a single

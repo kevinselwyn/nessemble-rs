@@ -367,6 +367,45 @@ impl Pre<'_> {
             }
         };
 
+        // The body's highest `\N` is how many arguments it takes. A missing one
+        // used to become `0` silently; extra ones were ignored. A body that reads
+        // `\#` (the argument count) handles a variable count itself, so it may be
+        // passed more than its highest `\N`.
+        let mut needed = 0i64;
+        let mut variadic = false;
+        for t in &body {
+            match t.tok {
+                Tok::NumberArg(n) => needed = needed.max(n),
+                Tok::NumberArgc => variadic = true,
+                _ => {}
+            }
+        }
+        let given = args.len() as i64;
+        if needed > given {
+            return Err(self.diag(
+                file_id,
+                line,
+                t!(
+                    "macro-arg-missing",
+                    name = name.as_str(),
+                    needed = needed,
+                    given = given
+                ),
+            ));
+        }
+        if given > needed && !variadic {
+            return Err(self.diag(
+                file_id,
+                line,
+                t!(
+                    "macro-arg-extra",
+                    name = name.as_str(),
+                    used = needed,
+                    given = given
+                ),
+            ));
+        }
+
         self.unique += 1;
         let unique = self.unique;
         let expanded = substitute(&body, &args, unique, file_id);

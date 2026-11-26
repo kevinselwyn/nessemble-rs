@@ -151,6 +151,9 @@ struct Symbol {
     bank: usize,
     /// Set when the symbol was defined on a macro-expanded source line.
     from_macro: bool,
+    /// Where the symbol was (last) defined, for the `duplicate-symbol` warning.
+    file: u32,
+    line: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1089,11 +1092,40 @@ impl Assembler {
     }
 
     fn warning(&mut self, message: impl Into<String>) {
-        self.warnings.push(Diag {
+        let diag = Diag {
             file: self.file_name(),
             line: self.cur_line,
             message: message.into(),
-        });
+        };
+        // A line in a `.for` body (or a macro expanded many times) warns once.
+        if !self.warnings.contains(&diag) {
+            self.warnings.push(diag);
+        }
+    }
+
+    /// Warn when `value` does not fit the field it is about to be narrowed
+    /// into. Checked on the final pass only, so forward references have their
+    /// real values, and never inside a false conditional (nothing is emitted).
+    fn check_range(&mut self, value: i64, field: Field) {
+        if self.pass != 2 || self.if_suppressed() {
+            return;
+        }
+        let (min, max, bits, what) = match field {
+            Field::Byte => (-128, 0xFF, 8, "a byte"),
+            Field::Word => (-32768, 0xFFFF, 16, "a word"),
+            Field::ZeroPage => (0, 0xFF, 8, "a zero-page operand"),
+        };
+        if (min..=max).contains(&value) {
+            return;
+        }
+        self.warning(t!(
+            "value-out-of-range",
+            value = format_value(value),
+            field = what,
+            min = format_value(min),
+            max = format_value(max),
+            bits = bits
+        ));
     }
 
     // -- symbol table -------------------------------------------------------
@@ -1143,10 +1175,33 @@ impl Assembler {
         };
         match existing {
             Some(id) => {
-                self.symbols[id].value = value;
-                self.symbols[id].bank = bank;
-                self.symbols[id].kind = kind;
-                self.symbols[id].from_macro = from_macro;
+                let old = &self.symbols[id];
+                // Restating a symbol exactly (same kind, value and bank — say a
+                // label written both before an `.include` and as the included
+                // file's first line) replaces nothing, so it does not warn.
+                let identical = old.kind == kind && old.value == value && old.bank == bank;
+                if !identical && is_duplicate_definition(old.kind, kind) {
+                    let file = self
+                        .files
+                        .get(old.file as usize)
+                        .cloned()
+                        .unwrap_or_default();
+                    let line = old.line;
+                    self.warning(t!(
+                        "duplicate-symbol",
+                        name = name,
+                        line = line,
+                        file = file.as_str()
+                    ));
+                }
+                let (file, line) = (self.cur_file, self.cur_line);
+                let sym = &mut self.symbols[id];
+                sym.value = value;
+                sym.bank = bank;
+                sym.kind = kind;
+                sym.from_macro = from_macro;
+                sym.file = file;
+                sym.line = line;
             }
             None => self.symbols.push(Symbol {
                 name: name.to_string(),
@@ -1154,6 +1209,8 @@ impl Assembler {
                 kind,
                 bank,
                 from_macro,
+                file: self.cur_file,
+                line: self.cur_line,
             }),
         }
     }
@@ -1356,7 +1413,16 @@ impl Assembler {
             Pseudo::Dephase => {
                 self.phase_delta = 0;
             }
-            Pseudo::Db(list) | Pseudo::Lobytes(list) => {
+            Pseudo::Db(list) => {
+                let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
+                for v in vals {
+                    self.check_range(v, Field::Byte);
+                    self.write_byte((v & 0xFF) as u8);
+                }
+            }
+            // `.lobytes` / `.hibytes` select a byte of each value on purpose, so
+            // they are never out of range.
+            Pseudo::Lobytes(list) => {
                 let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
                 for v in vals {
                     self.write_byte((v & 0xFF) as u8);
@@ -1371,6 +1437,7 @@ impl Assembler {
             Pseudo::Dw(list) => {
                 let vals: Vec<i64> = list.iter().map(|e| self.eval(e)).collect();
                 for v in vals {
+                    self.check_range(v, Field::Word);
                     self.write_byte((v & 0xFF) as u8);
                     self.write_byte(((v >> 8) & 0xFF) as u8);
                 }
@@ -1399,6 +1466,9 @@ impl Assembler {
                 }
                 let count = vals[0];
                 let value = if vals.len() < 2 { 0xFF } else { vals[1] };
+                if count > 0 {
+                    self.check_range(value, Field::Byte);
+                }
                 for _ in 0..count.max(0) {
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -2024,6 +2094,7 @@ impl Assembler {
             Operand::Immediate(e) => {
                 let value = self.eval(&e);
                 if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Immediate) {
+                    self.check_range(value, Field::Byte);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -2031,6 +2102,7 @@ impl Assembler {
             Operand::Indirect(e) => {
                 let value = self.eval(&e);
                 if let Some(op) = self.resolve_opcode(&mnem, AddressingMode::Indirect) {
+                    self.check_range(value, Field::Word);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                     self.write_byte(((value >> 8) & 0xFF) as u8);
@@ -2044,6 +2116,7 @@ impl Assembler {
                     return;
                 };
                 if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.check_range(value, Field::ZeroPage);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -2054,6 +2127,7 @@ impl Assembler {
                 // check, falling back to the 0xFF sentinel for an unknown opcode
                 // (C's `(unsigned int)(-1)` low byte).
                 let op = self.get_opcode(&mnem, AddressingMode::ZeroPage);
+                self.check_range(value, Field::ZeroPage);
                 self.write_byte(op.map_or(0xFF, |o| o.opcode));
                 self.write_byte((value & 0xFF) as u8);
             }
@@ -2065,6 +2139,7 @@ impl Assembler {
                     return;
                 };
                 if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.check_range(value, Field::ZeroPage);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                 }
@@ -2072,6 +2147,7 @@ impl Assembler {
             Operand::Absolute(e) => {
                 let value = self.eval(&e);
                 if let Some(op) = self.get_opcode(&mnem, AddressingMode::Absolute) {
+                    self.check_range(value, Field::Word);
                     self.write_byte(op.opcode);
                     self.write_byte((value & 0xFF) as u8);
                     self.write_byte(((value >> 8) & 0xFF) as u8);
@@ -2090,6 +2166,7 @@ impl Assembler {
                     return;
                 };
                 if let Some(op) = self.resolve_opcode(&mnem, mode) {
+                    self.check_range(value, Field::Word);
                     self.write_byte(op);
                     self.write_byte((value & 0xFF) as u8);
                     self.write_byte(((value >> 8) & 0xFF) as u8);
@@ -2399,4 +2476,35 @@ pub(crate) fn prewarm_candidates(
         }
     }
     out
+}
+
+/// The kinds of field a value is narrowed into when it is emitted, for the
+/// `value-out-of-range` warning.
+#[derive(Debug, Clone, Copy)]
+enum Field {
+    /// `.db`, `.fill`, `#imm`: `-128…255`.
+    Byte,
+    /// `.dw` and absolute / indirect operands: `-32768…65535`.
+    Word,
+    /// `<zp` and `[zp, X]` / `[zp], Y` operands: `0…255`.
+    ZeroPage,
+}
+
+/// Whether redefining a symbol of kind `old` as `new` is worth a
+/// `duplicate-symbol` warning. Reassigning a constant (`X = 1` … `X = 2`) is a
+/// supported idiom — `.for` bodies rely on it — so only a redefinition that
+/// involves a label, a `.rs` reservation or an `.enum` member warns. A name that
+/// was only *referenced* so far (`Undefined`) is not a definition at all.
+fn is_duplicate_definition(old: SymType, new: SymType) -> bool {
+    !matches!(old, SymType::Undefined)
+        && !matches!((old, new), (SymType::Constant, SymType::Constant))
+}
+
+/// Format a value for a diagnostic: `$`-hex, or decimal when negative or 0–9.
+fn format_value(v: i64) -> String {
+    if v <= 9 {
+        v.to_string()
+    } else {
+        format!("${v:X}")
+    }
 }

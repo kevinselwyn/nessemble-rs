@@ -71,6 +71,15 @@ NAME:
 
 * `NAME` - Label name, required.
 
+A label must be on a line of its own: `loop: DEX` is an error, so put the
+statement on the next line.
+
+Defining a label a second time warns (`duplicate-symbol`) and the later
+definition is the one that counts. So does giving a label and a constant, `.rs`
+or `.enum` member the same name. Restating a label exactly (the same address in
+the same bank) does not warn, and neither does reassigning a constant
+(`COUNT = 1` … `COUNT = 2`), which [`.for`](#for) bodies rely on.
+
 Example:
 
 ```nessemble
@@ -151,6 +160,30 @@ Try it:
     BNE :-
     BRK
 </nessemble-assembler>
+
+## Statements and values
+
+Each line holds one statement. Anything left over after a complete statement is
+an error, where it used to be ignored:
+
+```nessemble
+    JMP start.loc   ; Unexpected `.loc` after the end of the statement
+    .db 1 2         ; Unexpected `2` after the end of the statement
+```
+
+A value that does not fit the field it is written into warns
+(`value-out-of-range`) and keeps only its low bits, as before:
+
+| Field | Accepted range |
+|-------|----------------|
+| A byte: `.db`, `.fill`'s value, an immediate `#` operand | `-128` to `255` |
+| A word: `.dw`, an absolute or indirect `[addr]` operand | `-32768` to `65535` |
+| A zero-page operand: `<zp`, `[zp, X]`, `[zp], Y` | `0` to `255` |
+
+So `.db 0 - 4` gives `fc` with no warning, and `.db 256` warns and gives `00`.
+`LOW()`, `HIGH()`, `.lobytes` and `.hibytes` choose a byte on purpose and are
+never out of range. Values are checked once every symbol is known, so a forward
+reference is checked against its final value.
 
 ## Mnemonics
 
@@ -640,7 +673,7 @@ be used.
 Example:
 
 ```nessemble
-.dw $1234, $45678
+.dw $1234, $5678
 ```
 
 Output:
@@ -653,7 +686,7 @@ Output:
 Try it:
 
 <nessemble-assembler>
-.dw $1234, $45678
+.dw $1234, $5678
 </nessemble-assembler>
 
 ### .else
@@ -2028,6 +2061,12 @@ compiled to WebAssembly):
 Macros may be utilized to maximize code-reuse and may also be treated as custom
 functions.
 
+A call must pass as many arguments as the body uses: a body whose highest
+argument is `\2` takes exactly two. Passing fewer is an error (a missing
+argument used to read as `0`), and so is passing more, unless the body reads the
+argument count `\#` and so handles a variable number itself. Both errors are
+reported on the `.macro` line.
+
 Example:
 
 ```nessemble
@@ -2121,7 +2160,7 @@ Example:
     LDX #$08
 label_\@:
     DEX
-    BNE label_\@:
+    BNE label_\@
 .endm
 
 .macro TEST_MACRO
