@@ -185,7 +185,10 @@ fn registry_records_each_named_enum() {
     let a = assembly(OP);
     assert!(only_enum(&a).contiguous);
     // Unnamed enums are not recorded.
-    assert!(assembly(".enum 0\nAA\n.endenum\n").enums.is_empty());
+    assert_eq!(
+        assembly(".enum 0\nAA\n.endenum\n").enums,
+        Vec::<EnumInfo>::new()
+    );
 }
 
 /// A throwaway directory for an `.include` test.
@@ -285,7 +288,7 @@ fn a_suppressed_member_still_advances_the_counter() {
 #[test]
 fn a_suppressed_named_enum_records_nothing() {
     let a = assembly(".if 0\n.enum 0, 1, EN\nAA\n.endenum\n.endif\n");
-    assert!(a.enums.is_empty());
+    assert_eq!(a.enums, Vec::<EnumInfo>::new());
     assert!(!has_sym(&a, "EN_COUNT"));
 }
 
