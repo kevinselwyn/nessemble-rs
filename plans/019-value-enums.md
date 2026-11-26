@@ -3,13 +3,13 @@
 > Status: **Proposed.** Points marked decided were settled with the
 > maintainer. Proposed points are settled here with reasons and listed again in
 > §8 for the maintainer to confirm. Provides the enum registry consumed by
-> [plan 019](019-index-keyed-tables.md) (`.table NAME`).
+> [plan 020](020-index-keyed-tables.md) (`.table NAME`).
 
 ---
 
 ## 1. Summary
 
-`.enum START[, STEP[, NAME]]` now accepts **bare names** as members. Each bare name takes the current counter value and advances it by `STEP`, exactly like `NAME .rs 1`. Inside an `.enum`, `NAME = expr` defines `NAME` and resets the counter to `expr + STEP`, so a run of 40 hand-numbered opcode constants becomes 40 lines of names. An optional third argument names the enum. It defines `NAME_COUNT` and records the enum in a pass-1 **enum registry** (name, members with values, start, step, contiguous, count), which the index-keyed `.table NAME` feature (plan 019) reads.
+`.enum START[, STEP[, NAME]]` now accepts **bare names** as members. Each bare name takes the current counter value and advances it by `STEP`, exactly like `NAME .rs 1`. Inside an `.enum`, `NAME = expr` defines `NAME` and resets the counter to `expr + STEP`, so a run of 40 hand-numbered opcode constants becomes 40 lines of names. An optional third argument names the enum. It defines `NAME_COUNT` and records the enum in a pass-1 **enum registry** (name, members with values, start, step, contiguous, count), which the index-keyed `.table NAME` feature (plan 020) reads.
 
 ## 2. Semantics
 
@@ -59,11 +59,11 @@ This lists `ZZ` as `$0014` today. Under this plan `ZZ` is `$0007`. This is the b
 
 - **Spelling and position: third argument, a plain identifier** (`.enum $00, 1, OP`).
   - `START` is an expression that may itself begin with a symbol, so `.enum OP, 1` cannot tell a name from a start value. Putting the name last is unambiguous and leaves every existing one- and two-argument form untouched.
-  - It is also the form plan 019's examples use.
+  - It is also the form plan 020's examples use.
   - The cost is that a named enum spells out `STEP` even when it is 1. One spelling keeps docs and completion simple, as with `.for`.
 - **The name is a single `Text` token, parsed as text rather than as an expression.**
   - A number, string, register letter or `HIGH`/`LOW`/`BANK` in that position is error E5.
-  - A pasted name (`T\i`) is not supported: it falls to the companion's leftover-tokens error.
+  - A pasted name (`T\i`) is not supported: it falls to plan 017's end-of-statement error.
 - **What the name denotes: nothing in the symbol table.** It lives only in the enum registry, a separate namespace.
   - `OP` is not usable in expressions, `.ifdef OP` is false, and the name does not appear in the listing.
   - So an enum name **cannot collide with a constant or label**. `.enum 0, 1, OP` and `OP = 3` coexist.
@@ -99,7 +99,7 @@ This lists `ZZ` as `$0014` today. Under this plan `ZZ` is `$0007`. This is the b
 ### 2.7 Passes
 
 - Symbols are written only on pass 1 (`define_symbol` returns early on pass 2). The registry follows the same rule: it is built on pass 1 and read-only on pass 2. Pass 2 re-runs only the counter arithmetic, which gives the same values because `.for` bounds are replayed (plan 016 §12).
-- **Contract with `.table` (plan 019):** on pass 1, the registry holds every named enum whose `.endenum` came earlier in the token stream. On pass 2 it is complete. `.table` validates in the shared final-pass hook (plan 021 §3), which allows forward references and reports each diagnostic once.
+- **Contract with `.table` (plan 020):** on pass 1, the registry holds every named enum whose `.endenum` came earlier in the token stream. On pass 2 it is complete. `.table` validates in the shared final-pass hook (plan 022 §3), which allows forward references and reports each diagnostic once.
 - Registry diagnostics (E4, E7, E8, and the E3 warning) are raised on pass 1 only, so they are not duplicated.
 
 ### 2.8 Listing (`-l`, `--mlist`)
@@ -133,7 +133,7 @@ Every change to shared code is marked **[shared]**.
 **New types (public in the crate, re-exported from `lib.rs`):**
 
 ```rust
-/// One named `.enum` (plan 018 §2.4). Recorded on pass 1; read-only on pass 2.
+/// One named `.enum` (plan 019 §2.4). Recorded on pass 1; read-only on pass 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumInfo {
     pub name: String,
@@ -180,7 +180,7 @@ impl EnumInfo {
 - **`Pseudo::Endenum`:** if the open frame is named, on pass 1, and not suppressed:
   - compute `start` and `contiguous`;
   - push it to the registry;
-  - define `NAME_COUNT` through `define_symbol(..., SymType::Constant, from_macro_of_enum_line)`, with `cur_file`/`cur_line` temporarily set to the `.enum` line, so the companion's `duplicate-symbol` warning (E3) points where `NAME` is written;
+  - define `NAME_COUNT` through `define_symbol(..., SymType::Constant, from_macro_of_enum_line)`, with `cur_file`/`cur_line` temporarily set to the `.enum` line, so plan 017's `duplicate-symbol` warning (E3) points where `NAME` is written;
   - then clear the frame.
 - **`Stmt::Constant(name, None)` while `enum_active`:** handled exactly as `Pseudo::Rs(name, 1)`, through a shared helper `enum_member(name: &Name, value, size)`. That helper:
   - calls `add_symbol(SymType::Enum)`, or `add_pasted_symbol` for a pasted name;
@@ -189,9 +189,9 @@ impl EnumInfo {
   - advances the counter by size × step. The counter advances on both passes, regardless of suppression, as `.rs` does today.
 - **`Stmt::Constant(name, Some(e))` while `enum_active`:** evaluate, call `enum_member` with `value = e`, then set `enum_value = value + enum_inc`.
 - **`Pseudo::Rs` while `enum_active`:** routed through the same `enum_member` helper, so `.rs` members are recorded too. Values and counter arithmetic stay byte-identical.
-- **E1 (duplicate member) fires only when the enum is named, or when either definition is a bare name.** A duplicate `.rs` or `=` member in an unnamed enum is valid today (the last one wins), so it gets only the companion's `duplicate-symbol` warning.
+- **E1 (duplicate member) fires only when the enum is named, or when either definition is a bare name.** A duplicate `.rs` or `=` member in an unnamed enum is valid today (the last one wins), so it gets only plan 017's `duplicate-symbol` warning.
 - **End of pass 1 in `run()`:** if `open_enum` is named, raise E8 at its stored line.
-- **New `fn error_at(&mut self, file: u32, line: u32, msg)`** for E4, E7 and E8, which point at a stored line rather than the current one. (Plan 021's final-pass queue needs the same helper; whichever lands first adds it.)
+- **New `fn error_at(&mut self, file: u32, line: u32, msg)`** for E4, E7 and E8, which point at a stored line rather than the current one. (Plan 022's final-pass queue needs the same helper; whichever lands first adds it.)
 - **`exec_instruction` unknown-opcode path:** when `enum_active` and the operand is `Operand::Implied`, use E9 instead of `unknown-opcode`.
 
 ### 3.4 Public API: `crates/nessemble-core/src/lib.rs`
@@ -244,7 +244,7 @@ All diagnostics use the usual framing, ``Error in `f.asm` on line N: …``. For 
 |---|---|---|---|---|
 | E1 | `enum-member-twice` | ``Enum member `{name}` is defined twice in the same `.enum` `` | second definition | Named enum, or either definition is bare (§3.3). Pass 1 |
 | E2 | `enum-member-invalid` | ``Expected an `.enum` member name (two or more letters, digits or `_`, not starting with a digit)`` | the member line | Parse time |
-| E3 | (companion) `duplicate-symbol` | **Warning**, text owned by the companion issue, e.g. ``Warning in `f.asm` on line N: Symbol `OP_COUNT` is already defined`` | the `.enum` line | `NAME_COUNT` collides with an earlier symbol. A later redefinition warns at the later line |
+| E3 | (plan 017) `duplicate-symbol` | **Warning**, in plan 017's wording (its §3: ``… is already defined at f.asm line N (…); this definition replaces it  [duplicate-symbol]``) | the `.enum` line | `NAME_COUNT` collides with an earlier symbol. A later redefinition warns at the later line |
 | E4 | `enum-name-twice` | ``Enum `{name}` is already defined on line {line} of `{file}` `` | second `.enum` | Pass 1 |
 | E5 | `enum-name-invalid` | ``The `.enum` name must be a name, as in `.enum $00, 1, OP` `` | `.enum` line | Parse time |
 | E7 | `enum-nested-named` | ``An `.enum` cannot be opened inside another `.enum` when either is named; close the `.enum` on line {line} with `.endenum` first`` | inner `.enum` | Pass 1 |
@@ -253,8 +253,8 @@ All diagnostics use the usual framing, ``Error in `f.asm` on line N: …``. For 
 
 Notes:
 
-- E3 is a warning ("treat as duplicate symbol"), and with the companion that warning is `duplicate-symbol`.
-- A fourth argument (`.enum 0, 1, OP, X`) is caught by the companion's leftover-tokens error, so no new key is needed.
+- E3 is plan 017's `duplicate-symbol` warning ("treat as duplicate symbol"), at whatever severity the project sets.
+- A fourth argument (`.enum 0, 1, OP, X`) is caught by plan 017's end-of-statement error, so no new key is needed.
 - There is no E6.
 
 ## 6. Tests (written first)
@@ -288,7 +288,7 @@ This file uses the same helpers as `for_loops.rs` (`bytes`, `assembly`, `error`,
     - A stray `.endenum` is accepted.
     - Unnamed nested `.enum` keeps today's values (`DD = 9` and `EE` as label `0000` from the v2.27.0 probe).
     - A duplicate `.rs` member in an unnamed enum is not an error.
-14. **Diagnostics E1, E2, E4, E5, E7, E8, E9**: exact message and line for each. E3: warning text and line, gated on the companion landing.
+14. **Diagnostics E1, E2, E4, E5, E7, E8, E9**: exact message and line for each. E3: plan 017's warning text and line.
 15. **Byte- and listing-identical `.rs` regressions**, using today's values:
     - `.enum $10, 2` with `FOO .rs 1` / `BAR .rs 1` gives `$10` and `$12`; `.db FOO, BAR` emits `10 12`; listing `0010 = FOO`, `0012 = BAR`.
     - `.enum $00` with `FOO .rs 2` / `BAR .rs 1` gives `$00` and `$02`.
@@ -329,18 +329,18 @@ This file uses the same helpers as `for_loops.rs` (`bytes`, `assembly`, `error`,
   - That plan changes output for `.rs` too, so it needs its own named exception.
 - **Q2: the indented-member rule.** Some authors indent everything. E9 makes the mistake obvious, but the alternative is "any lone non-mnemonic word in an enum is a member". That needs mnemonic knowledge in the parser and tooling, including `-u` undocumented opcodes, so it was rejected for v1.
 - **Q3: the `=` reset is a second output change.** Settled: it ships as a separate release-notes item. No known user is affected; the reference corpus has no `.enum`.
-- **Q4: contract additions for `.table` (plan 019).**
+- **Q4: contract additions for `.table` (plan 020).**
   - Added `size`, `file` and `line` per member, plus `file`/`line` for the enum.
   - `contiguous` is defined on values (§2.5), not on "no resets".
-  - Step 0 makes every member the same value while `contiguous` stays true. Plan 019 rejects step 0 for a key set, and reads any other step as keys `FIRST + n·step`.
+  - Step 0 makes every member the same value while `contiguous` stays true. Plan 020 rejects step 0 for a key set, and reads any other step as keys `FIRST + n·step`.
   - The registry is crate-internal (`enum_info`) plus `Assembly::enums`.
 - **Q5: renaming an enum.** Rename does not rewrite `NAME_COUNT` references, and rename of `NAME_COUNT` is refused. Find-references on `OP` (an enum name) is out of scope until `.table` gives it references.
 - **Pre-existing problems, out of scope:**
   - A `START` that depends on a forward symbol gets its pass-1 value. On v2.27.0, `.enum WW` before `WW = 7` lists its member as `0001`, and the value is never corrected, because symbols are written only on pass 1. A "must be known on pass 1" error like `.for`'s would help, but it changes behaviour.
-  - A column-1 non-definition word outside an enum, such as `LDA FOO` in column 1, silently becomes a constant (observed on v2.27.0). The companion's leftover-tokens error covers it.
+  - A column-1 non-definition word outside an enum, such as `LDA FOO` in column 1, silently became a constant on v2.27.0; plan 017's end-of-statement error now covers it.
   - LSP `definitions()` does not see `.rs` reservations outside an enum.
 - **Lint verifier.** A member named like a mnemonic in column 1 inside a routine body is misread as an instruction. Making `.enum` bodies transparent would change findings for existing code, so it is deferred.
-- **Depends on the companion bugfix** for E3 (`duplicate-symbol`) and for the fourth-argument error. Without it, E3 degrades to a silent overwrite, as with any redefinition today.
+- **Relies on plan 017** (shipped) for E3 (`duplicate-symbol`) and for the fourth-argument error.
 
 ### Critical files for implementation
 

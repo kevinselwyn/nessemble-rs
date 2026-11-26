@@ -26,14 +26,14 @@ mod scripts;
 mod usage;
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use nessemble_core::{
     assemble_file_with, assemble_with, prewarm_candidates, prewarm_candidates_file,
-    render_list_file, AssembleError, Options,
+    render_list_file, AsmRules, AssembleError, Diag, Options,
 };
 use nessemble_i18n::t;
 
@@ -93,6 +93,16 @@ struct Cli {
     /// check syntax only
     #[arg(short = 'c', long)]
     check: bool,
+
+    /// set an assembler diagnostic's severity, overriding `.nessemblerc`
+    /// (repeatable): duplicate-symbol, duplicate-symbol-same-value, or
+    /// value-out-of-range, each `off`, `warn` or `error`
+    #[arg(short = 'W', value_name = "rule=off|warn|error")]
+    warn_rules: Vec<String>,
+
+    /// report every assembler warning as an error
+    #[arg(long)]
+    warnings_as_errors: bool,
 
     /// do not read or write the custom pseudo-instruction cache
     #[arg(long)]
@@ -267,6 +277,15 @@ fn assemble_mode(cli: &Cli) -> u8 {
         Err(code) => return code,
     }
 
+    match resolve_assemble_rules(
+        cli.infile.as_deref().map(Path::new),
+        &cli.warn_rules,
+        cli.warnings_as_errors,
+    ) {
+        Ok(rules) => options.rules = rules,
+        Err(code) => return code,
+    }
+
     let timings: Option<custom::Timings> =
         cli.time_scripts.then(|| Arc::new(Mutex::new(Vec::new())));
 
@@ -311,15 +330,7 @@ fn assemble_mode(cli: &Cli) -> u8 {
     match result {
         Ok(assembly) => {
             for w in &assembly.warnings {
-                eprintln!(
-                    "{}",
-                    t!(
-                        "warning-line",
-                        file = w.file,
-                        line = w.line,
-                        message = w.message
-                    )
-                );
+                print_diag("warning-line", w);
             }
             if let Some(timings) = &timings {
                 print_script_timings(timings);
@@ -343,18 +354,58 @@ fn assemble_mode(cli: &Cli) -> u8 {
             RETURN_OK
         }
         Err(AssembleError(d)) => {
-            eprintln!(
-                "{}",
-                t!(
-                    "error-line",
-                    file = d.file,
-                    line = d.line,
-                    message = d.message
-                )
-            );
+            print_diag("error-line", &d);
             RETURN_EPERM
         }
     }
+}
+
+/// Print a diagnostic to stderr in the reference framing (`Error in …` /
+/// `Warning in …`, per `framing`), with its rule id and one `note:` line per
+/// note.
+fn print_diag(framing: &str, d: &Diag) {
+    eprintln!(
+        "{}",
+        t!(
+            framing,
+            file = d.file,
+            line = d.line,
+            message = d.display_message()
+        )
+    );
+    for note in &d.notes {
+        eprintln!("{}", t!("note-line", message = note));
+    }
+}
+
+/// The assembler rule severities for an assembly of `input` (stdin when
+/// `None`): the defaults, then the discovered `.nessemblerc`'s
+/// `assemble.rules`, then each `-W <rule>=<level>` flag in order, plus
+/// `--warnings-as-errors`. A malformed config or flag is reported and fails.
+pub(crate) fn resolve_assemble_rules(
+    input: Option<&Path>,
+    flags: &[String],
+    warnings_as_errors: bool,
+) -> Result<AsmRules, u8> {
+    let start = input.unwrap_or_else(|| Path::new("."));
+    let mut rules = match nessemble_rc::Config::resolve(start, &nessemble_rc::Choice::Discover) {
+        Ok(config) => config.assemble_rules(),
+        Err(e) => {
+            eprintln!("nessemble: {e}");
+            return Err(RETURN_EPERM);
+        }
+    };
+    for flag in flags {
+        match nessemble_rc::parse_asm_rule_flag(flag) {
+            Ok((rule, severity)) => rules.set(rule, severity),
+            Err(e) => {
+                eprintln!("nessemble: {e}");
+                return Err(RETURN_USAGE);
+            }
+        }
+    }
+    rules.warnings_as_errors = warnings_as_errors;
+    Ok(rules)
 }
 
 /// Resolve `--root <dir>` to an `Options::project_root`: `None` if the flag was

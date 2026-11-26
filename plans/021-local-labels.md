@@ -2,8 +2,8 @@
 
 > Status: **Proposed.** The points marked *decided* were settled with the
 > maintainer and are taken as given. Wherever this plan refines a *proposed*
-> point, it says so and gives the reason. Open items are in §8. Builds on the
-> `call_line` field introduced by [plan 019](019-index-keyed-tables.md) §4.3.
+> point, it says so and gives the reason. Open items are in §8. Builds on the macro
+> expansion tracking shipped by [plan 017](017-assembler-diagnostics.md).
 
 ---
 
@@ -17,7 +17,7 @@ An `@name` label becomes local to the nearest global label above it in the same 
 
 - **Local name:** `@` followed by `[A-Za-z0-9_]+`. This is exactly what the lexer accepts today (`@1` is valid).
 - **Qualified name:** `<global>@<local>`, e.g. `draw_sprite@clip`. The global part is any ordinary identifier, so a pasted global works too (`row3@x`). Only one `@` segment is allowed. A qualified name can **only be referenced**. Defining one (`p1@a:`, `p1@a = 3`, `p1@a .rs 1`) is an error (§5).
-- **Local names are labels only** *(refinement)*. `@x = expr`, a bare `@x` at column 0 (which today is a constant equal to 1) and `@x .rs n` are errors. Constants have no scope rule in the brief, and supporting them doubles the surface (redefinition, `.for` reassignment, the companion `duplicate-symbol` warning). Local constants are listed in §8.
+- **Local names are labels only** *(refinement)*. `@x = expr`, a bare `@x` at column 0 (which today is a constant equal to 1) and `@x .rs n` are errors. Constants have no scope rule in the brief, and supporting them doubles the surface (redefinition, `.for` reassignment, plan 017's `duplicate-symbol` warning). Local constants are listed in §8.
 
 ### 2.2 What opens a scope (decided, with three clarifications)
 
@@ -34,10 +34,10 @@ The assembler keeps `scopes[file_id]`, the name of the current global label for 
 - **Definition `@x`:** key `scope@x`. With no scope, error `local-no-scope`.
 - **Reference `@x`:** key `scope@x`, resolved forwards or backwards. With no scope, `local-no-scope`. Undefined on pass 2 gives `local-undefined`, plus a hint if another scope defines `@x`.
 - **Reference `q@x`:** key `q@x`. If it is undefined on pass 2, the message is `local-not-in-parent` when `q` is a defined symbol of any kind, and the existing `symbol-not-defined` for `q` otherwise.
-- **Everything that names a symbol uses the same resolver:** operands, data, `.for` bounds, custom pseudo-op integer arguments, `->` chains, `BANK(@x)`, `.ifdef @x`/`.ifndef @x`, `.assert` expressions (plan 021's `eval_final` resolves through it too), and `.table` tag keys (plan 019). `.ifdef` keeps its existing quirk: an entry registered by an earlier reference counts as defined.
+- **Everything that names a symbol uses the same resolver:** operands, data, `.for` bounds, custom pseudo-op integer arguments, `->` chains, `BANK(@x)`, `.ifdef @x`/`.ifndef @x`, `.assert` expressions (plan 022's `eval_final` resolves through it too), and `.table` tag keys (plan 020). `.ifdef` keeps its existing quirk: an entry registered by an earlier reference counts as defined.
 - **Pasting runs before qualifying.** `@x\i:` pastes to `@x3`, then qualifies to `p1@x3`. `p1@x\i` pastes to `p1@x3`.
 - **Locals inside `.phase` get the phased address,** like any label. The scope is unaffected by the phase.
-- **Labels inside a `.table` (plan 019)** follow the same rule; a table's own label opens a scope and locals inside it are fine.
+- **Labels inside a `.table` (plan 020)** follow the same rule; a table's own label opens a scope and locals inside it are fine.
 
 ### 2.4 Include boundaries (proposed, kept)
 
@@ -77,11 +77,11 @@ This choice is flagged in §8 (R4).
 - `@/` paths: include targets are read from raw text, and other path arguments are `QuotString`.
 - `'@'` char literals, `"@"` in strings, and `@nessemble-*` comments, which the lexer strips.
 
-### 2.9 Duplicate detection (contract with the companion `duplicate-symbol` warning)
+### 2.9 Duplicate detection (contract with plan 017's `duplicate-symbol` rules)
 
 - Symbol keys are fully qualified, so `p1@x` and `p2@x` never compare equal.
 - A local defined twice under one key is the **hard error** `local-duplicate`, not the warning.
-- The companion warning applies only to global keys (names without `@`) and never fires for locals or privates.
+- Plan 017's `duplicate-symbol` and `duplicate-symbol-same-value` warnings apply only to global keys (names without `@`) and never fire for locals or privates; plan 017's same-site exemption (one line of one file seen again, e.g. a file included twice) applies before `local-duplicate` too.
 - A global label defined twice reopens the same scope, so locals under both copies share keys and collide. That is reported by `local-duplicate`, naming the other file if needed.
 
 ## 3. Code changes
@@ -96,12 +96,12 @@ Exactly one rule changes: **rule 14** (identifier/pseudo/keyword) in `lex_number
 - The result is `Tok::Text("p1@x")`. `classify_word` is unchanged.
 - `@x@y` still lexes as two words, `p1 @x` as two tokens, `p1@` as `Text`+`CharReg('@')`, and `@/` as before.
 - Side effect: a hex-suffix word glued to `@` (`A5h@x`) now lexes as one identifier. Today it is `Number` + ignored garbage.
-- **No operator rule changes.** Plan 017 adds `Tok::Tilde`/`Tok::Bang` and two arms in the one-character table of `lex_operator`; it does not touch rule 14, `is_ident_char` or `classify_word`. The two features touch disjoint code and merge in either order.
-- `Token` gains `expansion: u32` (0 = not from a macro); the lexer always emits 0. It identifies *which* expansion a token came from (for the private id and the `(in macro `go`)` suffix). The *reporting line* comes from plan 019's `Token.call_line: Option<u32>`, which this plan reuses rather than duplicating.
+- **No operator rule changes.** Plan 018 adds `Tok::Tilde`/`Tok::Bang` and two arms in the one-character table of `lex_operator`; it does not touch rule 14, `is_ident_char` or `classify_word`. The two features touch disjoint code and merge in either order.
+- No new token field: plan 017's `Token.expansion` already identifies which expansion a token came from, and is what the private id is built from.
 
 ### 3.2 AST and parser, `ast.rs`, `parse.rs` [shared statement parser; **no expression-parser change**]
 
-- `Line` gains `expansion: u32`, taken from the statement's first token like `from_macro` (and next to plan 019's `call_line`).
+- `Line.expansion` (plan 017) is used as is.
 - `parse_stmt` and `parse_pasted_def`:
   - Reject a qualified name in a label, constant or `.rs` definition (`local-def-qualified`).
   - Reject an `@`/private name as a constant, bare constant or `.rs` (`local-not-label`).
@@ -118,20 +118,17 @@ Exactly one rule changes: **rule 14** (identifier/pseudo/keyword) in `lex_number
 
 ### 3.4 Preprocessor, `preprocess.rs` [shared]
 
-- `substitute` runs `privatize` on body tokens (not argument tokens), and `mk` sets `expansion = unique` (alongside plan 019's `call_line` stamping).
-- `process_tokens` copies `expansion` alongside `from_macro`.
-- `Preprocessed` gains `expansions: Vec<Expansion { macro_name, parent }>`, indexed by `unique - 1`, which `expand_macro` fills. It only needs the macro name and nesting; the call line is already on each token as `call_line`.
+- `substitute` runs `privatize` on body tokens (not argument tokens), using the expansion's id; `mk` already stamps `expansion` (plan 017).
+- `Preprocessed.expansions` (plan 017: each expansion's macro name, definition site, call site and parent) is used as is.
 - Nothing changes for `.include`.
 
 ### 3.5 Assembler and symbol table, `assemble.rs` [shared symbol table]
 
-- **`Symbol`:** gains `def_file`, `def_line` (for "(line N)") and `parent: Option<String>` (scope at definition; used for privates' display and for hints).
-- **`SourceTables`:** gains `expansions`.
+- **`Symbol`:** gains `parent: Option<String>` (scope at definition; used for privates' display and for hints). The definition site for "(line N)" is plan 017's existing per-symbol site.
 - **`Assembler`:**
   - gains `scopes: Vec<Option<String>>`, reset in `reset_state`;
-  - gains `cur_expansion`, set in `run_lines` from `line.expansion` when `attribute` (next to plan 019/021's `cur_call_line`);
   - gains `emitted_ids: HashMap<(u32, u32, u32, usize), u32>`, which persists across passes.
-- **`resolve_def` / `resolve_ref`:** new functions that map a raw name to a key, or report `local-no-scope`. Plan 021's `eval_final` calls `resolve_ref` (pure; it never registers).
+- **`resolve_def` / `resolve_ref`:** new functions that map a raw name to a key, or report `local-no-scope`. Plan 022's `eval_final` calls `resolve_ref` (pure; it never registers).
 - **Symbol paths that change:**
   - `exec_stmt`: labels and pasted labels define, then update `scopes[cur_file]` if global and not suppressed. Skip `label-in-for` for `@` names.
   - `define_symbol`: duplicate check for local and private keys on pass 1.
@@ -139,7 +136,7 @@ Exactly one rule changes: **rule 14** (identifier/pseudo/keyword) in `lex_number
   - `eval_symbol`: new messages for local, qualified and private keys, and the hint search.
   - `eval_bank`, and `Pseudo::Ifdef`/`Ifndef` in `exec_pseudo`.
 - **`exec_emitted_source`:** privatize before parsing.
-- **`local_error`:** a new helper. With `cur_expansion != 0` it reports at `cur_call_line` (the outermost call site, from plan 019) and appends `in-macro`, naming the macro from `expansions`. Existing diagnostics are unchanged.
+- **Diagnostics** go through plan 017's `diagnostic::locate` with `cur_expansion`, like every other assembler diagnostic: a macro-expanded line is reported at its body line, in the body's file, with `in expansion of macro …` notes naming the calls.
 - **Hint choice:** the defined non-private key ending in `@x` that is in the same file at the nearest line above; otherwise the first one defined.
 
 ### 3.6 Listing [shared listing writer], `assemble.rs::list_symbols`
@@ -158,9 +155,9 @@ New ids per §5.
 - **`routine_effects_inner`:**
   - A local label line (`@x:`, `@x\i:`) is transparent. Today it falls into the mnemonic check and marks the body "unknown".
   - In `apply_call`, a `JMP`/`JSR` target that is a local defined within the routine's `body_lines` is transparent. Any other local or qualified target is "unknown".
-  - Plan 022 replaces this text walk with an emitted-stream walk. Until then these two fixes are needed; after it, plan 022's walk follows branches to locals like any target and attributes them to their parent.
+  - Plan 023 replaces this text walk with an emitted-stream walk. Until then these two fixes are needed; after it, plan 023's walk follows branches to locals like any target and attributes them to their parent.
 - **`binding_target` / `SignatureProblemKind`:** add `LocalTarget` so an annotation directly above `@x:` gets a precise message (§5), not "not followed by a label".
-- **Already correct; pin with tests:** `block_label` already returns `None` for `@` names, so locals never open a block and `body_lines` never ends at one. This is the contract plan 022 relies on. `call_targets` becomes correct automatically: `JSR p1@x` no longer marks `p1` as called.
+- **Already correct; pin with tests:** `block_label` already returns `None` for `@` names, so locals never open a block and `body_lines` never ends at one. This is the contract plan 023 relies on. `call_targets` becomes correct automatically: `JSR p1@x` no longer marks `p1` as called.
 
 ### 3.9 LSP, `crates/nessemble-lsp/src/lib.rs` [shared]
 
@@ -207,14 +204,13 @@ The text is refined to house style: an initial capital where a sentence starts, 
 |---|---|---|
 | `local-no-scope` | ``Local label `@x` has no enclosing label`` | the `@x` definition or reference |
 | `local-duplicate` | ``` `@x` is already defined in `p1` (line N) ``` (or ``(`other.asm` line N)`` when in another file) | the second definition |
-| `local-duplicate-macro` | ``` `@x` is already defined in macro `wait` (line N) ``` | the outermost `.macro` call line |
+| `local-duplicate-macro` | ``` `@x` is already defined in macro `wait` (line N) ``` | the second definition's body line, with expansion notes |
 | `local-undefined` | ``` `@x` is not defined in `p2` ``` | the reference |
 | `local-undefined-hint` | ``` `@x` is not defined in `p2`; did you mean `p1@x`? ``` | the reference |
 | `local-not-in-parent` | ``` `p1` has no local label `@x` ``` | the reference |
 | `local-def-qualified` | ``` `p1@x` is a qualified name and can only be referenced; define it as `@x:` under `p1` ``` | the definition (parse error) |
 | `local-not-label` | ``` `@x` is a local name, so it can only be a label; give the constant a global name ``` | the definition (parse error) |
 | `label-in-for` (existing) | unchanged text, name shown as `@x` | the label |
-| `in-macro` (suffix) | ``{message} (in macro `go`)``, appended to local diagnostics raised by a macro-expanded line | the outermost `.macro` call line |
 | lint `invalid-routine-signature` (`LocalTarget`) | ``routine annotation `@nessemble-clobbers` is followed by local label `@x`; annotations bind only to global labels`` | the annotation |
 
 - An undefined qualified ref whose parent doesn't exist reuses ``Symbol `nope` was not defined``.
@@ -256,14 +252,14 @@ Same harness as `for_loops.rs`: `bytes`/`error`/`sym`, plus temporary directorie
   - `p1@a = 3` and `p1@a:`;
   - `@a = 3`;
   - plain `@x:` in a `.for` body.
-- **Macro call-site cases:**
-  - A body with two `@x:` reports on the `.macro` line.
-  - A body's `BNE @out` that isn't in scope reports on the `.macro` line, with the hint and the `(in macro `go`)` suffix.
+- **Macro cases** (plan 017's reporting rule):
+  - A body with two `@x:` reports on the second body line, with an `in expansion of macro` note naming the call.
+  - A body's `BNE @out` that isn't in scope reports on its body line, with the hint and the expansion note.
   - A private-local macro inside a `.for` gives `label-in-for` naming `@x`.
 
 ### 6.2 Unit tests
 
-- **`lexer.rs`:** `p1@x` is one `Text`. `@x`, `@x@y`, `p1 @x`, `p1@`, `@/x` and `'@'` lex as described in §3.1. `A5h@x` is a `Text` (pins the documented side effect). Plan 017's `!`/`~`/`-` tests still pass unchanged.
+- **`lexer.rs`:** `p1@x` is one `Text`. `@x`, `@x@y`, `p1 @x`, `p1@`, `@/x` and `'@'` lex as described in §3.1. `A5h@x` is a `Text` (pins the documented side effect). Plan 018's `!`/`~`/`-` tests still pass unchanged.
 - **`parse.rs`:** the definition rejections; the `validate_loops` flag.
 - **`preprocess.rs`:** `privatize` rewrites only body-defined locals; arguments are untouched; `expansions` and `parent` are filled for nested calls.
 - **`lib.rs`:** `render_list_file` contains `00/0000 = p1@loc` and `00/0002 = p2@loc`. A private appears only with `include_macro_labels`, as `p1@spin\@1`.
@@ -332,17 +328,17 @@ Same harness as `for_loops.rs`: `bytes`/`error`/`sym`, plus temporary directorie
 - **R4. Emitted-source privacy** (§2.6) goes beyond the brief. The alternative (caller's scope) lets a caller reference emitted `@x` but makes repeated invocations collide.
 - **R5. Private display** `p1@spin\@7` in `--mlist`: a format choice that external list consumers may need to accept.
 - **R6. `.rs` doesn't open a scope:** a choice to confirm.
-- **R7. Existing lint gap:** an anonymous `:` line also makes routine effects "unknown". Not fixed here, since it is outside the brief; plan 022's emitted-stream walk removes it.
+- **R7. Existing lint gap:** an anonymous `:` line also makes routine effects "unknown". Not fixed here, since it is outside the brief; plan 023's emitted-stream walk removes it.
 - **R8. Formatter:** the blank line inserted after `RTS` before `@x:` visually splits a routine. A possible follow-up is to skip it for locals; that would change format output, so it is not done here.
-- **R9. Call-site reporting** covers only the new local diagnostics, plus those of plans 019 and 021, all through the shared `call_line`. Older diagnostics raised inside macro bodies still report the body line, which breaks the house rule today. The companion bugfix can adopt `call_line` for them.
+- **R9. Macro reporting** follows plan 017's rule (body line plus expansion notes) rather than the brief's "report at the call site"; the notes name every call, so the call site is still named.
 - **R10. LSP scope is textual.** It ignores `.if` suppression and global labels defined inside macro expansions, so it can disagree with the assembler in those cases. Diagnostics stay authoritative.
 - **R11. Performance:** `find_symbol` is a linear scan, and locals add symbols. The hint scan runs only on error. A `HashMap` index would be a separate change.
 - **R12. Out of scope, listed for follow-up:**
-  - a "did you mean `p1@loc`" hint for `JMP p1.loc` (today assembles as `JMP p1`; the companion makes it an error);
+  - a "did you mean `p1@loc`" hint for `JMP p1.loc` (plan 017 already makes it an error);
   - LSP completion after `q@`;
   - a quick fix applying the hint;
   - a lint rule against deep anonymous references.
-- **R13. Lexer side effect:** `A5h@x`-style text changes tokenization. It is only garbage today, and the companion would reject it anyway.
+- **R13. Lexer side effect:** `A5h@x`-style text changes tokenization. It was only garbage, and plan 017 already rejects it.
 
 ### Critical files for implementation
 

@@ -5,7 +5,7 @@
 > `@nessemble-lint-ignore…`) and [plan 010](010-routine-signatures.md)
 > (signatures, `undeclared-clobber`, `overdeclared-clobber`). It replaces plan
 > 010 §8.1's "body = text block" with "body = code reachable from the label, in
-> the assembled program". Interactions with plans 017–021 are in §2.10.
+> the assembled program". Interactions with plans 018–022 are in §2.10.
 >
 > Before writing this, every "today" claim was checked against v2.27.0: the lint engine in `tooling.rs`, `nessemble lint` on the reference corpus (43 warnings, all `require-block-comment`), and the corpus's 38 clobber suppressions, each run through today's single-file analysis with the suppression stripped (via in-memory LSP buffers; nothing was written to disk). §8.3 has the counts.
 
@@ -36,8 +36,8 @@
 - `nessemble lint src/` or `nessemble lint src/prg/07.asm` with an `entry` configured: only the named or walked files, in program mode when they are in the closure. A walked file that the entry never includes stays in file mode.
 
 **Failure:**
-- If an explicit entry (`--entry` or rc) fails to assemble, lint prints the assembler's errors exactly as the build would and skips the program-dependent rules for that program. It does not fall back to text analysis, because those findings would be the blind spots again. Text rules still run, and the exit code is non-zero. Failing `.assert`/`.error` checks (plan 021) count as assembly errors here.
-- Assembler *warnings* (bank overflow, and the companion's `duplicate-symbol` / `value-out-of-range`) are not printed by lint. They belong to the build. `.out` lines (plan 021) are not printed either.
+- If an explicit entry (`--entry` or rc) fails to assemble, lint prints the assembler's errors exactly as the build would and skips the program-dependent rules for that program. It does not fall back to text analysis, because those findings would be the blind spots again. Text rules still run, and the exit code is non-zero. Failing `.assert`/`.error` checks (plan 022) count as assembly errors here.
+- Assembler *warnings* (bank overflow, and plan 017's `duplicate-symbol` / `duplicate-symbol-same-value` / `value-out-of-range`) are not printed by lint. They belong to the build. `.out` lines (plan 022) are not printed either.
 
 **Assembly inputs:**
 - Custom pseudo-instructions come from `-p/--pseudo`, falling back to `.nessemblerc` `assemble.pseudo`. The persistent cache from plan 011 is used, so a lint after a build is warm.
@@ -63,7 +63,7 @@ Recording is off by default. It is switched on by `Options::record_program`, the
 - **`Target`**, recorded for `JMP abs`, `JSR` and branches:
   - `addr`: the operand value.
   - `anchor: Option<(rom_offset, delta)>`: when the operand expression names a label (or `:+`/`:-`, or an `@local`), the ROM offset where that label was defined, plus `operand − label value`. The anchor pins the target to an exact ROM location, which is how "the same address in different banks" and overlapping `.phase` blocks are told apart.
-- **`LabelDef`**: one per label definition executed on pass 2: `name` (the fully qualified key once plan 020 lands, e.g. `p1@loop`), `cpu_addr`, `bank`, `rom_offset` (the load position at definition), `site`, `in_expansion` (whether the line came from a macro or emitted source), `local` (`@name`).
+- **`LabelDef`**: one per label definition executed on pass 2: `name` (the fully qualified key once plan 021 lands, e.g. `p1@loop`), `cpu_addr`, `bank`, `rom_offset` (the load position at definition), `site`, `in_expansion` (whether the line came from a macro or emitted source), `local` (`@name`).
 - **`Unmodelled { site, rom_offset, cpu_addr, bank }`**: LSP only (§4.4). It marks a custom pseudo-op the editor did not run.
 - **`files: Vec<PathBuf>`** (resolved paths, indexed by file id) and **`image: Vec<u8>`** (the header-less ROM).
 
@@ -190,9 +190,9 @@ Labels matching `lint.ignore` are still walked as callees (their contracts are t
 
 **Multiple programs**: unused only if unused in all of them (§2.1).
 
-### 2.8 Coexistence with the local-label feature (plan 020)
+### 2.8 Coexistence with the local-label feature (plan 021)
 
-- An `@name` label never opens a block (`block_label` already returns `None` for `@`, and plan 020 pins it), and no annotation binds to one.
+- An `@name` label never opens a block (`block_label` already returns `None` for `@`, and plan 021 pins it), and no annotation binds to one.
 - The walk follows branches to locals like any target, and they belong to their parent routine for every rule.
 - A qualified `parent@x` that another routine `JSR`s is an uncontracted callee and is walked.
 
@@ -204,14 +204,14 @@ Labels matching `lint.ignore` are still walked as callees (their contracts are t
 - **Coverage and `SourceMap`**: untouched.
 - **The `-l` list file**: untouched.
 
-### 2.10 Interactions with plans 017–021
+### 2.10 Interactions with plans 018–022
 
-- **017 (unary operators):** none. The walk reads bytes, not expressions.
-- **018 (value enums):** none; enum members emit nothing.
-- **019 (`.table`):** tags emit nothing, and table entries are `Data` emits. A walk that reaches a table is decoding data (§2.3), which is the intended signal. A `[K] JMP handler` entry is an `Instruction` emit and is decoded normally. `.table`/`.endtable` lines do not open blocks.
-- **020 (`@local` labels):** §2.8. `LabelDef.name` is the qualified key.
-- **021 (`.assert`/`.error`/`.out`):** they emit nothing, so they never appear in the walk. Plan 021's `is_block_entry` rule (an assertion line between a blank line and a label does not stop that label opening a block) must be kept by this plan's block detection.
-- **Call sites.** This plan's `Site { file, line }` is built from the shared `Line.call_line` introduced by plan 019 §4.3 (the outermost `.macro` call line) and `Line.file`, which already holds the invoking file's id for expanded tokens. It does not add its own token field.
+- **018 (unary operators):** none. The walk reads bytes, not expressions.
+- **019 (value enums):** none; enum members emit nothing.
+- **020 (`.table`):** tags emit nothing, and table entries are `Data` emits. A walk that reaches a table is decoding data (§2.3), which is the intended signal. A `[K] JMP handler` entry is an `Instruction` emit and is decoded normally. `.table`/`.endtable` lines do not open blocks.
+- **021 (`@local` labels):** §2.8. `LabelDef.name` is the qualified key.
+- **022 (`.assert`/`.error`/`.out`):** they emit nothing, so they never appear in the walk. Plan 022's `is_block_entry` rule (an assertion line between a blank line and a label does not stop that label opening a block) must be kept by this plan's block detection.
+- **Call sites.** This plan's `Site { file, line }` is the outermost `.macro` call, read from plan 017's expansion table (§3.2). It does not add its own token field.
 
 ---
 
@@ -221,33 +221,30 @@ Labels matching `lint.ignore` are still walked as callees (their contracts are t
 
 ### 3.1 `nessemble-rc`: one coordinated schema change ⚑ `.nessemblerc` schema
 
-This lands together with the companion bugfix's `assemble.rules`, as a single change:
+Plan 017 shipped the `assemble` block (`RcAssemble { rules }`, root-level only, `deny_unknown_fields`) and made assembling read `.nessemblerc`. This plan extends that same block rather than adding a second one:
 
 ```json
 {
-  "entry": "main.asm",                       // or ["main.asm", "demo.asm"]; root only
+  "entry": "main.asm",                       // or ["main.asm", "demo.asm"]; root only (this plan)
   "assemble": {
     "pseudo": "scripts/pseudo.txt",          // root only (this plan)
-    "rules": { "duplicate-symbol": "warn" }  // the companion's key
+    "rules": { "duplicate-symbol": "warn" }  // plan 017
   },
   "lint": { … }
 }
 ```
 
 - **`entry` goes on `RcConfig`**, the root document, not on the flattened `RcOptions`. `deny_unknown_fields` then rejects it inside `overrides` automatically.
-- **`assemble` goes on `RcOptions`** as `RcAssemble { pseudo, rules }`, so that the companion may let `overrides` carry `assemble.rules`. `pseudo` inside an override is rejected explicitly. Both keys must share one `RcAssemble` struct: two flattened `assemble` keys would collide under serde.
-- **`Config`** gains `rc_dir: Option<PathBuf>`, plus:
-  - `pub fn entries(&self) -> Vec<PathBuf>`;
-  - `pub fn pseudo(&self) -> Option<PathBuf>`;
-  - (the companion) `pub fn assemble_rules(...)`.
+- **`pseudo` is a new field of plan 017's `RcAssemble`**, which is already root-only, so it is rejected inside `overrides` with plan 017's existing message.
+- **`Config`** gains `rc_dir: Option<PathBuf>`, plus `pub fn entries(&self) -> Vec<PathBuf>` and `pub fn pseudo(&self) -> Option<PathBuf>`, beside plan 017's `assemble_rules`.
 - **Errors use the existing style.** A missing entry file is reported where the entry is used, not when the config is loaded, so a fresh checkout without generated files still formats (§5).
 
 ### 3.2 Recording: preprocessor, parser, assembler
 
-- **Call sites.** Reuse `Token.call_line` / `Line.call_line` (⚑ lexer, preprocessor, statement parser) from plan 019 §4.3, which merges first. If this plan were to land before 019, it adds that field with 019's exact shape (`Option<u32>`, stamped by `substitute`/`mk`, outermost call wins). `Site` is `(Line.file, Line.call_line.unwrap_or(Line.line))`.
-- **⚑ symbol table** (`assemble.rs`, `Symbol`): gains `rom_offset: usize` and `site: (u32, u32)`, set in `define_symbol`. Neither is read by expression evaluation or the list file. They exist only so a `Target` anchor can come from `eval`. (Plan 020 adds `def_file`/`def_line` to the same struct; implement as one `site` field if both are present.)
+- **Call sites.** No new token or line field: plan 017's `Line.expansion` and `Preprocessed.expansions` already record every expansion's call site and parent. `Site` is the outermost call (follow `parent` to the root expansion and take its `call_file`/`call_line`), or `(Line.file, Line.line)` for a line not from a macro.
+- **⚑ symbol table** (`assemble.rs`, `Symbol`): gains `rom_offset: usize`, set in `define_symbol`. Plan 017 already records each definition's site (file, line, expansion) on the symbol. Neither is read by expression evaluation or the list file; they exist only so a `Target` anchor can come from `eval`.
 - **`assemble.rs`** (Assembler):
-  - New fields: `record_program: bool` and `program: ProgramBuilder`. The current site reuses `cur_call_line` (plans 019/021) and `cur_file`.
+  - New fields: `record_program: bool` and `program: ProgramBuilder`. The current site comes from `cur_expansion` and `cur_file`/`cur_line`.
   - `exec_stmt`/`exec_instruction`/`exec_pseudo`/`exec_custom` push an `Emit` after a statement wrote bytes on pass 2. They compare `rom_index()` and `address_offset()` before and after, and skip statements suppressed by `.if` and the trainer.
   - `exec_instruction` computes the `Target` anchor with a helper, `operand_anchor(&Expr)`: the first `Symbol`/`PastedSymbol` of kind `Label`, or a local reference, gives that symbol's `rom_offset` plus `value − symbol value`.
   - `add_label` and the pasted-label path push a `LabelDef`.
@@ -270,7 +267,7 @@ This lands together with the companion bugfix's `assemble.rules`, as a single ch
 - `walk(program, contracts, entry) -> RoutineEffect { writes: RegSet, origins: [Origin; 4], reasons: Vec<Reason>, pulls_return }`.
 - `summaries`: the fixpoint of §2.4, rule 6.
 - The memory-save machinery from §2.5, behind an internal flag until Phase 4.
-- `Origin` (instruction, site, and the "via" step: a `JSR` site, or a contract name) and `Reason` (an enum with one variant per §5.1 text). (`Origin` here is the clobber-analysis type, distinct from plan 019's deferred-check `Origin`; name it `WriteOrigin` if both live in scope.)
+- `Origin` (instruction, site, and the "via" step: a `JSR` site, or a contract name) and `Reason` (an enum with one variant per §5.1 text). (`Origin` here is the clobber-analysis type, distinct from plan 020's deferred-check `Origin`; name it `WriteOrigin` if both live in scope.)
 
 ### 3.4 Lint engine ⚑ lint engine (`tooling.rs`)
 
@@ -288,7 +285,7 @@ This lands together with the companion bugfix's `assemble.rules`, as a single ch
   ```
 
   It runs the text rules per file (sharing `LintCtx`), the program rules once, the merge from §2.1, then suppression and unused-suppression handling per file using that file's `LintOptions` (so per-glob overrides and `ignore` still apply).
-- **`missing_clobbers`** (text) stays for file mode, together with the plan 019/020/021 text-walk fixes (tags, `@x:` lines, `.assert` lines are transparent).
+- **`missing_clobbers`** (text) stays for file mode, together with the plan 020/021/022 text-walk fixes (tags, `@x:` lines, `.assert` lines are transparent).
 
 ### 3.5 CLI (`crates/nessemble-cli/src/lint.rs`)
 
@@ -305,7 +302,7 @@ This lands together with the companion bugfix's `assemble.rules`, as a single ch
 
 ### 3.6 LSP ⚑ LSP (`nessemble-lsp`, `nessemble-cli/src/lsp.rs`)
 
-- **`nessemble_lsp::run_with(hooks: ServerHooks)`**, where `ServerHooks { custom_resolver: Box<dyn Fn(Option<&Path>) -> CustomResolver> }`. The CLI injects a **cache-only resolver**: `custom::build_cache_reader(pseudo)` returns `Bytes` on a plan-011 cache hit and *never runs a script*. On a miss it falls back to the lenient empty output and records an `Unmodelled` marker. `run()` keeps the lenient resolver. Plan 021 proposes a `CustomOutput::Unmodeled` variant for the same miss; use one variant for both, so the `Unmodelled` marker and plan 021's taint flag come from the same place.
+- **`nessemble_lsp::run_with(hooks: ServerHooks)`**, where `ServerHooks { custom_resolver: Box<dyn Fn(Option<&Path>) -> CustomResolver> }`. The CLI injects a **cache-only resolver**: `custom::build_cache_reader(pseudo)` returns `Bytes` on a plan-011 cache hit and *never runs a script*. On a miss it falls back to the lenient empty output and records an `Unmodelled` marker. `run()` keeps the lenient resolver. Plan 022 proposes a `CustomOutput::Unmodeled` variant for the same miss; use one variant for both, so the `Unmodelled` marker and plan 022's taint flag come from the same place.
 - **Which roots are assembled** (`compute_diagnostics`): when the discovered `.nessemblerc` has `entry`, the configured entries whose closure contains the file, rather than the include graph's roots. It is assembled with `record_program` and the hook resolver, so lint reuses the same `Run` and costs **no extra assembly**.
 - **Lint** (`with_lint`): documents covered by a `Run` with a program get their findings from one `lint_programs` call per round. All others keep `lint_diagnostics`, which is file mode.
 - **Code actions**:
@@ -337,7 +334,7 @@ No change (the `-l` symbol list is unaffected).
 
 ### 5.1 Lint findings (ESLint rows, `LINE:COL severity message rule-id`)
 
-These keep `lint`'s existing ESLint row format rather than `Error in …`, because it is the shipped lint report. **Every finding sits at the author's line**: the routine's label line, or the directive's line, never a macro body. Lines named *inside* a message are sites, i.e. call sites for macros and custom pseudo-ops. "of `F`" is added only when the file differs from the routine's own file, and `F` is the path as the report's file header prints it. Rule-id style matches the companion's `duplicate-symbol` / `value-out-of-range` (lowercase, hyphenated).
+These keep `lint`'s existing ESLint row format rather than `Error in …`, because it is the shipped lint report. **Every finding sits at the author's line**: the routine's label line, or the directive's line, never a macro body. Lines named *inside* a message are sites, i.e. call sites for macros and custom pseudo-ops. "of `F`" is added only when the file differs from the routine's own file, and `F` is the path as the report's file header prints it. Rule-id style matches plan 017's `duplicate-symbol` / `value-out-of-range` (lowercase, hyphenated).
 
 **`undeclared-clobber`** (program mode, at the label line and column). The v2.27 prefix is kept, and the origin is appended per register:
 - One register:
@@ -416,7 +413,7 @@ Tests are written first in each phase, in the existing layout:
 - Anchors: a label, `label+2`, `:+`/`:-`, a pasted `row\i`, and a constant (no anchor).
 - Two `.prg` banks both `.org $8000`: a label in bank 1 resolves by anchor; numeric `JMP $8000` is ambiguous.
 - Two overlapping `.phase` blocks in one bank.
-- `Line.call_line` propagation into `Site` (the field's own preprocessor tests live with plan 019).
+- `Site` for a nested macro expansion is the outermost call, derived from plan 017's expansion chain.
 
 **Blind spots, each a minimal two-file program (`main.asm` includes `util.asm`)**
 1. **Cross-file callee**: the caller declares `A`, and `JSR helper` goes to `util.asm`'s helper, which declares `A, X`. Program mode reports X with the origin `whose contract clobbers X`. File mode does not, which pins today's behaviour. The reverse direction is also tested: a verified cross-file call where the caller over-declares now gets `overdeclared-clobber`.
@@ -458,8 +455,8 @@ Tests are written first in each phase, in the existing layout:
 - Recursion: mutual recursion between two uncontracted routines reaches the fixpoint.
 - Falling through into a contracted routine with a save pending walks into it.
 - Stacked labels at one address do not trust each other's contract.
-- `@local` targets are followed and never stop the walk (written once plan 020 lands; gated until then).
-- `.assert` lines inside a routine (plan 021) and a routine that falls into a `.table` (plan 019): the first is invisible, the second reaches data.
+- `@local` targets are followed and never stop the walk (written once plan 021 lands; gated until then).
+- `.assert` lines inside a routine (plan 022) and a routine that falls into a `.table` (plan 020): the first is invisible, the second reaches data.
 - A macro-body write names the call site in the message.
 - `emit_source` instructions are seen, via a test resolver returning `CustomOutput::Source`.
 - `require-routine-doc` sees a cross-file `JSR` and a tail `JMP`, and ignores a loop-back `JMP`.
@@ -485,7 +482,7 @@ Tests are written first in each phase, in the existing layout:
 - `entry` in an override is an error.
 - `assemble.pseudo` at the root, and in an override (an error).
 - An unknown `assemble` key is an error.
-- Coexistence with `assemble.rules` (rebased onto the companion).
+- `assemble.pseudo` coexists with plan 017's `assemble.rules` in one block.
 
 **LSP**
 - A two-file workspace with an rc entry gives the same lint diagnostics as `lint_programs`.
@@ -509,7 +506,7 @@ Tests are written first in each phase, in the existing layout:
   - Replace the "two known blind spots" subsection under *Suppressing a finding* with what the analysis follows and the remaining limits (indirect jumps, RTS dispatch, inline data after `JSR`, indexed aliasing).
   - Replace that subsection's two worked examples with neutral identifiers.
   - Document `unused-lint-ignore`.
-- **`usage.md` § .nessemblerc**: `entry` and `assemble` (shared with the companion).
+- **`usage.md` § .nessemblerc**: `entry` and `assemble.pseudo`, beside plan 017's `assemble.rules`.
 - **`docs/src/editor.md`**: program-mode lint in the editor, the cache-only rule, and the new quick fix.
 - **`docs/src/upgrading.md`**:
   - `unused-lint-ignore` is on by default;
@@ -534,8 +531,8 @@ Tests are written first in each phase, in the existing layout:
 
 ### 8.1 Phases (each separately mergeable and revertible)
 
-0. **Schema**: rc keys and CLI flags (parsed, validated, not yet used). Coordinate with the companion's `assemble.rules`.
-1. **Recording**: `Symbol.rom_offset`/`site`, `program.rs`, `build_program`, and the byte-identity tests (reusing plan 019's `call_line`).
+0. **Schema**: `entry`, `assemble.pseudo` and the CLI flags (parsed, validated, not yet used), extending plan 017's `RcAssemble`.
+1. **Recording**: `Symbol.rom_offset`, `program.rs`, `build_program`, and the byte-identity tests (reusing plan 017's expansion table).
 2. **Analysis and program mode**: `clobbers.rs` with stack saves, `lint_programs`, the three clobber rules and `require-routine-doc` in program mode, and the CLI. *The phase to review hardest.*
 3. **`unused-lint-ignore`**, in both modes.
 4. **Memory saves** (stretch). Droppable, but full acceptance needs it for two routines.
@@ -548,7 +545,7 @@ Tests are written first in each phase, in the existing layout:
 - **New genuine findings.** Macros and custom pseudo-ops were invisible to both today's lint and the external checker. If they reveal real undeclared writes, acceptance item 1 is met by fixing the corpus, not nessemble. Each such finding names its macro or pseudo-op site.
 - **The RTS-dispatch policy** adds one `unverifiable-clobbers` on the corpus that the external checker treats as a plain return. Chosen: call it what it is, a computed jump through the stack, an indirect jump in all but opcode.
 - **Indexed and indirect stores** can alias a memory save (Phase 4) without releasing it. This is documented, and acceptable for a warn-level lint.
-- **Macro attribution today.** Expansion tokens carry the macro *body's* line with the *caller's* file id, so a build error inside a macro points at the wrong line (observed: an undefined symbol inside a macro body is reported at the body line, not the call). The shared `call_line` (plan 019) fixes this for the new diagnostics only; fixing existing build diagnostics is out of brief and a natural patch for the companion bugfix.
+- **Macro attribution.** Build diagnostics report a macro-expanded line at its body line with expansion notes (plan 017). Lint findings instead sit at the routine's label line and name the outermost call site inside the message (§5.1), because a routine is written where it is called from, not in the macro body.
 - **Annotated labels inside a macro body** are not analysed: they bind per expansion, with no text line of their own. Documented.
 - **LSP cost.** One extra walk per round over an assembly the LSP already does; it should be milliseconds. Recording adds per-statement bookkeeping, and only while `record_program` is on.
 - **LSP vs CLI with a cold cache.** The editor reports a subset until a build has run. `emit_source` output is never cached (plan 011), so routines containing it stay partly unmodelled in the editor.
@@ -584,7 +581,7 @@ The three inert entries in otherwise live categories (two fall-through, one unre
 1. **Whether `unused-lint-ignore` should default to `warn`.** The brief says it does. It is a behaviour change for every project with stale suppressions.
 2. **The `JMP` part of `require-routine-doc`.** Proposed: only a tail `JMP` from a different text block. The alternative is every `JMP` target, which fires on loop-back labels.
 3. **Whether `assemble.pseudo` belongs in this schema change or should be a lint-only `-p`.** Proposed: in the schema, because the LSP needs it.
-4. **Whether the plain build (`nessemble main.asm`) should also read `entry`/`assemble.pseudo`.** Out of scope here; it belongs to the companion if it makes the assembler read `.nessemblerc`.
+4. **Whether the plain build (`nessemble main.asm`) should also read `entry`/`assemble.pseudo`.** Settled: not in this plan. Plan 017 already makes the build read `.nessemblerc` (for `assemble.rules`), so it would be a small follow-up.
 5. **The `entry` key name** (owner's open point). Proposed: `"entry"`, root-only, string or array.
 
 ### 8.5 Out of brief (not done)
@@ -617,4 +614,4 @@ Also touched: `crates/nessemble-core/src/preprocess.rs`, `crates/nessemble-core/
 1. `unused-lint-ignore` defaults to `warn` (§8.4 Q1).
 2. Returning through a pushed address (`RTS` dispatch) is reported as `unverifiable-clobbers`, the same as an indirect jump (§8.2).
 3. The key is `"entry"`, root-level only, taking a string or an array (§8.4 Q5).
-4. The plain build does not read `entry` or `assemble.pseudo` in this plan (§8.4 Q4).
+4. The plain build does not read `entry` or `assemble.pseudo` in this plan (§8.4 Q4), although plan 017 already makes it read `.nessemblerc`.

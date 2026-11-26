@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 
 use nessemble_i18n::t;
 
-use crate::lexer::{Lexer, Tok, Token};
+use crate::diagnostic::{locate, AsmRule, Expansion};
+use crate::lexer::{Lexer, Span, Tok, Token};
 use crate::Diag;
 
 /// A source overlay for tooling: given the resolved path of a file about to be
@@ -59,6 +60,41 @@ pub struct Preprocessed {
     /// determined at all (only reachable with no filesystem — see
     /// [`crate::PathArgError::NoProjectRoot`]).
     pub root: Option<PathBuf>,
+    /// Source text of each file, parallel to `files` (token spans index it).
+    pub sources: Vec<String>,
+    /// Every `.macro` expansion, indexed by `Token::expansion - 1`.
+    pub expansions: Vec<Expansion>,
+    /// Rule diagnostics raised while preprocessing (a redefined macro), in
+    /// source order, for the caller to report at their configured severity.
+    pub warnings: Vec<Diag>,
+}
+
+impl Preprocessed {
+    /// The per-file tables (and pending rule diagnostics) the assembler needs.
+    /// The token stream is consumed separately, by the parser.
+    pub(crate) fn into_tables(self) -> crate::assemble::SourceTables {
+        crate::assemble::SourceTables {
+            files: self.files,
+            dirs: self.dirs,
+            paths: self.paths,
+            root: self.root,
+            expansions: self.expansions,
+            pending: self.warnings,
+        }
+    }
+}
+
+/// A captured `.macrodef`: its body and what diagnostics need to know about it.
+#[derive(Clone)]
+struct MacroDef {
+    body: Vec<Token>,
+    /// Where the definition is (file id and line of the `.macrodef`).
+    file: u32,
+    line: u32,
+    /// The highest `\N` the body references (0 if none).
+    arity: usize,
+    /// Whether the body reads `\#`, i.e. handles its own argument count.
+    variadic: bool,
 }
 
 /// Preprocess `source` (already read from `top_name`), resolving includes and
@@ -92,6 +128,9 @@ pub fn preprocess_with(
         dirs: vec![base_dir],
         paths: vec![top_path],
         root,
+        sources: vec![source.to_string()],
+        expansions: Vec::new(),
+        warnings: Vec::new(),
         macros: HashMap::new(),
         out: Vec::new(),
         unique: 0,
@@ -105,6 +144,9 @@ pub fn preprocess_with(
         dirs: pre.dirs,
         paths: pre.paths,
         root: pre.root,
+        sources: pre.sources,
+        expansions: pre.expansions,
+        warnings: pre.warnings,
     })
 }
 
@@ -117,7 +159,11 @@ struct Pre<'a> {
     paths: Vec<PathBuf>,
     /// The project root `@/` arguments resolve against (see `Preprocessed::root`).
     root: Option<PathBuf>,
-    macros: HashMap<String, Vec<Token>>,
+    /// Source text of each file (see `Preprocessed::sources`).
+    sources: Vec<String>,
+    expansions: Vec<Expansion>,
+    warnings: Vec<Diag>,
+    macros: HashMap<String, MacroDef>,
     out: Vec<Token>,
     unique: u32,
     /// How many `.for` blocks are open at this point of the token stream. The
@@ -130,16 +176,41 @@ struct Pre<'a> {
 
 impl Pre<'_> {
     fn diag(&self, file: usize, line: u32, message: impl Into<String>) -> Diag {
-        Diag {
-            file: self.files.get(file).cloned().unwrap_or_default(),
+        Diag::new(
+            self.files.get(file).cloned().unwrap_or_default(),
             line,
-            message: message.into(),
+            message,
+        )
+    }
+
+    /// A diagnostic on the line of `tok` (written in file `file_id`), located in
+    /// its macro body and naming the calls that expanded it, if it was expanded.
+    fn diag_at(&self, tok: &Token, file_id: usize, message: impl Into<String>) -> Diag {
+        locate(
+            &self.files,
+            &self.expansions,
+            file_id as u32,
+            tok.line,
+            tok.expansion,
+            message,
+        )
+    }
+
+    /// The file a diagnostic about `tok` names: its macro body's file if it was
+    /// expanded, otherwise the file it was written in.
+    fn shown_file(&self, tok: &Token, file_id: usize) -> u32 {
+        match tok.expansion.checked_sub(1) {
+            Some(i) => self.expansions[i as usize].def_file,
+            None => file_id as u32,
         }
     }
 
     /// Lex `text` (the file identified by `file_id`) and process its tokens.
     fn process_file(&mut self, text: &str, file_id: usize, depth: usize) -> Result<(), Diag> {
-        let toks = Lexer::new(text).tokenize();
+        let mut toks = Lexer::new(text).tokenize();
+        for t in &mut toks {
+            t.span.src = file_id as u32;
+        }
         let raw: Vec<&str> = text.lines().collect();
         self.process_tokens(&toks, file_id, depth, &raw)
     }
@@ -178,6 +249,8 @@ impl Pre<'_> {
                 // Preserve the macro-origin flag: tokens re-emitted from a macro
                 // body (via `substitute`) carry it, so it survives re-processing.
                 from_macro: toks[i].from_macro,
+                expansion: toks[i].expansion,
+                span: toks[i].span,
             });
             i += 1;
         }
@@ -207,18 +280,16 @@ impl Pre<'_> {
                 let target = self.include_target(raw, line, file_id)?;
                 let next = skip_line(toks, i);
                 // Emit the bare marker, then splice the trainer file.
-                self.out.push(Token {
-                    tok: Tok::Pseudo("inestrn".to_string()),
-                    line,
-                    file: file_id as u32,
-                    from_macro: false,
-                });
-                self.out.push(Token {
-                    tok: Tok::Endl,
-                    line,
-                    file: file_id as u32,
-                    from_macro: false,
-                });
+                for tok in [Tok::Pseudo("inestrn".to_string()), Tok::Endl] {
+                    self.out.push(Token {
+                        tok,
+                        line,
+                        file: file_id as u32,
+                        from_macro: false,
+                        expansion: toks[i].expansion,
+                        span: toks[i].span,
+                    });
+                }
                 self.do_include(&target, depth, file_id, line)?;
                 Ok(next)
             }
@@ -226,9 +297,9 @@ impl Pre<'_> {
                 // A definition is made once by this pass whatever the loop does,
                 // which would surprise anyone who put one in a body.
                 if self.for_depth > 0 {
-                    return Err(self.diag(file_id, line, t!("macrodef-in-for")));
+                    return Err(self.diag_at(&toks[i], file_id, t!("macrodef-in-for")));
                 }
-                self.capture_macro(toks, i, file_id, line)
+                self.capture_macro(toks, i, file_id)
             }
             "macro" => self.expand_macro(toks, i, file_id, depth, raw),
             _ => unreachable!("unhandled directive {name}"),
@@ -302,28 +373,27 @@ impl Pre<'_> {
             .map_or_else(|| dir.clone(), std::path::Path::to_path_buf);
         self.dirs.push(child_dir);
         self.paths.push(path);
+        self.sources.push(text.clone());
         self.process_file(&text, child_id, depth + 1)
     }
 
     /// Capture a `.macrodef NAME` … `.endm` body, starting at `toks[i]`.
-    fn capture_macro(
-        &mut self,
-        toks: &[Token],
-        i: usize,
-        file_id: usize,
-        line: u32,
-    ) -> Result<usize, Diag> {
+    ///
+    /// Redefining a macro replaces it (the last definition wins, as before) and
+    /// raises a `duplicate-symbol` diagnostic naming the first definition.
+    fn capture_macro(&mut self, toks: &[Token], i: usize, file_id: usize) -> Result<usize, Diag> {
+        let line = toks[i].line;
         // toks[i] = `.macrodef`; the name is the following TEXT token.
         let name = match toks.get(i + 1).map(|t| &t.tok) {
             Some(Tok::Text(n)) => n.clone(),
-            _ => return Err(self.diag(file_id, line, t!("macro-name-after-macrodef"))),
+            _ => return Err(self.diag_at(&toks[i], file_id, t!("macro-name-after-macrodef"))),
         };
         // Skip to the start of the body (past the `.macrodef` line's ENDL).
         let mut j = skip_line(toks, i);
         let mut body: Vec<Token> = Vec::new();
         loop {
             match toks.get(j) {
-                None => return Err(self.diag(file_id, line, t!("macro-unterminated"))),
+                None => return Err(self.diag_at(&toks[i], file_id, t!("macro-unterminated"))),
                 Some(t) if matches!(&t.tok, Tok::Pseudo(p) if p == "endm") => break,
                 Some(t) => {
                     body.push(t.clone());
@@ -335,12 +405,53 @@ impl Pre<'_> {
         if matches!(body.last().map(|t| &t.tok), Some(Tok::Indent)) {
             body.pop();
         }
-        self.macros.insert(name, body);
+        let arity = body
+            .iter()
+            .filter_map(|t| match t.tok {
+                Tok::NumberArg(n) if n >= 1 => Some(n as usize),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let variadic = body.iter().any(|t| matches!(t.tok, Tok::NumberArgc));
+        let def_file = self.shown_file(&toks[i], file_id);
+        if let Some(prev) = self.macros.get(&name) {
+            let mut d = self.diag_at(
+                &toks[i],
+                file_id,
+                t!(
+                    "macro-redefined",
+                    name = name.as_str(),
+                    file = self
+                        .files
+                        .get(prev.file as usize)
+                        .cloned()
+                        .unwrap_or_default(),
+                    line = prev.line
+                ),
+            );
+            d.rule = Some(AsmRule::DuplicateSymbol);
+            self.warnings.push(d);
+        }
+        self.macros.insert(
+            name,
+            MacroDef {
+                body,
+                file: def_file,
+                line,
+                arity,
+                variadic,
+            },
+        );
         // Resume past `.endm` and its ENDL.
         Ok(skip_line(toks, j))
     }
 
     /// Expand a `.macro NAME, arg, …` invocation starting at `toks[i]`.
+    ///
+    /// A call passing a different number of arguments than the body uses (its
+    /// highest `\N`) is an error at the call, unless the body reads `\#` and so
+    /// handles the count itself.
     fn expand_macro(
         &mut self,
         toks: &[Token],
@@ -349,10 +460,10 @@ impl Pre<'_> {
         depth: usize,
         raw: &[&str],
     ) -> Result<usize, Diag> {
-        let line = toks[i].line;
+        let call = &toks[i];
         let name = match toks.get(i + 1).map(|t| &t.tok) {
             Some(Tok::Text(n)) => n.clone(),
-            _ => return Err(self.diag(file_id, line, t!("macro-name-after-macro"))),
+            _ => return Err(self.diag_at(call, file_id, t!("macro-name-after-macro"))),
         };
         let end = skip_line(toks, i);
         // Arguments: the `(COMMA number)*` tokens after the name (up to but not
@@ -360,16 +471,54 @@ impl Pre<'_> {
         let content_end = line_content_end(toks, i);
         let args = split_args(&toks[(i + 2).min(content_end)..content_end]);
 
-        let body = match self.macros.get(&name) {
-            Some(b) => b.clone(),
-            None => {
-                return Err(self.diag(file_id, line, t!("macro-not-defined", name = name)));
-            }
+        let Some(def) = self.macros.get(&name).cloned() else {
+            return Err(self.diag_at(call, file_id, t!("macro-not-defined", name = name)));
         };
+
+        if !def.variadic && args.len() != def.arity {
+            let message = match def.arity {
+                0 => t!(
+                    "macro-arity-none",
+                    name = name.as_str(),
+                    passed = args.len()
+                ),
+                1 => t!("macro-arity-one", name = name.as_str(), passed = args.len()),
+                n => t!(
+                    "macro-arity",
+                    name = name.as_str(),
+                    arity = n,
+                    passed = args.len()
+                ),
+            };
+            let mut d = self.diag_at(call, file_id, message);
+            d.notes.insert(
+                0,
+                t!(
+                    "note-macro-defined",
+                    name = name.as_str(),
+                    file = self
+                        .files
+                        .get(def.file as usize)
+                        .cloned()
+                        .unwrap_or_default(),
+                    line = def.line
+                ),
+            );
+            return Err(d);
+        }
 
         self.unique += 1;
         let unique = self.unique;
-        let expanded = substitute(&body, &args, unique, file_id);
+        self.expansions.push(Expansion {
+            name,
+            def_file: def.file,
+            def_line: def.line,
+            call_file: self.shown_file(call, file_id),
+            call_line: call.line,
+            parent: call.expansion,
+        });
+        let expansion = self.expansions.len() as u32;
+        let expanded = substitute(&def.body, &args, unique, file_id, expansion);
         // Re-process the expansion so nested directives resolve too.
         self.process_tokens(&expanded, file_id, depth, raw)?;
         Ok(end)
@@ -441,46 +590,57 @@ fn split_args(toks: &[Token]) -> Vec<Vec<Token>> {
 }
 
 /// Re-emit a macro body with `\N` / `\#` / `\@` substituted. Substituted tokens
-/// keep the body's definition line numbers, which diagnostics report.
-fn substitute(body: &[Token], args: &[Vec<Token>], unique: u32, file_id: usize) -> Vec<Token> {
+/// keep the body's definition line numbers, which diagnostics report, and every
+/// token is stamped with `expansion` (the id of this expansion). A substituted
+/// token — an argument, or the parentheses around it — takes the span of the
+/// `\N` it replaces, so a diagnostic quotes the body as written.
+fn substitute(
+    body: &[Token],
+    args: &[Vec<Token>],
+    unique: u32,
+    file_id: usize,
+    expansion: u32,
+) -> Vec<Token> {
     let mut out = Vec::new();
+    let mk = |tok: Tok, t: &Token, span: Span| Token {
+        tok,
+        line: t.line,
+        file: file_id as u32,
+        // Every token re-emitted from a macro body is macro-originated.
+        from_macro: true,
+        expansion,
+        span,
+    };
     let mut k = 0;
     while k < body.len() {
         let t = &body[k];
         match &t.tok {
             Tok::NumberArg(n) => {
                 // `\N` → the parenthesised tokens of argument N (1-based).
-                out.push(mk(Tok::OpenParen, t.line, file_id));
+                out.push(mk(Tok::OpenParen, t, t.span));
                 if let Some(arg) = args.get((*n as usize).wrapping_sub(1)) {
                     for a in arg {
-                        out.push(mk(a.tok.clone(), t.line, file_id));
+                        out.push(mk(a.tok.clone(), t, t.span));
                     }
                 } else {
-                    out.push(mk(Tok::Number(0), t.line, file_id));
+                    out.push(mk(Tok::Number(0), t, t.span));
                 }
-                out.push(mk(Tok::CloseParen, t.line, file_id));
+                out.push(mk(Tok::CloseParen, t, t.span));
             }
-            Tok::NumberArgc => out.push(mk(Tok::Number(args.len() as i64), t.line, file_id)),
+            Tok::NumberArgc => out.push(mk(Tok::Number(args.len() as i64), t, t.span)),
             Tok::Text(name) if matches!(body.get(k + 1).map(|n| &n.tok), Some(Tok::NumberArgu)) => {
                 // `label\@` → a per-invocation unique label name.
-                out.push(mk(Tok::Text(format!("{name}{unique}")), t.line, file_id));
+                let span = Span {
+                    end: body[k + 1].span.end,
+                    ..t.span
+                };
+                out.push(mk(Tok::Text(format!("{name}{unique}")), t, span));
                 k += 1; // consume the `\@`
             }
-            Tok::NumberArgu => out.push(mk(Tok::Number(unique as i64), t.line, file_id)),
-            other => out.push(mk(other.clone(), t.line, file_id)),
+            Tok::NumberArgu => out.push(mk(Tok::Number(unique as i64), t, t.span)),
+            other => out.push(mk(other.clone(), t, t.span)),
         }
         k += 1;
     }
     out
-}
-
-fn mk(tok: Tok, line: u32, file_id: usize) -> Token {
-    Token {
-        tok,
-        line,
-        file: file_id as u32,
-        // `mk` builds only the tokens re-emitted from a macro body (`substitute`),
-        // so every token it produces is macro-originated.
-        from_macro: true,
-    }
 }

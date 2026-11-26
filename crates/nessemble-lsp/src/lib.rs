@@ -359,7 +359,7 @@ impl Server {
                 Run::from(diagnose_project_with(
                     root,
                     &root_text,
-                    &Options::default(),
+                    &assemble_options(root),
                     &overlay,
                     lenient_custom_resolver(known_custom.clone()),
                 ))
@@ -1193,7 +1193,7 @@ fn analyze(uri: &Url, text: &str, known_custom: &HashSet<String>) -> Analysis {
     let found = diagnose_source_with(
         &path,
         text,
-        &Options::default(),
+        &assemble_options(&path),
         None,
         lenient_custom_resolver(known_custom.clone()),
     );
@@ -1317,9 +1317,38 @@ fn project_diag_to_lsp(d: &Diag, severity: DiagnosticSeverity, text: &str) -> Di
         range: diagnostic_range(text, line, &d.message),
         severity: Some(severity),
         source: Some("nessemble".to_string()),
-        message: d.message.clone(),
+        code: diag_code(d),
+        message: with_notes(d, d.message.clone()),
         ..Default::default()
     }
+}
+
+/// The assembler options for diagnosing the file at `path`: the defaults, with
+/// the severities from the discovered `.nessemblerc`'s `assemble.rules` (so an
+/// editor reports a rule as the build does). A missing or invalid config falls
+/// back to the defaults — the editor never fails over a config file.
+fn assemble_options(path: &Path) -> Options {
+    let rules = nessemble_rc::Config::resolve(path, &nessemble_rc::Choice::Discover)
+        .map(|c| c.assemble_rules())
+        .unwrap_or_default();
+    Options {
+        rules,
+        ..Options::default()
+    }
+}
+
+/// An assembler diagnostic's rule id as an LSP `code`, if it has one.
+fn diag_code(d: &Diag) -> Option<NumberOrString> {
+    d.rule.map(|r| NumberOrString::String(r.id().to_string()))
+}
+
+/// `message` followed by the diagnostic's notes, one `note:` per line.
+fn with_notes(d: &Diag, message: String) -> String {
+    d.notes.iter().fold(message, |mut m, note| {
+        m.push_str("\nnote: ");
+        m.push_str(note);
+        m
+    })
 }
 
 /// Lint the buffer `text` (identified by `uri`) and return its findings as LSP
@@ -1594,7 +1623,8 @@ fn to_diagnostic(
         range: diagnostic_range(text, line, &message),
         severity: Some(severity),
         source: Some("nessemble".to_string()),
-        message,
+        code: diag_code(diag),
+        message: with_notes(diag, message),
         ..Default::default()
     }
 }
@@ -3799,6 +3829,69 @@ mod tests {
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(diags[0].range.start.line, 0);
         assert_eq!(diags[0].source.as_deref(), Some("nessemble"));
+    }
+
+    #[test]
+    fn analyze_surfaces_the_new_assembler_errors() {
+        let uri = Url::parse("file:///same-line.asm").unwrap();
+        let diags = analyze(&uri, "foo: .db 1\n.db 1 2\n", &HashSet::new()).diagnostics;
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(diags
+            .iter()
+            .all(|d| d.severity == Some(DiagnosticSeverity::ERROR) && d.code.is_none()));
+        assert_eq!(
+            (diags[0].range.start.line, diags[1].range.start.line),
+            (0, 1)
+        );
+        assert!(diags[0]
+            .message
+            .starts_with("a label must be on a line of its own"));
+    }
+
+    #[test]
+    fn analyze_surfaces_rule_warnings_with_their_rule_id() {
+        let uri = Url::parse("file:///rules.asm").unwrap();
+        let diags = analyze(&uri, "foo:\n    NOP\nfoo:\n.db 300\n", &HashSet::new()).diagnostics;
+        let got: Vec<_> = diags
+            .iter()
+            .map(|d| (d.range.start.line, d.severity, d.code.clone()))
+            .collect();
+        let code = |id: &str| Some(NumberOrString::String(id.to_string()));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    2,
+                    Some(DiagnosticSeverity::WARNING),
+                    code("duplicate-symbol")
+                ),
+                (
+                    3,
+                    Some(DiagnosticSeverity::WARNING),
+                    code("value-out-of-range")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn analyze_carries_macro_notes_in_the_message() {
+        let uri = Url::parse("file:///arity.asm").unwrap();
+        let diags = analyze(
+            &uri,
+            ".macrodef MAC\n    .db \\1\n.endm\n    .macro MAC\n",
+            &HashSet::new(),
+        )
+        .diagnostics;
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].range.start.line, 3);
+        assert!(
+            diags[0]
+                .message
+                .ends_with("\nnote: `MAC` is defined at arity.asm line 1"),
+            "{}",
+            diags[0].message
+        );
     }
 
     #[test]

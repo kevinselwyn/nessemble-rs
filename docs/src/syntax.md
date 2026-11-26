@@ -71,6 +71,12 @@ NAME:
 
 * `NAME` - Label name, required.
 
+A label is a line of its own: anything after the colon other than a comment is
+an error (`foo: .db 1` reports "a label must be on a line of its own"). Write
+the instruction or data on the next line. Defining the same name twice is
+allowed — the last definition wins — but warns (see
+[Diagnostics](usage.md#configurable-warnings)).
+
 Example:
 
 ```nessemble
@@ -640,7 +646,7 @@ be used.
 Example:
 
 ```nessemble
-.dw $1234, $45678
+.dw $1234, $5678
 ```
 
 Output:
@@ -653,7 +659,7 @@ Output:
 Try it:
 
 <nessemble-assembler>
-.dw $1234, $45678
+.dw $1234, $5678
 </nessemble-assembler>
 
 ### .else
@@ -2091,8 +2097,14 @@ One macro may have up to 256 parameters which are denoted with a `\` prefix. The
 first parameter being `\1`, the next `\2`, and so on up to `\256`. All
 parameters must be numbers (or label variables).
 
+A macro takes as many arguments as the highest parameter its body uses: the
+`TEST_MACRO` above uses `\1` and `\2`, so it takes exactly two, and a call
+passing one or three is an error at the call. A parameter used only inside an
+`.if` still counts.
+
 There is also a pseudo-parameter, `\#`, that returns the number of input
-parameters.
+parameters. A macro that uses `\#` handles its own argument count (for optional
+arguments, test `.if \# >= 3`), so its calls are never checked.
 
 Example:
 
@@ -2121,7 +2133,7 @@ Example:
     LDX #$08
 label_\@:
     DEX
-    BNE label_\@:
+    BNE label_\@
 .endm
 
 .macro TEST_MACRO

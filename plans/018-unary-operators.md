@@ -3,7 +3,7 @@
 > Status: **Proposed.** Points marked **decided** were settled with the
 > maintainer. Points marked **proposed** are this plan's own choices, and §8
 > lists them for sign-off. Suggested merge position: first of the six plans
-> 017–022.
+> 018–023.
 
 ---
 
@@ -37,7 +37,7 @@ Results are ordinary signed `i64` values, the same as any other expression value
   - `!0 + 1` is 2; `!(0 + 1)` is 0
   - `!FLAG == 0` is `(!FLAG) == 0`. To negate a comparison, write `!(FLAG == 0)`.
 - **They stack:**
-  - `- -4` = 4, and `--4` is the same thing (parser tokens carry no column)
+  - `- -4` = 4, and `--4` is the same thing (the parser reads tokens, not spacing)
   - `!!x` normalises to 0 or 1
   - `~-1` = 0, `-~0` = 1, `~~7` = 7, `-!0` = -1, `!-1` = 0
 - **Operands.** A unary operator applies to:
@@ -74,7 +74,7 @@ Anywhere `parse_expr` is called, so nothing needs to be wired per directive:
 - **Custom Rhai pseudo-instruction arguments** (`CustomArg::Int`)
 - **Macro arguments.** `split_args` already passes `-4` through as `[Minus, Number(4)]`, and `substitute` wraps every `\N` in parentheses. So a body `.db 10 - \1` invoked with `-2` becomes `10 - (-2)` = 12. No preprocessor change is needed.
 
-### 2.4 Narrowing and range (decided; follows the companion range rule)
+### 2.4 Narrowing and range (decided; follows plan 017's range rule)
 
 | Source | Bytes | Warning |
 |---|---|---|
@@ -83,23 +83,23 @@ Anywhere `parse_expr` is called, so nothing needs to be wired per directive:
 | `LDA #-1` | `a9 ff` | none |
 | `.db ~$0F` (−16) | `f0` | none |
 | `.db LOW(-40), HIGH(-40)` | `d8 ff` | none; same bytes as the idiom `LOW($10000 - 40), HIGH($10000 - 40)` |
-| `.db ~$FF` (−256) | `00` | companion `value-out-of-range` (byte rule is `-128…255`) |
-| `AND #~$80` (−129) | `29 7f` | companion `value-out-of-range` |
+| `.db ~$FF` (−256) | `00` | plan 017's `value-out-of-range` (byte rule is `-128…255`) |
+| `AND #~$80` (−129) | `29 7f` | plan 017's `value-out-of-range` |
 | `LDA <-off`, where `off = -$10` | `a5 10` | none |
-| `LDA -1` | `ad ff ff` | Absolute (addressing mode is syntactic), as `LDA 0-1` is today; whether the companion word rule warns is its call |
+| `LDA -1` | `ad ff ff` | `value-out-of-range`: an absolute operand accepts `0…65535` (plan 017), as `LDA 0-1` already warns. The addressing mode is syntactic |
 
-If the range rule hasn't landed, today's `& $FF` truncation already produces the same bytes. The `AND #~$80` case is a real usability cost; see §8.
+The range rule only warns; the bytes are the narrowed value either way. The `AND #~$80` case is a real usability cost; see §8.
 
 ### 2.5 Lexer hazards (each must keep working)
 
-- **Anonymous references.** `BNE :-` and `BNE :---` are `Colon` followed by a run of `Minus`. `parse_primary`'s `Colon` arm still eats the run greedily before any unary logic sees it. Because tokens carry no column, `:- - 1` is still `:--` with a leftover `1`, today and after this change. Docs recommend `(:-) - 1` or `:- + -1`.
+- **Anonymous references.** `BNE :-` and `BNE :---` are `Colon` followed by a run of `Minus`. `parse_primary`'s `Colon` arm still eats the run greedily before any unary logic sees it. Because the parser reads tokens, not spacing, `:- - 1` is still `:--` with a leftover `1`, today and after this change. Docs recommend `(:-) - 1` or `:- + -1`.
 - **Binary minus.** `a-1`, `a - 1`, `(x)-(y)` and `val - -4` all work. After an operand, `Minus` is still taken as binary by `binop()`. A unary operator is recognised only where a primary is expected.
 - **`!=`.** The two-character arm in `lex_operator` matches before the new one-character `!` arm, so `!=` stays `NotEqu`. `a!=-1` lexes as `NotEqu, Minus`. `a ! = 1` lexes as `Bang, Equ` and leaves trailing tokens, like any other non-operator.
 - **`->`.** `->` is still lexed first. So `-` directly before `>` is never unary, but no real expression puts `>` after a unary operator.
 - **`#` and `<` prefixes.** `parse_operand` eats `Hash` or `Lt` and then calls `parse_expr`, which reaches the unary parser.
 - **`.ascii "s" -1`.** The `.ascii` arm in `parse_pseudo` still consumes the `Minus` itself as its negate-offset form. The meaning is unchanged, and it agrees with `.ascii "s" + -1`.
 - **Single-letter names** are registers (`CharReg`), not symbols. That's unchanged, so tests and docs use names of two or more characters (`LDA <-off`, not `LDA <-x`).
-- **`@` in identifiers (plan 020).** This plan touches only:
+- **`@` in identifiers (plan 021).** This plan touches only:
   - the `Tok` enum (two new variants);
   - two new arms in the one-character table of `lex_operator`.
 
@@ -107,13 +107,13 @@ If the range rule hasn't landed, today's `& $FF` truncation already produces the
 
 ### 2.6 Known gap (decided: document, don't fix)
 
-`.db 1 -2` is one expression, `1 - 2`, and emits one byte, `ff`. Neither this feature nor the companion trailing-token check can catch it, because tokens carry no column. The docs warn about it. A later lint rule could flag a data-list element with a space before `-` and none after (see §8).
+`.db 1 -2` is one expression, `1 - 2`, and emits one byte, `ff`. Neither this feature nor plan 017's end-of-statement check catches it: the line is a complete statement. Tokens now carry spans (plan 017), so the spacing *is* visible to a later check. The docs warn about it. A later lint rule could flag a data-list element with a space before `-` and none after (see §8).
 
 ### 2.7 What changes for invalid programs
 
 - **`!` and `~`** used to fall through to the lexer's unknown-character fallback as `CharReg('!')` and `CharReg('~')`.
   - `LDA !` used to report ``Unknown register `!` ``. It now reports `expected expression`.
-  - `.db 1 ! 2` assembles today, because trailing tokens are ignored. After this change it still does, since `!` is not a binary operator. The companion trailing-token check will turn it into an error.
+  - `.db 1 ! 2` is already rejected by plan 017's end-of-statement check, and still is after this change, since `!` is not a binary operator.
 - **No valid program changes output.** The new operators appear only:
   - in operand positions that hit `_ => self.err("expected expression")` today;
   - as the two characters `!` and `~`, which can't appear in valid code today outside comments and strings. The reference corpus has none, checked by grep with comments stripped.
@@ -203,11 +203,11 @@ There is no new message and no new i18n key. `expected expression` is a literal 
 | `.if !` | ``Error in `f.asm` on line N: expected expression`` |
 | `LDA !` | ``Error in `f.asm` on line N: expected expression`` (was ``Unknown register `!` ``) |
 | `.db -"s"` | ``Error in `f.asm` on line N: expected expression`` |
-| `.db ~$FF` | companion ``Warning in `f.asm` on line N: …`` (`value-out-of-range`; text owned by the companion) |
+| `.db ~$FF` | plan 017's `value-out-of-range` warning, in its wording (its §3) |
 | `.for -BAD, 2` with `BAD` defined later | the existing plan-016 pass-1 bounds error, naming `BAD` |
 
 - The line number is the line of the token that fails. On a continued `.db 1,` list, that is the continuation line.
-- Inside a macro expansion, the existing and companion call-site rule applies. Nothing new is added.
+- Inside a macro expansion, plan 017's rule applies (body line plus `in expansion of macro` notes). Nothing new is added.
 
 ---
 
@@ -443,11 +443,11 @@ When this ships, update this plan's status line and add an "As built" section.
 
 ### Risks
 
-- **`AND #~MASK` with bit 7 set warns** under the companion range rule (`~$80` is −129). This is the likeliest complaint. Options:
+- **`AND #~MASK` with bit 7 set warns** under plan 017's range rule (`~$80` is −129). This is the likeliest complaint. Options:
   - (a) document `LOW(~MASK)`, which is this plan's choice;
   - (b) a follow-up that treats `~x` of a byte-range `x` as an 8-bit complement in byte contexts. That contradicts the decided "ordinary signed integers" rule, so it is out of scope.
-- **Merge with the `@`-in-identifiers feature (plan 020).** Both touch `lexer.rs`, but in disjoint places (§2.5). A textual conflict is possible in `lexer.rs` `mod tests` only.
-- **Merge with the companion trailing-token check.** `.db 1 ! 2` and `a ! = 1` become errors there, not here. The tests in §6.3 must not depend on whether the companion has landed.
+- **Merge with the `@`-in-identifiers feature (plan 021).** Both touch `lexer.rs`, but in disjoint places (§2.5). A textual conflict is possible in `lexer.rs` `mod tests` only.
+- **Interaction with plan 017's end-of-statement check.** `.db 1 ! 2` and `a ! = 1` are already errors there, not here, and stay so.
 - **Overflow.** `apply` uses plain `+`, `-` and `*`, which can panic in debug builds on overflow. That predates this plan. `apply_unary` uses `wrapping_neg`. Making binary arithmetic wrap is a separate fix.
 
 ### Out of scope, listed for later

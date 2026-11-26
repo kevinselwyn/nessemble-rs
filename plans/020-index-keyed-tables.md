@@ -3,8 +3,8 @@
 > Status: **Proposed.** The decided points from the brief are settled. Every
 > point marked *(proposed)* is this plan's choice and is collected in §11 for
 > the maintainer to confirm. Phases 1–2 ship on their own; Phase 3 (the enum
-> form) consumes the registry from [plan 018](018-value-enums.md). The
-> final-pass hook in §5.2 is shared with [plan 021](021-assertions.md).
+> form) consumes the registry from [plan 019](019-value-enums.md). The
+> final-pass hook in §5.2 is shared with [plan 022](022-assertions.md).
 
 ---
 
@@ -45,7 +45,7 @@ opcode_table:
 | `.table ENUM` | enum's `start` | one entry per member | Phase 3 |
 | `.table ENUM, FIRST` | `FIRST` | one entry per member whose value is `FIRST` or later in declaration order | Phase 3 |
 
-**Telling `COUNT` from `ENUM`.** When the first argument is a bare identifier (`Expr::Symbol(name)`) and `name` is a registered named enum (§5.3), it is the enum form. Otherwise the argument is evaluated as an ordinary expression, so `.table OP_COUNT` and `.table 40` are the numeric form. Plan 018 keeps enum names out of the symbol table, so a name can be both an enum and a constant; the enum wins, and the docs say so. A bare identifier that is neither gets its own error rather than "symbol not defined" (§7).
+**Telling `COUNT` from `ENUM`.** When the first argument is a bare identifier (`Expr::Symbol(name)`) and `name` is a registered named enum (§5.3), it is the enum form. Otherwise the argument is evaluated as an ordinary expression, so `.table OP_COUNT` and `.table 40` are the numeric form. Plan 019 keeps enum names out of the symbol table, so a name can be both an enum and a constant; the enum wins, and the docs say so. A bare identifier that is neither gets its own error rather than "symbol not defined" (§7).
 
 **No order-only form with a base.** `.table , 1` is not syntax. A 1-based table states its count (`.table 24, 1`) or uses its enum. See §11 Q3.
 
@@ -101,7 +101,7 @@ The check runs on the preprocessed flat stream, so a table may contain `.include
 ### 3.6 How values appear in messages
 
 - **Index and key values** print as `$NN` for 0–255 and `$NNNN` above that. Negative values print in decimal.
-- **The key's text** comes from a small `Expr` printer, because the parser keeps no source text. A symbol prints as its name. A binary expression prints with operands that are themselves binary in parentheses. A numeric-literal key drops the redundant "(value)". (This is the `Display for Expr` shared with plan 021.)
+- **The key's text** is what the author wrote, quoted from token spans with the parser's `render` (plan 017's mechanism), and stored on the tag as `key_text` at parse time. A numeric-literal key drops the redundant "(value)". Plan 022 quotes `.assert` expressions the same way.
 
 ### 3.7 Emitted source *(proposed)*
 
@@ -119,16 +119,15 @@ A custom pseudo-instruction's `emit_source` may not contain `.table`, `.endtable
 
 ### 4.1 AST — `crates/nessemble-core/src/ast.rs` [shared]
 
-- `Stmt::Tag(Expr)` is a **marker statement**: one `Line` of its own, executed before the statement that shares its source line. This is better than wrapping (`Stmt::Tagged(Expr, Box<Stmt>)`), because a macro call's tag and the macro's expanded lines are separate token runs (§4.2). With a marker, "entry runs from tag to next tag" is literal.
+- `Stmt::Tag(Expr, String)` (the key and its source text) is a **marker statement**: one `Line` of its own, executed before the statement that shares its source line. This is better than wrapping (`Stmt::Tagged(Expr, Box<Stmt>)`), because a macro call's tag and the macro's expanded lines are separate token runs (§4.2). With a marker, "entry runs from tag to next tag" is literal.
 - `Pseudo::Table(Option<Expr>, Option<Expr>)` and `Pseudo::EndTable`.
-- `Line` gains `call_line: Option<u32>`: `None` for a line written in the file, or the line of the outermost `.macro` call for an expanded line (§4.3). Shared with plan 021.
-- `impl fmt::Display for Expr` for messages (§3.6), with the rendering rules of plan 021 §2.5. Shared with plan 021; whichever lands first adds it.
+- No new `Line` field: `Line.expansion` (plan 017) already says which `.macro` expansion a tagged line came from.
 
 ### 4.2 Statement parser — `crates/nessemble-core/src/parse.rs` [shared]
 
 **Tag prefix.** In `parse_program` and `parse_program_recovering`, after the optional `Tok::Indent`, the parser checks for a tag:
 
-1. If the next token is `Tok::OpenBrack`, parse `[` `parse_expr()` `]` (`expect(&Tok::CloseBrack)`). Push `Line { stmt: Stmt::Tag(e), line, file, from_macro, call_line }`.
+1. If the next token is `Tok::OpenBrack`, parse `[` `parse_expr()` `]` (`expect(&Tok::CloseBrack)`). Push `Line { stmt: Stmt::Tag(e, text), line, file, from_macro, expansion }`, where `text` is `self.render(start, end)` over the key's tokens.
 2. Skip one optional `Tok::Indent`.
 3. If at `Endl`/EOF, the line is done.
 4. If the next token is another `OpenBrack` **on the same source line**, error `tag-twice`. If it is on a different line, that is the empty-macro case below: loop and parse the next tag.
@@ -137,7 +136,7 @@ A custom pseudo-instruction's `emit_source` may not contain `.table`, `.endtable
 
 **Why the indent and line checks matter.** For `    [K] .macro row, 1`, the preprocessor leaves `Indent [ K ]` followed by the macro body's own tokens. A body line normally begins with `Indent`, which step 2 skips. An empty or blank-first body leaves the tag at end of line or directly before the next line's tokens, which steps 3 and 4 handle.
 
-**Fit with the companion "leftover tokens" bugfix.** The tag is consumed as a prefix *before* `parse_stmt`. The "complete statement" that the leftover check examines is the one after the tag, so `[KEY] stmt` passes and `[KEY] .db 1 junk` still fails on `junk`. A bare `[K]` line is complete. If the companion fix lands first, the tag prefix goes in front of its check, and no change to that check is needed.
+**Fit with plan 017's end-of-statement check.** The tag is consumed as a prefix *before* `parse_stmt`, and `Parser::expect_end` then checks the statement after the tag, so `[KEY] stmt` passes and `[KEY] .db 1 junk` still fails on `junk`. A bare `[K]` line is complete. `expect_end` needs no change; its "statement" quote (`render(start, …)`) should start after the tag.
 
 **`.table` arguments** are parsed in `parse_pseudo` like `.for`: zero, one or two comma-separated expressions. Three or more is error `table-arg-count`. `"endtable"` → `Pseudo::EndTable`.
 
@@ -151,9 +150,8 @@ A custom pseudo-instruction's `emit_source` may not contain `.table`, `.endtable
 ### 4.3 Token and preprocessor — `lexer.rs`, `preprocess.rs` [shared]
 
 - **Lexer.** No change to lexing rules. `[`, `]` and `.table` already lex as `OpenBrack`, `CloseBrack` and `Pseudo("table")`.
-- **Token.** `Token` gains `call_line: Option<u32>` (the lexer emits `None`), with a `Token::new(tok, line, file)` helper to limit churn. One field, shared with plan 021. This is needed so diagnostics for tagged lines or untagged bytes coming from a macro expansion name the **call site**, as the brief requires. Today a macro body's tokens carry the body's definition line (observed: an out-of-range branch in a body reports the body line).
-- **`substitute`/`mk`.** These stamp `call_line` with the invoking `.macro` token's `call_line`, or with its `line` if that is `None`. So nested expansions keep the outermost author's line.
-- **Existing diagnostics don't change.** Only table diagnostics read `call_line`. If the companion arg-count bugfix brings its own call-site mechanism, use that instead and drop this field. Plan 021 (assertions) uses the same field.
+- **Token.** No change. Plan 017 already stamps every token with a `span` and an `expansion` id, and records each expansion (name, definition site, call site, parent) in `Preprocessed.expansions`.
+- **Where macro diagnostics go.** This plan follows plan 017's house rule: a diagnostic on a macro-expanded line is reported at the **macro body line**, in the file holding the body, with one `note: in expansion of macro …` per enclosing call, through `diagnostic::locate`. The notes name the call site, which is what the brief asks for.
 - **Tagged `.macrodef`.** In `handle_directive`, if anything other than `Endl`/`Indent` was emitted for the current line before `.macrodef`, report the existing preprocessor diagnostic style with `tag-before-block` naming `.macrodef`.
 
 ### 4.4 Assembler — `crates/nessemble-core/src/assemble.rs`
@@ -185,7 +183,7 @@ table_entries: Vec<TableEntryInfo>,       // for the LSP (§6)
 
 On pass 1, and when suppressed, `.table` does nothing; parse-time pairing guarantees `.endtable` matches.
 
-**`Stmt::Tag(e)`** (in `exec_stmt`): if a table is open and not suppressed, evaluate `e` and push an `EntryRec` with the current author line (`call_line` or `line`) and `loop_counters()` if inside a `.for`.
+**`Stmt::Tag(e, text)`** (in `exec_stmt`): if a table is open and not suppressed, evaluate `e` and push an `EntryRec` with `self.origin()` (file, line, `cur_expansion` and the `.for` counters).
 
 **`write_byte`**: after the `if_suppressed` early return, if a table is open:
 
@@ -227,15 +225,16 @@ Given the `EntryRec`s, `FIRST`, `STEP` and the spec:
    - `KeySet`: for each member at or after `FIRST` whose value no entry carries, report `table-missing-member` at the `.table` line. If `len` is greater than the number of members covered, report `table-count-enum`.
 4. Append a `TableEntryInfo` per entry for the LSP.
 
-### 5.2 The final-pass hook, shared with `.assert` (plan 021)
+### 5.2 The final-pass hook, shared with `.assert` (plan 022)
 
-This is the **reconciled interface** agreed with plan 021. This plan merges first, so it introduces the hook; plan 021 adds its variants.
+This is the **reconciled interface** agreed with plan 022. This plan merges first, so it introduces the hook; plan 022 adds its variants.
 
 ```rust
 /// Where a deferred check reports: the line the author wrote.
 pub(crate) struct Origin {
     pub file: u32,
-    pub line: u32,              // `call_line` for a macro expansion, else the line itself
+    pub line: u32,
+    pub expansion: u32,         // `Line.expansion`; `locate` turns it into body file + notes
     pub suffix: Option<String>, // `.for` iteration suffix captured at record time
 }
 /// A check that needs settled symbol values and runs exactly once per build.
@@ -245,28 +244,29 @@ pub(crate) struct Deferred {
 }
 pub(crate) enum DeferredCheck {
     Table(OpenTable),
-    // Plan 021 adds `Assert { .. }` and `Error { .. }`.
+    // Plan 022 adds `Assert { .. }` and `Error { .. }`.
 }
 impl Assembler {
-    /// The current author origin: `cur_call_line.unwrap_or(cur_line)`, plus `loop_counters()`.
+    /// The current origin: `cur_file`, `cur_line`, `cur_expansion`, plus `loop_counters()`.
     fn origin(&self) -> Origin;
     /// Queue a check. No-op unless `self.pass == FINAL_PASS` (2), so recording happens once per
     /// build. The *caller* applies its own suppression rule before calling: `.table` uses
     /// `if_suppressed()` so it agrees with `write_byte`; `.assert`/`.error` use the stricter
-    /// all-levels test (plan 021 §2.3).
+    /// all-levels test (plan 022 §2.3).
     fn defer(&mut self, origin: Origin, check: DeferredCheck);
     /// Drain `deferred` in queue order, reporting via `report_at`. Called exactly once:
     /// in `run()` after pass 2 + `validate_ines()` when pass 2 produced no errors, and in
     /// `diagnostics()` after pass 2 unconditionally. In non-collect mode it stops at the first
     /// error, so `run()`'s `errors.last()` is that first error.
     fn run_deferred(&mut self);
-    /// Report at an explicit origin, appending its suffix, de-duplicated by
-    /// (file, line, message without suffix) like `error`.
+    /// Report at an explicit origin through `diagnostic::locate` (so an expanded
+    /// line names its body file and the calls), appending its suffix,
+    /// de-duplicated by (file, line, message without suffix) like `error`.
     fn report_at(&mut self, origin: &Origin, message: String);
 }
 ```
 
-Plan 018's `error_at(file, line, msg)` for pass-1 enum diagnostics is `report_at` with no suffix; whichever plan lands first adds it.
+Plan 019's `error_at` for pass-1 enum diagnostics is `report_at` with an `Origin` captured at the `.enum` line; whichever plan lands first adds it.
 
 Contract for both users:
 
@@ -274,14 +274,14 @@ Contract for both users:
 - A check may instead carry an `Expr` to evaluate in `run_deferred`. The symbol table is complete there, but loop counters are not available, so anything using `\i` must be evaluated at record time.
 - Nothing is queued on pass 1. The queue is cleared at the start of each `run()` and `diagnostics()`.
 
-Entries and the table record are evaluated at record time on pass 2, so `.table` needs no drain-time evaluator; plan 021 adds the side-effect-free `eval_final` for assertions.
+Entries and the table record are evaluated at record time on pass 2, so `.table` needs no drain-time evaluator; plan 022 adds the side-effect-free `eval_final` for assertions.
 
-### 5.3 Key sets: consuming plan 018's enum registry
+### 5.3 Key sets: consuming plan 019's enum registry
 
-Plan 018 records each named `.enum` as an `EnumInfo` on pass 1 and exposes `Assembler::enum_info(&self, name) -> Option<&EnumInfo>`:
+Plan 019 records each named `.enum` as an `EnumInfo` on pass 1 and exposes `Assembler::enum_info(&self, name) -> Option<&EnumInfo>`:
 
 ```rust
-// Provided by plan 018 (crates/nessemble-core/src/assemble.rs).
+// Provided by plan 019 (crates/nessemble-core/src/assemble.rs).
 pub struct EnumInfo {
     pub name: String,
     pub file: u32, pub line: u32,
@@ -294,9 +294,9 @@ impl EnumInfo { pub fn count(&self) -> usize { self.members.len() } }
 // Also defined as the constant NAME_COUNT.
 ```
 
-This plan defines no registry of its own. Phase 1 compiles without plan 018 because nothing calls `enum_info` until Phase 3; `.table NAME` in Phase 1 falls through to the numeric form, or to `table-arg-unknown`.
+This plan defines no registry of its own. Phase 1 compiles without plan 019 because nothing calls `enum_info` until Phase 3; `.table NAME` in Phase 1 falls through to the numeric form, or to `table-arg-unknown`.
 
-- **When it is read.** `.table` resolves its spec on pass 2, when plan 018's registry is complete (it is filled on pass 1 and read-only on pass 2). An `.enum` in an earlier- or later-included file both work.
+- **When it is read.** `.table` resolves its spec on pass 2, when plan 019's registry is complete (it is filled on pass 1 and read-only on pass 2). An `.enum` in an earlier- or later-included file both work.
 - **What `.table ENUM` requires.**
   - `contiguous` must be true and `step` must not be 0; otherwise report `table-not-contiguous` at the `.table` line.
   - `STEP = step` *(proposed)*. A step of 2 gives keys 0, 2, 4…, the pre-doubled index of a `.dw` table read with `ASL` / `TAX`.
@@ -324,7 +324,7 @@ This plan defines no registry of its own. Phase 1 compiles without plan 018 beca
 - **Format hints.** A `@nessemble-format` hint above a tagged run binds to nothing, so it is reported as `ineffective-comment-directive` as usual.
 - **Idempotent.** The pass is idempotent.
 
-**`lint` details.** In `routine_effects_inner` and `operand_text`, skip `tag_lexemes`, so `[K] JMP handler` (a table of JMP instructions) is analyzed as a `JMP`; today it would be "unknown". Add `table` and `endtable` to `is_transparent_directive`, since they emit nothing. (Plan 022 replaces the text-based routine walk with an emitted-stream walk; there, tags are invisible because they emit nothing.)
+**`lint` details.** In `routine_effects_inner` and `operand_text`, skip `tag_lexemes`, so `[K] JMP handler` (a table of JMP instructions) is analyzed as a `JMP`; today it would be "unknown". Add `table` and `endtable` to `is_transparent_directive`, since they emit nothing. (Plan 023 replaces the text-based routine walk with an emitted-stream walk; there, tags are invisible because they emit nothing.)
 
 **`coverage` details.** An entry's bytes are attributed to the line that emits them (the tag line for one-line entries) through the existing `record_span`. A table is classified as data by the CDL like any other data.
 
@@ -342,7 +342,7 @@ These are new keys under `## Tables` in `crates/nessemble-i18n/locales/en-US.ftl
 
 | Key | Text | Line |
 |---|---|---|
-| `table-tag-index` | ``Entry tagged `{ $key }` ({ $value }) is at index { $index }`` (literal key: `Entry tagged { $value } is at index { $index }`) | the tag (call site if from a macro) |
+| `table-tag-index` | ``Entry tagged `{ $key }` ({ $value }) is at index { $index }`` (literal key: `Entry tagged { $value } is at index { $index }`) | the tag (the body line, with expansion notes, if from a macro) |
 | `table-missing-member` | ``Table `{ $set }` is missing `{ $member }` ({ $value })`` | `.table` |
 | `table-count-enum` | ``Table has { $count } entries; `{ $set }` has { $expected }`` | `.table` |
 | `table-count` | ``Table has { $count } entries; `.table` expects { $expected }`` | `.table` |
@@ -374,7 +374,7 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
 
 - **Byte-identical conversion.** A 40-entry `.dw` table with `; $NN` comments and 40 `OP_* = $NN` constants assembles to the same bytes as its `.table OP_COUNT` tagged conversion. Also assert `-l` and `--mlist` output is identical (`render_list_file` over both symbol lists).
 - **Two-byte, one-byte and multi-line entries.** `.dw`; `.db`; and a 3-line record (tag + `.db` + `.db` + `.lobytes`), plus a bare-tag-line record.
-- **`.macro`-built entry.** `[K] .macro entry, x`, including a macro whose body starts with a blank line. Also a macro whose body carries the tag (`[\1] .dw \2`): an error inside it reports the **call site** line.
+- **`.macro`-built entry.** `[K] .macro entry, x`, including a macro whose body starts with a blank line. Also a macro whose body carries the tag (`[\1] .dw \2`): an error inside it reports the body line with an `in expansion of macro` note naming the call.
 - **Tagged custom pseudo-instruction** (resolver returning `CustomOutput::Bytes`, and one returning `Source`). Also: `emit_source` that contains a tag is rejected.
 - **Bases and counts.**
   - `FIRST ≠ 0`: `.table 24, 1` with tags 1…24 passes, and with 0…23 fails on entry 0.
@@ -387,7 +387,7 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
 - **Every §7 diagnostic, with its line.** Includes:
   - the first-mismatch-only rule (insert one constant → exactly one `table-tag-index`);
   - zero-byte entry;
-  - untagged bytes before the first tag (direct, and from a macro → call site);
+  - untagged bytes before the first tag (direct, and from a macro → body line plus expansion note);
   - `.org` inside a table;
   - nested, unclosed and unmatched tables;
   - a tag outside a table;
@@ -395,7 +395,7 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
   - `.table 1, 2, 3`;
   - `.table NOPE`.
 - **Run-once guarantee.** Assert each table error appears exactly once in `diagnose_source_as` output, i.e. not once per pass.
-- **Phase 3 only (enum form).** Behind plan 018, using `.enum START, STEP, NAME`:
+- **Phase 3 only (enum form).** Behind plan 019, using `.enum START, STEP, NAME`:
   - complete table passes;
   - missing member → `table-missing-member` naming the member;
   - extra entry → `table-count-enum`;
@@ -410,7 +410,7 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
 - `JMP [ptr]`, `JMP [ptr, X]` and `LDA [zp], Y` parse unchanged.
 - `[K] JMP [ptr]` gives Tag + Instruction.
 - `[K] LDA #1` at column 0 is an instruction.
-- With the companion leftover-token check: `[K] .db 1` is accepted and `[K] .db 1 junk` is rejected.
+- With plan 017's end-of-statement check: `[K] .db 1` is accepted and `[K] .db 1 junk` is rejected.
 
 **`tooling.rs` tests:**
 
@@ -447,9 +447,9 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
 
 **Phasing:**
 
-1. **Phase 1 — core.** AST, parser, `validate_tables`, `call_line`, assembler, the deferred hook, order-only and numeric forms, every non-enum diagnostic, the `DIRECTIVES` entry, docs.
+1. **Phase 1 — core.** AST, parser, `validate_tables`, assembler, the deferred hook, order-only and numeric forms, every non-enum diagnostic, the `DIRECTIVES` entry, docs.
 2. **Phase 2 — tooling.** Formatter alignment, the `tag_lexemes` helper, lint see-through, LSP hover and folding, `Diagnostics::tables`.
-3. **Phase 3 — enum form.** Depends on plan 018's `enum_info` (§5.3). It adds only the `TableSpec::KeySet` resolution and the §5.1 step 3 enum branch.
+3. **Phase 3 — enum form.** Depends on plan 019's `enum_info` (§5.3). It adds only the `TableSpec::KeySet` resolution and the §5.1 step 3 enum branch.
 
 ## 10. Risks and open questions
 
@@ -457,7 +457,6 @@ Inside a `.for`, each message gets the existing `for-iteration-suffix`. The firs
 - **Shapes the reference corpus can't express yet.**
   - Several comment-indexed lines hold **two entries on one line** (`.dw a, b ; type 5, 6`). Converting them means splitting into two tagged lines; the bytes are unchanged.
   - Some tables **overlap**: the last entry is cut short because the next table's first byte doubles as its high byte. Its size check would fail. Such a table ends `.endtable` before the partial entry, or stays comment-indexed. A "short last entry" allowance is not in v1.
-- **`call_line`** touches `Token` (about 22 construction sites) and `Line`. If the companion macro-arg-count bugfix introduces a call-site mechanism, reuse it rather than adding a second one.
 - **Run-once vs `run()` semantics.** `run()` returns `errors.last()`. `run_deferred` stops at the first error in non-collect mode to keep that equal to the first table error. `.assert` must follow the same rule.
 - **First-mismatch-only** hides later independent ordering errors in the same table. The fix-and-rebuild loop finds them, and the LSP lists all entries' status in hovers.
 - **Order-only with a base** (`.table , 1`) is unsupported (§2.2). Revisit if 1-based tables can't name a count.

@@ -244,4 +244,8 @@ pub struct Line {
     /// the statement's first token (see [`crate::lexer::Token::from_macro`]) so
     /// the assembler can flag labels defined in macros for the list file (`-l`).
     pub from_macro: bool,
+    /// The `.macro` expansion the statement came from (`0` for none); see
+    /// [`crate::diagnostic::Expansion`]. Diagnostics use it to report a
+    /// macro-expanded line in its macro body and name the calls.
+    pub expansion: u32,
 }
