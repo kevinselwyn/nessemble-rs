@@ -2023,3 +2023,37 @@ fn an_unterminated_named_enum_fails_with_the_reference_framing() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ─── Index-keyed tables (plans/020-index-keyed-tables.md) ────────────────────
+
+#[test]
+fn a_misordered_table_entry_fails_with_the_reference_framing() {
+    let src = "OP_FRAME = $04\nOP_SFX = $05\n.table\n\
+               [$00] .db 0\n[$01] .db 0\n[$02] .db 0\n[$03] .db 0\n[$04] .db 0\n[$05] .db 0\n\
+               [OP_SFX] .db 0\n.endtable\n";
+    let dir = diag_project("table-order", &[("f.asm", src)]);
+    let out = bin()
+        .current_dir(&dir)
+        .args(["f.asm", "-o", "f.bin"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Error in `f.asm` on line 10: Entry tagged `OP_SFX` ($05) is at index $06\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reference_describes_table() {
+    let out = bin()
+        .args(["reference", "directives", ".table"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        ".table / .endtable\n  check an indexed table's entries against their keys\n"
+    );
+}

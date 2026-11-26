@@ -299,6 +299,21 @@ impl Pre<'_> {
                 if self.for_depth > 0 {
                     return Err(self.diag_at(&toks[i], file_id, t!("macrodef-in-for")));
                 }
+                // A `[KEY]` tag (or anything else) already emitted for this
+                // line would prefix the definition, which emits nothing.
+                let tagged = self
+                    .out
+                    .iter()
+                    .rev()
+                    .take_while(|t| !matches!(t.tok, Tok::Endl))
+                    .any(|t| !matches!(t.tok, Tok::Indent));
+                if tagged {
+                    return Err(self.diag_at(
+                        &toks[i],
+                        file_id,
+                        t!("tag-before-block", directive = ".macrodef"),
+                    ));
+                }
                 self.capture_macro(toks, i, file_id)
             }
             "macro" => self.expand_macro(toks, i, file_id, depth, raw),
