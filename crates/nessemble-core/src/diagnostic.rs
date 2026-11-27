@@ -179,6 +179,10 @@ pub struct Expansion {
     pub call_line: u32,
     /// The expansion the call itself was written in (`0` for none).
     pub parent: u32,
+    /// Names this expansion built with `\@` (`name\@` → `name7`). A label
+    /// with one of these names is expansion-private and opens no `@local`
+    /// scope (`plans/021-local-labels.md` §2.2).
+    pub unique_names: Vec<String>,
 }
 
 /// Build a diagnostic for a statement at `line` of file `file`, which came from

@@ -653,6 +653,9 @@ symbol named `AX`.
 - Annotations bind to the **first label below them**; blank lines and prose
   comments in between are skipped, so a summary can sit above the tags. A line
   of code in between binds them to nothing, and is reported.
+- Annotations bind only to **global** labels. One directly above an
+  [`@local` label](syntax.md#local) is reported, since a local is part of its
+  routine rather than a routine of its own.
 
 **The declaration is checked.** `nessemble lint` compares each declared clobber
 list against what the routine actually writes:
@@ -667,7 +670,9 @@ src/prg/sprite.asm
   Memory slots are documentation too.
 - Only routines that **declared** a clobber list are checked, so a project adopts
   this one routine at a time.
-- A routine's body runs from its label to the next block-opening label. A call to
+- A routine's body runs from its label to the next block-opening label. An
+  `@local` label never opens a block, so its lines belong to the routine above
+  it, and a `JMP` to one of the routine's own locals stays inside the body. A call to
   another **annotated** routine contributes that routine's declared clobbers; a
   call to an unannotated one, a macro invocation, an indirect jump, or a data run
   inside the body makes the body "not fully understood", which silences

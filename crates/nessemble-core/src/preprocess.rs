@@ -531,9 +531,13 @@ impl Pre<'_> {
             call_file: self.shown_file(call, file_id),
             call_line: call.line,
             parent: call.expansion,
+            unique_names: Vec::new(),
         });
         let expansion = self.expansions.len() as u32;
-        let expanded = substitute(&def.body, &args, unique, file_id, expansion);
+        let (expanded, unique_names) = substitute(&def.body, &args, unique, file_id, expansion);
+        if let Some(e) = self.expansions.last_mut() {
+            e.unique_names = unique_names;
+        }
         // Re-process the expansion so nested directives resolve too.
         self.process_tokens(&expanded, file_id, depth, raw)?;
         Ok(end)
@@ -609,13 +613,29 @@ fn split_args(toks: &[Token]) -> Vec<Vec<Token>> {
 /// token is stamped with `expansion` (the id of this expansion). A substituted
 /// token — an argument, or the parentheses around it — takes the span of the
 /// `\N` it replaces, so a diagnostic quotes the body as written.
+///
+/// The body's own `@local` definitions (`@x:`, `@x\i:`) — and every body token
+/// spelled like one — are first rewritten to keys private to this expansion
+/// (`\@7@x`, see [`crate::locals`]); argument tokens are never rewritten, so
+/// an `@x` passed in names the caller's label. Also returns the names built
+/// with `\@`, which open no local-label scope.
 fn substitute(
     body: &[Token],
     args: &[Vec<Token>],
     unique: u32,
     file_id: usize,
     expansion: u32,
-) -> Vec<Token> {
+) -> (Vec<Token>, Vec<String>) {
+    let defs = crate::locals::local_defs(body);
+    let mut owned;
+    let body = if defs.is_empty() {
+        body
+    } else {
+        owned = body.to_vec();
+        crate::locals::privatize(&mut owned, unique, &defs);
+        &owned[..]
+    };
+    let mut unique_names = Vec::new();
     let mut out = Vec::new();
     let mk = |tok: Tok, t: &Token, span: Span| Token {
         tok,
@@ -649,7 +669,9 @@ fn substitute(
                     end: body[k + 1].span.end,
                     ..t.span
                 };
-                out.push(mk(Tok::Text(format!("{name}{unique}")), t, span));
+                let built = format!("{name}{unique}");
+                unique_names.push(built.clone());
+                out.push(mk(Tok::Text(built), t, span));
                 k += 1; // consume the `\@`
             }
             Tok::NumberArgu => out.push(mk(Tok::Number(unique as i64), t, t.span)),
@@ -657,5 +679,45 @@ fn substitute(
         }
         k += 1;
     }
-    out
+    (out, unique_names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(src: &str) -> (Vec<String>, Vec<Expansion>) {
+        let pre = preprocess(src, PathBuf::from("."), "t.asm", None).expect("preprocesses");
+        let texts = pre
+            .tokens
+            .iter()
+            .filter_map(|t| match &t.tok {
+                Tok::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        (texts, pre.expansions)
+    }
+
+    #[test]
+    fn privatize_rewrites_only_the_bodys_own_locals() {
+        let (t, _) = texts(
+            ".macrodef mm\n@a:\n    BNE @a\n    BNE @b\n    .dw \\1\n.endm\n    .macro mm, @a\n",
+        );
+        assert_eq!(t, vec!["\\@1@a", "BNE", "\\@1@a", "BNE", "@b", "@a"]);
+    }
+
+    #[test]
+    fn nested_expansions_record_their_parent_and_unique_names() {
+        let (t, ex) = texts(concat!(
+            ".macrodef inner\n@x:\n.endm\n",
+            ".macrodef outer\nlb\\@:\n    .macro inner\n.endm\n",
+            "    .macro outer\n",
+        ));
+        assert_eq!(t, vec!["lb1", "\\@2@x"]);
+        assert_eq!(ex.len(), 2);
+        assert_eq!((ex[0].parent, ex[1].parent), (0, 1));
+        assert_eq!(ex[0].unique_names, vec!["lb1".to_string()]);
+        assert_eq!(ex[1].unique_names, Vec::<String>::new());
+    }
 }

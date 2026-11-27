@@ -177,6 +177,106 @@ A label that names a subroutine can carry its calling convention — the registe
 it takes, returns, and destroys — in comments the tooling reads. See
 [Documenting routines](usage.md#documenting-routines).
 
+### Local
+
+A label whose name starts with `@` is **local** to the nearest named label above
+it in the same file. Each routine can reuse names like `@loop` and `@done`
+without them colliding:
+
+```nessemble
+@NAME:
+```
+
+* `NAME` - Local label name: one or more letters, digits or `_`, required.
+
+Inside its scope — from the named label that opens it down to the next one — a
+local is written `@NAME`, and may be referenced before or after its definition.
+From anywhere else, write the **qualified** name `ROUTINE@NAME`.
+
+Example:
+
+```nessemble
+clear_x:
+    LDX #$08
+@loop:
+    DEX
+    BNE @loop
+    RTS
+clear_y:
+    LDY #$08
+@loop:
+    DEY
+    BNE @loop
+    JMP clear_x@loop
+```
+
+Output:
+
+```text
+00000000  a2 08 ca d0 fd 60 a0 08  88 d0 fd 4c 02 00        |.....`.....L..|
+0000000e
+```
+
+Try it:
+
+<nessemble-assembler>
+clear_x:
+    LDX #$08
+@loop:
+    DEX
+    BNE @loop
+    RTS
+clear_y:
+    LDY #$08
+@loop:
+    DEY
+    BNE @loop
+    JMP clear_x@loop
+</nessemble-assembler>
+
+The rules:
+
+- **What opens a scope.** Any named label that is assembled opens one, including
+  a pasted `row\i:` in a [`.for`](#loops) body. A label inside a false
+  [`.if`](#if) opens nothing, and neither do anonymous labels (`:`), `.rs`
+  reservations, constants, `.org`, `.phase` or `.segment`. A label a macro builds
+  with `\@` (`name\@:`) is private to the expansion and opens no scope either,
+  so use `name\@:` for a macro's internal labels.
+- **Locals are labels only.** `@len = 4`, a bare `@flag`, and `@buf .rs 1` are
+  errors: give a constant or variable a global name. A qualified name can only be
+  referenced; `p1@x:` is an error that says to write `@x:` under `p1`.
+- **Defining a local twice in one scope is an error** — not the
+  [`duplicate-symbol`](usage.md#configurable-warnings) warning a global gets,
+  because a local collision is always a mistake.
+- **Includes.** An [`.include`](#include)d file starts with no scope, so a local
+  before its first named label is an error, and the includer's scope resumes
+  after the `.include`. Locals never cross files; reference one in another file
+  by its qualified name.
+- **Macros.** A local a [`.macrodef`](#macrodef) body defines itself is private
+  to each expansion, so a macro with an internal `@spin` loop can be used twice
+  in one routine. A body reference to a local it does not define, such as
+  `BEQ @done`, resolves in the caller's scope. To hand a macro the caller's
+  local, pass it as an argument (`.macro jump_to, @done`). Private locals are
+  listed by `-l` only with [`--mlist`](usage.md#--mlist), as `parent@name\@N`.
+- **`.for` bodies.** A plain `@x:` in a body would be defined once per iteration
+  in the same scope, so it is rejected — write `@x\i:` for one label per
+  iteration (`@x0`, `@x1`, …). The exception is a body that defines a pasted
+  label first (`row\i:`): each iteration then has its own scope, and a plain
+  `@x:` after it is fine.
+- **Everything that names a symbol** resolves locals the same way: operands,
+  data, `.for` bounds, [`.ifdef`](#ifdef), `BANK(@x)`, `->` chains, and `.table`
+  keys.
+
+**Why not anonymous labels?** `:+` and `:-` count labels, so inserting a label
+between a branch and its target silently retargets it. A local has a name, so it
+can't be miscounted.
+
+**Migrating from global `@` labels.** Before local labels, an `@name` label was
+an ordinary global, and two routines' `@loop`s silently cross-linked. Code that
+relied on reaching an `@` label from another routine now fails with an error
+that suggests the qualified name: `` `@x` is not defined in `p2`; did you mean
+`p1@x`? ``. A constant spelled with `@` needs a global name.
+
 ### Temporary
 
 Temporary/un-named labels may also be declared by placing only a colon.

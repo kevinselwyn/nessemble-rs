@@ -498,16 +498,20 @@ fn a_label_and_a_constant_of_the_same_name_warn() {
 }
 
 #[test]
-fn at_prefixed_labels_that_cross_link_warn() {
-    let (a, w) = one_warning("p1:\n@loc:\n    BNE @loc\np2:\n@loc:\n    BNE @loc\n");
-    assert_eq!(a.rom, vec![0xD0, 0x00, 0xD0, 0xFE]);
-    assert_eq!(
-        (w.line, w.message.as_str()),
-        (
-            5,
-            "`@loc` is already defined at t.asm line 2 (as a label at $0000); this definition replaces it"
-        )
-    );
+fn at_prefixed_labels_are_local_and_do_not_warn() {
+    // Before scoped locals (`plans/021-local-labels.md`) the second `@loc`
+    // replaced the first and both branches cross-linked; each is now local to
+    // its routine, and local keys never raise `duplicate-symbol`.
+    let a = nessemble_core::assemble(
+        "p1:\n@loc:\n    BNE @loc\np2:\n@loc:\n    BNE @loc\n",
+        &nessemble_core::Options {
+            nes: false,
+            ..nessemble_core::Options::default()
+        },
+    )
+    .expect("assembles");
+    assert_eq!(a.rom, vec![0xD0, 0xFE, 0xD0, 0xFE]);
+    assert!(a.warnings.is_empty(), "{:?}", a.warnings);
 }
 
 #[test]

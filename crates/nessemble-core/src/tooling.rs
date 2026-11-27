@@ -37,6 +37,8 @@ pub enum LexKind {
     Punct,
 }
 
+pub use crate::locals::{is_local_name, split_qualified};
+
 /// A classified span of the source, given by byte offsets `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lexeme {
@@ -137,6 +139,15 @@ pub fn lex(source: &str) -> Vec<Lexeme> {
                 i += 1;
                 while i < n && is_ident(bytes[i]) {
                     i += 1;
+                }
+                // A qualified local-label name (`routine@name`) is one
+                // identifier, as in the assembler's lexer
+                // (`plans/021-local-labels.md` §3.8).
+                if b != b'@' && i + 1 < n && bytes[i] == b'@' && is_ident(bytes[i + 1]) {
+                    i += 1;
+                    while i < n && is_ident(bytes[i]) {
+                        i += 1;
+                    }
                 }
                 LexKind::Ident
             }
@@ -2073,6 +2084,9 @@ pub enum SignatureProblemKind {
     Unbound,
     /// The same slot is named twice in one role of one signature.
     DuplicateSlot,
+    /// The annotation is directly above an `@local` label, which is never a
+    /// routine (`plans/021-local-labels.md` §3.8).
+    LocalTarget,
 }
 
 /// An annotation that parsed but does not contribute to a signature.
@@ -2081,6 +2095,9 @@ pub struct SignatureProblem {
     pub kind: SignatureProblemKind,
     /// The directive token, or the repeated slot, for the message to quote.
     pub subject: String,
+    /// The local label a [`SignatureProblemKind::LocalTarget`] annotation is
+    /// above (empty for any other kind).
+    pub target: String,
     /// 1-based line/column of the annotation.
     pub line: u32,
     pub column: u32,
@@ -2122,14 +2139,28 @@ fn resolve_signature_lines(
         .filter(|d| d.own_line && d.name.is_signature_tag())
     {
         let tag_line = directive.line as usize - 1;
-        let Some((label_idx, name)) = binding_target(source, lines, tag_line) else {
-            problems.push(SignatureProblem {
-                kind: SignatureProblemKind::Unbound,
-                subject: directive.name.canonical().to_string(),
-                line: directive.line,
-                column: directive.column,
-            });
-            continue;
+        let (label_idx, name) = match binding_target(source, lines, tag_line) {
+            Binding::Label(idx, name) => (idx, name),
+            Binding::Local(target) => {
+                problems.push(SignatureProblem {
+                    kind: SignatureProblemKind::LocalTarget,
+                    subject: directive.name.canonical().to_string(),
+                    target: target.to_string(),
+                    line: directive.line,
+                    column: directive.column,
+                });
+                continue;
+            }
+            Binding::None => {
+                problems.push(SignatureProblem {
+                    kind: SignatureProblemKind::Unbound,
+                    subject: directive.name.canonical().to_string(),
+                    target: String::new(),
+                    line: directive.line,
+                    column: directive.column,
+                });
+                continue;
+            }
         };
 
         let existing = by_label
@@ -2166,6 +2197,7 @@ fn resolve_signature_lines(
                         problems.push(SignatureProblem {
                             kind: SignatureProblemKind::DuplicateSlot,
                             subject: slot.to_string(),
+                            target: String::new(),
                             line: directive.line,
                             column: directive.column,
                         });
@@ -2197,6 +2229,7 @@ fn push_slot(
         problems.push(SignatureProblem {
             kind: SignatureProblemKind::DuplicateSlot,
             subject: slot.to_string(),
+            target: String::new(),
             line: directive.line,
             column: directive.column,
         });
@@ -2215,17 +2248,49 @@ fn push_slot(
 /// annotates a routine tucked directly under the previous one's `RTS` plainly
 /// meant that label. Whether a label *ought* to be documented is a separate
 /// question, asked only by `require-routine-doc`.
-fn binding_target<'a>(
-    source: &'a str,
-    lines: &[Vec<Lexeme>],
-    tag_line: usize,
-) -> Option<(usize, &'a str)> {
-    lines
+fn binding_target<'a>(source: &'a str, lines: &[Vec<Lexeme>], tag_line: usize) -> Binding<'a> {
+    let Some((idx, line)) = lines
         .iter()
         .enumerate()
         .skip(tag_line + 1)
         .find(|(_, line)| !is_blank(line) && !is_comment_only(line))
-        .and_then(|(idx, line)| block_label(source, line).map(|(name, _)| (idx, name)))
+    else {
+        return Binding::None;
+    };
+    if let Some((name, _)) = block_label(source, line) {
+        return Binding::Label(idx, name);
+    }
+    match local_label(source, line) {
+        Some(name) => Binding::Local(name),
+        None => Binding::None,
+    }
+}
+
+/// What an annotation binds to (see [`binding_target`]).
+enum Binding<'a> {
+    /// A global label: its 0-based line and name.
+    Label(usize, &'a str),
+    /// An `@local` label, which annotations never bind to.
+    Local(&'a str),
+    None,
+}
+
+/// If `line` is exactly an `@local` label definition (`@x:`, or a pasted
+/// `@x\i:`), return its name as written.
+fn local_label<'a>(source: &'a str, line: &[Lexeme]) -> Option<&'a str> {
+    let sig: Vec<&Lexeme> = line
+        .iter()
+        .filter(|l| l.kind != LexKind::Whitespace && l.kind != LexKind::Comment)
+        .collect();
+    if sig.first().is_none_or(|l| l.kind != LexKind::Ident) {
+        return None;
+    }
+    let n = name_lexemes(source, &sig);
+    if sig.len() != n + 1 || !is_punct(source, sig[n], ":") {
+        return None;
+    }
+    let name = &source[sig[0].start..sig[n - 1].end];
+    name.starts_with('@').then_some(name)
 }
 
 /// The registers the routine named `name` writes but does not declare — what
@@ -2758,6 +2823,11 @@ fn rule_invalid_routine_signature(ctx: &LintCtx, _opts: &LintOptions, out: &mut 
             SignatureProblemKind::DuplicateSlot => {
                 format!("routine annotation names `{subject}` twice")
             }
+            SignatureProblemKind::LocalTarget => format!(
+                "routine annotation `{subject}` is followed by local label `{}`; \
+                 annotations bind only to global labels",
+                problem.target
+            ),
         };
         out.push(Finding {
             rule: RuleId::InvalidRoutineSignature,
@@ -2955,7 +3025,22 @@ fn routine_effects_inner(ctx: &LintCtx, name: &str, visiting: &mut Vec<String>) 
     visiting.push(name.to_string());
 
     let mut effects = BodyEffects::default();
-    for idx in body_lines(ctx, name) {
+    let body = body_lines(ctx, name);
+    // The routine's own `@local` labels: a jump to one stays in the body.
+    let locals: Vec<&str> = body
+        .clone()
+        .filter_map(|idx| local_label(ctx.source, &ctx.lines[idx]))
+        .collect();
+    // `@x` names `@x:`; `@x3` names a pasted `@x\i:`.
+    let is_own_local = |target: &str| {
+        locals.iter().any(|l| match l.split_once('\\') {
+            Some((base, _)) => target
+                .strip_prefix(base)
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())),
+            None => *l == target,
+        })
+    };
+    for idx in body {
         let line = &ctx.lines[idx];
         let sig: Vec<&Lexeme> = line
             .iter()
@@ -2966,8 +3051,9 @@ fn routine_effects_inner(ctx: &LintCtx, name: &str, visiting: &mut Vec<String>) 
         let Some(first) = sig.first() else {
             continue;
         };
-        // A label inside the body (an internal branch target) is transparent.
-        if block_label(ctx.source, line).is_some() {
+        // A label inside the body (an internal branch target) is transparent,
+        // and so is an `@local` label.
+        if block_label(ctx.source, line).is_some() || local_label(ctx.source, line).is_some() {
             continue;
         }
         match first.kind {
@@ -2986,6 +3072,18 @@ fn routine_effects_inner(ctx: &LintCtx, name: &str, visiting: &mut Vec<String>) 
                 }
                 let operand = operand_text(ctx.source, sig);
                 if mnemonic.eq_ignore_ascii_case("jsr") || mnemonic.eq_ignore_ascii_case("jmp") {
+                    let target = operand.trim();
+                    if is_own_local(target) {
+                        // A jump within the routine: its writes are the
+                        // body's own, already counted.
+                        continue;
+                    }
+                    if target.contains('@') {
+                        // Another routine's local (or one this routine does
+                        // not define): not a routine with a signature.
+                        effects.unknown = true;
+                        continue;
+                    }
                     apply_call(ctx, &operand, visiting, &mut effects);
                     continue;
                 }
@@ -3194,9 +3292,10 @@ fn block_label<'a>(source: &'a str, line: &[Lexeme]) -> Option<(&'a str, u32)> {
     }
     let name = &source[sig[0].start..sig[n - 1].end];
     // Match the "document every code block" convention: a real label name starts
-    // with an ASCII letter or `_`, so `@local` temp labels read as anonymous.
+    // with an ASCII letter or `_`, so `@local` labels never open a block (a
+    // qualified `p1@x:` cannot be defined at all).
     let first = name.as_bytes().first().copied().unwrap_or(0);
-    if !(first.is_ascii_alphabetic() || first == b'_') {
+    if !(first.is_ascii_alphabetic() || first == b'_') || name.contains('@') {
         return None;
     }
     let line_start = line.first().map_or(sig[0].start, |l| l.start);
@@ -5345,6 +5444,97 @@ data:
             findings.is_empty(),
             "fall-through is under-approximated: {findings:?}"
         );
+    }
+
+    #[test]
+    fn lex_reads_a_qualified_local_as_one_identifier() {
+        let src = "  JMP p1@x";
+        let idents: Vec<&str> = lex(src)
+            .iter()
+            .filter(|l| l.kind == LexKind::Ident)
+            .map(|l| &src[l.start..l.end])
+            .collect();
+        assert_eq!(idents, vec!["JMP", "p1@x"]);
+        let src = "@x@y";
+        let idents: Vec<&str> = lex(src)
+            .iter()
+            .filter(|l| l.kind == LexKind::Ident)
+            .map(|l| &src[l.start..l.end])
+            .collect();
+        assert_eq!(idents, vec!["@x", "@y"]);
+    }
+
+    #[test]
+    fn format_handles_local_labels() {
+        let src = "p1:\n  @loop:\n    DEX\n    BNE @loop\n    JMP p2@x\n";
+        let out = format(src);
+        assert_eq!(out, "p1:\n@loop:\n    DEX\n    BNE @loop\n    JMP p2@x\n");
+        assert_eq!(format(&out), out, "idempotent");
+    }
+
+    #[test]
+    fn a_local_after_a_blank_line_is_not_a_block() {
+        let src = "p1:\n    NOP\n\n@x:\n    RTS\n";
+        let lines = split_lines(&lex(src));
+        assert!(block_label(src, &lines[3]).is_none());
+        // The writes after `@x:` belong to `p1`.
+        let findings = lint_routines(
+            "; @nessemble-clobbers A\n\
+             p1:\n\
+             \x20   LDA #$00\n\
+             \n\
+             @x:\n\
+             \x20   LDX #$10\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::UndeclaredClobber]);
+        assert!(findings[0].message.contains("writes X"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_jump_to_the_routines_own_local_is_transparent() {
+        // Fully understood, so the over-declared `Y` is reported.
+        let findings = lint_routines(
+            "; @nessemble-clobbers A, Y\n\
+             p1:\n\
+             @top:\n\
+             \x20   LDA #$00\n\
+             \x20   JMP @top\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::OverdeclaredClobber]);
+        // Another routine's local is an unknown, so nothing is over-declared.
+        let findings = lint_routines(
+            "; @nessemble-clobbers A, Y\n\
+             p1:\n\
+             \x20   LDA #$00\n\
+             \x20   JMP p2@top\n",
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_call_to_a_qualified_local_does_not_call_its_parent() {
+        let src = "\n\
+                   main:\n\
+                   \x20   JSR helper@inner\n\
+                   \x20   RTS\n\
+                   \n\
+                   helper:\n\
+                   @inner:\n\
+                   \x20   RTS\n";
+        assert_eq!(lint_routines_with_doc_rule(src), [] as [Finding; 0]);
+    }
+
+    #[test]
+    fn an_annotation_above_a_local_label_is_reported() {
+        let findings = lint_routines("p1:\n; @nessemble-clobbers A\n@x:\n    RTS\n");
+        assert_eq!(rules_of(&findings), vec![RuleId::InvalidRoutineSignature]);
+        assert_eq!(
+            findings[0].message,
+            "routine annotation `@nessemble-clobbers` is followed by local label `@x`; \
+             annotations bind only to global labels"
+        );
+        assert_eq!(findings[0].line, 2);
     }
 
     #[test]

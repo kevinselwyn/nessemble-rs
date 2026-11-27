@@ -1,9 +1,10 @@
 # nessemble-rs: A Plan for Scoped `@local` Labels
 
-> Status: **Proposed.** The points marked *decided* were settled with the
-> maintainer and are taken as given. Wherever this plan refines a *proposed*
-> point, it says so and gives the reason. Open items are in §8. Builds on the macro
-> expansion tracking shipped by [plan 017](017-assembler-diagnostics.md).
+> Status: **Implemented** (both phases: assembler, formatter and linter; then
+> the language server). The *proposed* points and refinements shipped as
+> written; "As built" at the end lists where the implementation differs in
+> detail. Builds on the macro expansion tracking shipped by
+> [plan 017](017-assembler-diagnostics.md).
 
 ---
 
@@ -354,3 +355,58 @@ Same harness as `for_loops.rs`: `bytes`/`error`/`sym`, plus temporary directorie
 
 1. The changeset is `minor`, marked as a behaviour change (R1).
 2. Labels generated with `\@` do not open a scope; this reverses that part of the brief's decided rule (§2.2, R2).
+
+---
+
+## As built
+
+Shipped as §3 describes: a new `locals` module in `nessemble-core` (name
+classification, `local_defs`, `privatize`), the `ident@ident` rule in both
+lexers, the definition checks in `parse_stmt`/`parse_pasted_def` and the
+per-frame flag in `validate_loops`, privatization in `preprocess::substitute`
+and `exec_emitted_source`, and `resolve_def`/`resolve_ref` plus per-file
+`scopes` in the assembler. The LSP's scope logic is its own `locals` module.
+
+Deviations and findings:
+
+- **`\@` label detection.** Rather than a marker on the token, each
+  `Expansion` records the names it built with `\@` (`unique_names`); a label
+  opens no scope when its line's expansion built its name. This keeps
+  `Token` unchanged, as §3.1 wanted, and is exact (a literal `foo7:` in a body
+  is not mistaken for `foo\@:`).
+- **Emitted-source ids.** The key is (enclosing emitted id, file, line,
+  expansion, index of the directive in the enclosing emitted source) — the
+  expansion is added so a custom directive inside a macro expanded twice gets
+  two ids. Ids are numbered after the `.macro` expansion ids, so the two kinds
+  of private key never collide.
+- **One extra message**, `local-duplicate-emitted`, for an emitted source that
+  defines the same `@x` twice (the macro wording would name a macro that does
+  not exist).
+- **Same-site exemption.** A local seen again at the same site (a file included
+  twice) is exempt from `local-duplicate` whatever its value; the global label
+  that opened the scope already gets plan 017's warning.
+- **Pass-2 reference errors only.** A reference to `@x` with no scope reports
+  `local-no-scope` on pass 2 (definitions on pass 1), as §5 says; `.ifdef @x`
+  with no scope reports it too and does not hold.
+- **Lint.** `SignatureProblem` gained a `target` field (the local's name) for
+  the `LocalTarget` message. A `JMP`/`JSR` to the routine's own local — `@x`,
+  or `@x3` for a pasted `@x\i:` — is transparent; any other `@`-name target is
+  an unknown. `block_label` also refuses a name containing `@`, so an (invalid)
+  `p1@x:` never opens a block.
+- **LSP.** Locals in the outline use `SymbolKind::KEY` with detail "local
+  label", and a parent's range is widened to cover its children. A global
+  label written inside a `.macrodef` body opens no textual scope (it exists
+  only when expanded). Hover on a macro-private local says so instead of
+  showing a value. Rename of a qualified `q@x` renames the local in `q`'s
+  scope; the new name must be a local (`@y`).
+- **Docs link.** The new `### Local` section links `.for` as `#loops`, its real
+  anchor.
+- **Tests.** `crates/nessemble-core/tests/local_labels.rs` holds §6.1 and the
+  §6.4 `unaffected_*` cases, whose bytes were checked against a `main` build
+  (the anonymous-label case is `d0 ff f0 00`). Plan 017's
+  `at_prefixed_labels_that_cross_link_warn` became
+  `at_prefixed_labels_are_local_and_do_not_warn`. Unit tests sit in
+  `lexer.rs`, `parse.rs`, `preprocess.rs`, `locals.rs`, `lib.rs` and
+  `tooling.rs`; LSP tests in `nessemble-lsp`; CLI tests in `cli.rs`. The corpus
+  goldens pass unchanged. The reference-corpus ROM-hash check (§6.4) is the
+  maintainer's to run before merge.

@@ -356,6 +356,10 @@ separate file:
   in a `.macro` body. Like a macro-defined label, one from emitted source is
   hidden from the `-l` list file unless [`--mlist`](usage.md#--mlist) is
   given.
+- **An [`@local` label](syntax.md#local) the emitted source defines is private
+  to that invocation**, like one a macro body defines, so a script invoked twice
+  in one routine does not collide with itself. A global label it defines opens a
+  scope in the calling file, as any named label does.
 - **Diagnostics, spans, and coverage are attributed to the directive's own
   line**, not to a position inside the emitted text — there is no file for an
   editor to open at "line 3 of whatever `.frames` returned", so a parse error
