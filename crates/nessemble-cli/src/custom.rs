@@ -119,6 +119,25 @@ impl Resolver {
         Ok(outcome.output)
     }
 
+    /// Answer from the cache only: a hit returns its bytes; a miss returns
+    /// [`CustomOutput::Unmodeled`]. Never reads, compiles, or runs a script.
+    #[cfg(feature = "lsp")]
+    fn cached(
+        &self,
+        name: &str,
+        ints: &[i64],
+        texts: &[String],
+        base_dir: &Path,
+        root: Option<&Path>,
+    ) -> Result<CustomOutput, String> {
+        let (path, _) = self.locate(name, base_dir)?;
+        let hit = self.cache.as_ref().and_then(|cache| {
+            let key = cache::Key::new(name, ints, texts, base_dir, root, &path)?;
+            cache.get(&key)
+        });
+        Ok(hit.map_or(CustomOutput::Unmodeled, CustomOutput::Bytes))
+    }
+
     /// Append a `--time-scripts` entry, when timing was requested at all.
     /// `start` is only `Some` when `self.timings` is, so the two always agree.
     fn record_timing(&self, name: &str, start: Option<Instant>, cache_hit: bool) {
@@ -246,6 +265,19 @@ pub fn build_resolver(
     let resolver = make_resolver(pseudo_file, caching, max_operations, None);
     Box::new(move |name, ints, texts, base_dir, root| {
         resolver.resolve(name, ints, texts, base_dir, root)
+    })
+}
+
+/// A resolver for the language server that **never runs a script**: a
+/// directive whose output is in the persistent cache (from an earlier build)
+/// resolves to those bytes, and any other mapped directive to
+/// [`CustomOutput::Unmodeled`] (`plans/023-whole-program-clobber-analysis.md`
+/// §3.6). An editor must not execute workspace code just to analyse a buffer.
+#[cfg(feature = "lsp")]
+pub fn build_cache_reader(pseudo_file: Option<&str>) -> CustomResolver {
+    let resolver = make_resolver(pseudo_file, true, None, None);
+    Box::new(move |name, ints, texts, base_dir, root| {
+        resolver.cached(name, ints, texts, base_dir, root)
     })
 }
 

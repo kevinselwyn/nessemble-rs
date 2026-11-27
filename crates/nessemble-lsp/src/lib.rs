@@ -64,11 +64,12 @@ use lsp_types::{
     Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 
+use nessemble_core::program::ProgramMap;
 use nessemble_core::tooling::{self, LexKind, RuleSeverity};
 use nessemble_core::{
     diagnose_project_with, diagnose_source_with, lenient_custom_resolver, match_nes_color,
-    parse_pseudo_mapping, Diag, ListSymbol, Options, ProjectDiagnostics, TableEntryInfo,
-    NES_PALETTE, PROJECT_ROOT_PREFIX,
+    parse_pseudo_mapping, CustomOutput, CustomResolver, Diag, ListSymbol, Options,
+    ProjectDiagnostics, TableEntryInfo, NES_PALETTE, PROJECT_ROOT_PREFIX,
 };
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
@@ -197,6 +198,31 @@ pub struct Server {
     /// (see [`Server::raw_include_targets`]). Open buffers are never cached here —
     /// they come straight from the always-current document store.
     include_cache: RefCell<HashMap<PathBuf, CachedIncludes>>,
+    /// What the embedding binary supplies (the CLI's cache-only resolver);
+    /// `None` for [`run`], which keeps the lenient resolver.
+    hooks: Option<ServerHooks>,
+    /// The last round's program-mode lint, for the code actions that read it.
+    program_lint: RefCell<Option<ProgramLintState>>,
+}
+
+/// Builds a custom pseudo-op resolver from a project's `assemble.pseudo` file.
+pub type ResolverFactory = Box<dyn Fn(Option<&Path>) -> CustomResolver + Send + Sync>;
+
+/// Behaviour the embedding binary injects into the server
+/// (`plans/023-whole-program-clobber-analysis.md` §3.6).
+pub struct ServerHooks {
+    /// Builds the resolver for custom pseudo-ops when assembling a configured
+    /// entry, given the project's `assemble.pseudo` file. It must never run a
+    /// script: the CLI's answers from the build cache and reports a miss as
+    /// [`CustomOutput::Unmodeled`].
+    pub custom_resolver: ResolverFactory,
+}
+
+/// One round's program-mode lint: the result, and each analysed file's path.
+struct ProgramLintState {
+    lint: tooling::ProgramLint,
+    /// Normalized path of each file, parallel to `lint.findings`.
+    paths: Vec<PathBuf>,
 }
 
 /// The `.include`/`.inestrn` targets extracted from a disk file, tagged with the
@@ -300,17 +326,100 @@ impl Server {
     /// the buffer's path. The findings are added on top of the assemble
     /// diagnostics already gathered for that document.
     fn with_lint(&self, mut results: DiagResults) -> DiagResults {
+        let state = self.program_lint(&results);
         for (uri, diags) in &mut results.per_file {
             if let Some(doc) = self.documents.get(uri) {
                 // The assembly lint rules (register discipline, comment
                 // directives, …) have no meaning against Rhai source; a
                 // `.rhai` buffer's own findings come from `compute_diagnostics`.
-                if doc.kind == DocKind::Asm {
-                    diags.extend(lint_diagnostics(uri, &doc.text));
+                if doc.kind != DocKind::Asm {
+                    continue;
+                }
+                let path = normalize(&uri_to_path(uri));
+                let program = state.as_ref().and_then(|s| {
+                    let i = s.paths.iter().position(|p| *p == path)?;
+                    Some(&s.lint.findings[i])
+                });
+                match program {
+                    Some(findings) => {
+                        diags.extend(findings_to_diagnostics(&path, &doc.text, findings.clone()));
+                    }
+                    None => diags.extend(lint_diagnostics(uri, &doc.text)),
                 }
             }
         }
+        *self.program_lint.borrow_mut() = state;
         results
+    }
+
+    /// Program-mode lint over this round's assembled programs: one
+    /// `lint_programs` call, with open buffers overlaid. `None` when no
+    /// configured entry assembled.
+    fn program_lint(&self, results: &DiagResults) -> Option<ProgramLintState> {
+        if results.programs.is_empty() {
+            return None;
+        }
+        let open: HashMap<PathBuf, &str> = self
+            .documents
+            .iter()
+            .filter(|(_, d)| d.kind == DocKind::Asm)
+            .map(|(u, d)| (normalize(&uri_to_path(u)), d.text.as_str()))
+            .collect();
+        let mut sources: Vec<(PathBuf, String, nessemble_rc::LintConfig)> = Vec::new();
+        for path in &results.program_paths {
+            let text = match open.get(path) {
+                Some(t) => (*t).to_string(),
+                None => std::fs::read_to_string(path).ok()?,
+            };
+            let lint = nessemble_rc::Config::resolve(path, &nessemble_rc::Choice::Discover)
+                .map(|c| c.lint_for(path))
+                .ok()?;
+            sources.push((path.clone(), text, lint));
+        }
+        let ignores: Vec<_> = sources
+            .iter()
+            .map(|(_, _, cfg)| move |n: &str| cfg.is_ignored_name(n))
+            .collect();
+        let options: Vec<tooling::LintOptions> = sources
+            .iter()
+            .zip(&ignores)
+            .map(|((_, _, cfg), ignore)| tooling::LintOptions {
+                severities: cfg.severities.clone(),
+                window: cfg.window,
+                ignore,
+            })
+            .collect();
+        let files: Vec<tooling::ProgramFile> = sources
+            .iter()
+            .zip(&options)
+            .map(|((path, text, _), options)| tooling::ProgramFile {
+                path,
+                source: text,
+                options,
+                report: open.contains_key(path),
+            })
+            .collect();
+        let lint = tooling::lint_programs(&results.programs, &files);
+        Some(ProgramLintState {
+            lint,
+            paths: sources.into_iter().map(|(p, _, _)| p).collect(),
+        })
+    }
+
+    /// The resolver for assembling a configured entry: the injected hook's
+    /// (cache only), falling back to the lenient one for names it does not
+    /// know, so a project's own pseudo-ops are never reported as unknown.
+    fn entry_resolver(&self, pseudo: Option<&Path>, known: HashSet<String>) -> CustomResolver {
+        let Some(hooks) = &self.hooks else {
+            return lenient_custom_resolver(known);
+        };
+        let inner = (hooks.custom_resolver)(pseudo);
+        Box::new(
+            move |name, ints, texts, base, root| match inner(name, ints, texts, base, root) {
+                Err(_) if known.contains(name) => Ok(CustomOutput::Unmodeled),
+                other => other,
+            },
+        )
     }
 
     /// The raw `.include`/`.inestrn` targets of `file`. An open buffer is scanned
@@ -391,22 +500,44 @@ impl Server {
         let graph = build_include_graph(candidates, &|file| {
             self.raw_include_targets(&overlay_map, file)
         });
-        let roots = graph.entry_roots_for(&changed_path);
+        // A `.nessemblerc` `entry` names the programs to assemble: those whose
+        // closure holds this file (`plans/023-whole-program-clobber-analysis.md`
+        // §3.6). Without one, the include graph's roots.
+        let config =
+            nessemble_rc::Config::resolve(&changed_path, &nessemble_rc::Choice::Discover).ok();
+        let entries: Vec<PathBuf> = config
+            .as_ref()
+            .map(|c| c.entries().iter().map(|e| normalize(e)).collect())
+            .unwrap_or_default();
+        let configured: Vec<PathBuf> = entries
+            .into_iter()
+            .filter(|e| graph.closure(e).contains(&changed_path))
+            .collect();
+        let programs = !configured.is_empty();
+        let roots = if programs {
+            configured
+        } else {
+            graph.entry_roots_for(&changed_path)
+        };
         if roots.is_empty() {
             return single_file(changed, text, &known_custom);
         }
+        let pseudo = config.as_ref().and_then(nessemble_rc::Config::pseudo);
 
         // Assemble each entry root and normalize its file table once.
         let runs: Vec<Run> = roots
             .iter()
             .map(|root| {
                 let root_text = read(root).unwrap_or_default();
+                let mut options = assemble_options(root);
+                options.record_program = programs;
+                let resolver = if programs {
+                    self.entry_resolver(pseudo.as_deref(), known_custom.clone())
+                } else {
+                    lenient_custom_resolver(known_custom.clone())
+                };
                 Run::from(diagnose_project_with(
-                    root,
-                    &root_text,
-                    &assemble_options(root),
-                    &overlay,
-                    lenient_custom_resolver(known_custom.clone()),
+                    root, &root_text, &options, &overlay, resolver,
                 ))
             })
             .collect();
@@ -445,10 +576,25 @@ impl Server {
             tables.extend(r.tables_for(&changed_norm));
         }
 
+        let mut program_paths: Vec<PathBuf> = Vec::new();
+        let mut maps: Vec<ProgramMap> = Vec::new();
+        for r in runs {
+            if let Some(program) = r.program {
+                for p in r.norm_paths {
+                    if !program_paths.contains(&p) {
+                        program_paths.push(p);
+                    }
+                }
+                maps.push(program);
+            }
+        }
+
         DiagResults {
             per_file,
             changed_symbols: symbols,
             changed_tables: tables,
+            programs: maps,
+            program_paths,
         }
     }
 
@@ -489,6 +635,7 @@ impl Server {
             per_file,
             changed_symbols: Vec::new(),
             changed_tables: DocTables::default(),
+            ..DiagResults::default()
         }
     }
 
@@ -1357,9 +1504,29 @@ impl Server {
         if !fixes.is_empty() {
             return fixes;
         }
+        // In program mode, the whole-program analysis answers both fixes.
+        let path = normalize(&uri_to_path(uri));
+        let state = self.program_lint.borrow();
+        let program = state.as_ref().and_then(|s| {
+            let i = s.paths.iter().position(|p| *p == path)?;
+            Some((s, i))
+        });
+        // A suppression that suppresses nothing: offer to remove it.
+        let findings = match program {
+            Some((s, i)) => s.lint.findings[i].clone(),
+            None => lint_findings(uri, &doc.text),
+        };
+        let fixes = unused_suppression_fixes(uri, &doc.text, range, &findings);
+        if !fixes.is_empty() {
+            return fixes;
+        }
         // The verifier found a missing register: offer to add it rather than
         // making the author retype the list.
-        let fixes = undeclared_clobber_fixes(uri, &doc.text, range);
+        let missing_for = |name: &str| match program {
+            Some((s, _)) => tooling::missing_clobbers_in(&s.lint, &path, name),
+            None => tooling::missing_clobbers(&doc.text, name),
+        };
+        let fixes = undeclared_clobber_fixes(uri, &doc.text, range, &missing_for);
         if !fixes.is_empty() {
             return fixes;
         }
@@ -1504,6 +1671,10 @@ struct DiagResults {
     per_file: HashMap<Url, Vec<Diagnostic>>,
     changed_symbols: Vec<ListSymbol>,
     changed_tables: DocTables,
+    /// The programs configured entries assembled without errors.
+    programs: Vec<ProgramMap>,
+    /// Every file of those programs, normalized.
+    program_paths: Vec<PathBuf>,
 }
 
 /// Single-file fallback: analyze just the changed buffer (no project context),
@@ -1516,6 +1687,7 @@ fn single_file(changed: &Url, text: &str, known_custom: &HashSet<String>) -> Dia
         per_file,
         changed_symbols: analysis.symbols,
         changed_tables: analysis.tables,
+        ..DiagResults::default()
     }
 }
 
@@ -1528,11 +1700,14 @@ struct Run {
     norm_paths: Vec<PathBuf>,
     symbols: Vec<ListSymbol>,
     tables: Vec<TableEntryInfo>,
+    /// What the assembly emitted, when recorded and free of errors.
+    program: Option<ProgramMap>,
 }
 
 impl From<ProjectDiagnostics> for Run {
     fn from(pd: ProjectDiagnostics) -> Self {
         let norm_paths = pd.paths.iter().map(|p| normalize(p)).collect();
+        let clean = pd.errors.is_empty();
         Run {
             errors: pd.errors,
             warnings: pd.warnings,
@@ -1540,6 +1715,7 @@ impl From<ProjectDiagnostics> for Run {
             norm_paths,
             symbols: pd.symbols,
             tables: pd.tables,
+            program: pd.program.filter(|_| clean),
         }
     }
 }
@@ -1668,10 +1844,32 @@ fn lint_diagnostics(uri: &Url, text: &str) -> Vec<Diagnostic> {
         window: lint_cfg.window,
         ignore: &ignore,
     };
-    tooling::lint(text, &opts)
+    findings_with_severities(text, tooling::lint(text, &opts), &lint_cfg.severities)
+}
+
+/// Program-mode findings for the file at `path` as LSP diagnostics, at the
+/// severities its own config gives them.
+fn findings_to_diagnostics(
+    path: &Path,
+    text: &str,
+    findings: Vec<tooling::Finding>,
+) -> Vec<Diagnostic> {
+    let severities = nessemble_rc::Config::resolve(path, &nessemble_rc::Choice::Discover)
+        .map(|c| c.lint_for(path).severities)
+        .unwrap_or_default();
+    findings_with_severities(text, findings, &severities)
+}
+
+/// Lint findings as LSP diagnostics (see [`lint_diagnostics`]).
+fn findings_with_severities(
+    text: &str,
+    findings: Vec<tooling::Finding>,
+    severities: &tooling::SeverityMap,
+) -> Vec<Diagnostic> {
+    findings
         .into_iter()
         .map(|f| {
-            let severity = lint_severity(lint_cfg.severities.get(f.rule));
+            let severity = lint_severity(severities.get(f.rule));
             // The rule writes the message (so the CLI report and the editor say
             // the same thing); it backtick-quotes the subject, which lets
             // `diagnostic_range` narrow to the offending token on the line.
@@ -3813,7 +4011,12 @@ fn deprecated_directive_fixes(uri: &Url, text: &str, range: Range) -> Vec<CodeAc
 /// The verifier already knows which register is missing; making the author
 /// retype the list is the difference between a rule people fix and a rule people
 /// switch off.
-fn undeclared_clobber_fixes(uri: &Url, text: &str, range: Range) -> Vec<CodeActionOrCommand> {
+fn undeclared_clobber_fixes(
+    uri: &Url,
+    text: &str,
+    range: Range,
+    missing_for: &dyn Fn(&str) -> Option<Vec<tooling::Slot>>,
+) -> Vec<CodeActionOrCommand> {
     let line = range.start.line + 1;
     let Some(sig) = tooling::resolve_signatures(text)
         .into_iter()
@@ -3821,7 +4024,7 @@ fn undeclared_clobber_fixes(uri: &Url, text: &str, range: Range) -> Vec<CodeActi
     else {
         return Vec::new();
     };
-    let Some(missing) = tooling::missing_clobbers(text, &sig.name) else {
+    let Some(missing) = missing_for(&sig.name) else {
         return Vec::new();
     };
     if missing.is_empty() {
@@ -3865,6 +4068,119 @@ fn undeclared_clobber_fixes(uri: &Url, text: &str, range: Range) -> Vec<CodeActi
         }),
         ..Default::default()
     })]
+}
+
+/// "Remove unused suppression" for an `unused-lint-ignore` finding on the
+/// requested line: delete the directive (and a region's `end`) when nothing it
+/// names is needed, or just the unneeded rules when others remain
+/// (`plans/023-whole-program-clobber-analysis.md` §3.6).
+fn unused_suppression_fixes(
+    uri: &Url,
+    text: &str,
+    range: Range,
+    findings: &[tooling::Finding],
+) -> Vec<CodeActionOrCommand> {
+    let line = range.start.line + 1;
+    let Some(finding) = findings
+        .iter()
+        .find(|f| f.rule == tooling::RuleId::UnusedLintIgnore && f.line == line)
+    else {
+        return Vec::new();
+    };
+    let directives = tooling::scan_directives(text);
+    let Some(directive) = directives.iter().find(|d| d.own_line && d.line == line) else {
+        return Vec::new();
+    };
+    let (named, region) = match &directive.args {
+        tooling::DirectiveArgs::Rules(rules) => (rules.clone(), false),
+        tooling::DirectiveArgs::RegionRules(tooling::RegionBound::Start, rules) => {
+            (rules.clone(), true)
+        }
+        _ => return Vec::new(),
+    };
+    // The rules the finding names (backticked rule ids in its message).
+    let unused: Vec<tooling::RuleId> = finding
+        .message
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(tooling::RuleId::from_id)
+        .collect();
+    let remaining: Vec<tooling::RuleId> = named
+        .iter()
+        .copied()
+        .filter(|r| !unused.contains(r))
+        .collect();
+
+    let delete_line = |l: u32| TextEdit {
+        range: Range::new(Position::new(l - 1, 0), Position::new(l, 0)),
+        new_text: String::new(),
+    };
+    let (title, edits) = if unused.is_empty() || remaining.is_empty() {
+        let mut edits = vec![delete_line(line)];
+        if region {
+            let end = directives.iter().find(|d| {
+                d.own_line
+                    && d.line > line
+                    && matches!(
+                        d.args,
+                        tooling::DirectiveArgs::RegionRules(tooling::RegionBound::End, _)
+                    )
+            });
+            if let Some(end) = end {
+                edits.push(delete_line(end.line));
+            }
+        }
+        ("Remove unused suppression".to_string(), edits)
+    } else {
+        let line_start = line_start_byte(text, line as usize - 1);
+        let line_text = text[line_start..].lines().next().unwrap_or("");
+        let args_start = directive.end;
+        let args_end = line_start + trailing_prose_offset(line_text, args_start - line_start);
+        let list: Vec<&str> = remaining.iter().map(|r| r.id()).collect();
+        let new_text = if region {
+            format!(" start {}", list.join(", "))
+        } else {
+            format!(" {}", list.join(", "))
+        };
+        let removed: Vec<String> = unused.iter().map(|r| format!("`{}`", r.id())).collect();
+        (
+            format!("Remove {} from the suppression", removed.join(", ")),
+            vec![TextEdit {
+                range: byte_range_to_lsp(text, args_start, args_end),
+                new_text,
+            }],
+        )
+    };
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    vec![CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })]
+}
+
+/// File-mode lint findings for the buffer at `uri` (its discovered config).
+fn lint_findings(uri: &Url, text: &str) -> Vec<tooling::Finding> {
+    let path = uri_to_path(uri);
+    let Ok(config) = nessemble_rc::Config::resolve(&path, &nessemble_rc::Choice::Discover) else {
+        return Vec::new();
+    };
+    let lint_cfg = config.lint_for(&path);
+    let ignore = |name: &str| lint_cfg.is_ignored_name(name);
+    tooling::lint(
+        text,
+        &tooling::LintOptions {
+            severities: lint_cfg.severities.clone(),
+            window: lint_cfg.window,
+            ignore: &ignore,
+        },
+    )
 }
 
 /// The byte offset, within `line_text`, where the argument text starting at
@@ -4139,8 +4455,17 @@ fn server_capabilities() -> ServerCapabilities {
 /// Returns an error if the LSP handshake fails, a message cannot be sent, or the
 /// stdio transport threads fail to join.
 pub fn run() -> LspResult<()> {
+    run_hooked(None)
+}
+
+/// [`run`], with behaviour the embedding binary injects (see [`ServerHooks`]).
+pub fn run_with(hooks: ServerHooks) -> LspResult<()> {
+    run_hooked(Some(hooks))
+}
+
+fn run_hooked(hooks: Option<ServerHooks>) -> LspResult<()> {
     let (connection, io_threads) = Connection::stdio();
-    serve(&connection)?;
+    serve(&connection, hooks)?;
     // Drop the connection before joining so the writer thread's channel closes;
     // otherwise `io_threads.join()` blocks forever waiting on a live sender.
     drop(connection);
@@ -4151,11 +4476,11 @@ pub fn run() -> LspResult<()> {
 /// Perform the initialize handshake, then process messages until shutdown,
 /// returning the final [`Server`] state. The stdio entry point discards it;
 /// tests inspect it.
-fn serve(connection: &Connection) -> LspResult<Server> {
+fn serve(connection: &Connection, hooks: Option<ServerHooks>) -> LspResult<Server> {
     let capabilities = serde_json::to_value(server_capabilities())?;
     let init_params = connection.initialize(capabilities)?;
     let workspace_roots = workspace_roots_from_init(&init_params);
-    main_loop(connection, workspace_roots)
+    main_loop(connection, workspace_roots, hooks)
 }
 
 /// Extract workspace folder roots from the `initialize` params, preferring
@@ -4186,9 +4511,14 @@ fn workspace_roots_from_init(params: &serde_json::Value) -> Vec<PathBuf> {
 
 /// The message loop: answer requests (shutdown, completion) and, for each
 /// document notification, update the store and push refreshed diagnostics.
-fn main_loop(connection: &Connection, workspace_roots: Vec<PathBuf>) -> LspResult<Server> {
+fn main_loop(
+    connection: &Connection,
+    workspace_roots: Vec<PathBuf>,
+    hooks: Option<ServerHooks>,
+) -> LspResult<Server> {
     let mut server = Server {
         workspace_roots,
+        hooks,
         ..Server::default()
     };
     for msg in &connection.receiver {
@@ -4539,7 +4869,7 @@ mod tests {
     #[test]
     fn serves_diagnostics_and_completion_over_the_lifecycle() {
         let (server_conn, client) = Connection::memory();
-        let server = std::thread::spawn(move || serve(&server_conn));
+        let server = std::thread::spawn(move || serve(&server_conn, None));
 
         // initialize → response → initialized
         client
@@ -6947,5 +7277,200 @@ mod tests {
         assert!(region(3, 7));
         assert!(region(8, 12));
         assert!(region(9, 11));
+    }
+
+    // ---- Plan 023: program-mode lint ---------------------------------------
+
+    const PROGRAM_MAIN: &str = "\
+; @nessemble-clobbers A
+caller:
+    lda #0
+    jsr helper
+    rts
+
+.include \"util.asm\"
+";
+    const PROGRAM_UTIL: &str = "\
+; @nessemble-clobbers X
+helper:
+    ldx #1
+    rts
+";
+
+    /// A workspace whose `.nessemblerc` names `main.asm` as the entry.
+    fn program_workspace(tag: &str) -> PathBuf {
+        let w = workspace(tag);
+        write(
+            &w,
+            ".nessemblerc",
+            r#"{"entry":"main.asm","lint":{"rules":{"require-block-comment":"off"}}}"#,
+        );
+        write(&w, "main.asm", PROGRAM_MAIN);
+        write(&w, "util.asm", PROGRAM_UTIL);
+        w
+    }
+
+    fn lint_messages(diags: &[Diagnostic]) -> Vec<String> {
+        diags
+            .iter()
+            .filter(|d| d.source.as_deref() == Some("nessemble-lint"))
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_configured_entry_lints_in_program_mode_like_lint_programs() {
+        let w = program_workspace("program-mode");
+        let main = w.join("main.asm");
+        let mut server = server_for(&w);
+        let pubs = did_open(&mut server, &main, PROGRAM_MAIN);
+        let d = diags_for(&pubs, &main).expect("main.asm published");
+
+        // The same analysis the CLI runs.
+        let canon = w.canonicalize().unwrap();
+        let none = |_: &Path| None;
+        let build = nessemble_core::build_program(
+            &canon.join("main.asm"),
+            PROGRAM_MAIN,
+            &Options::default(),
+            &none,
+            lenient_custom_resolver(HashSet::new()),
+        );
+        let program = build.program.expect("assembles");
+        let mut severities = tooling::SeverityMap::default();
+        severities.set(tooling::RuleId::RequireBlockComment, RuleSeverity::Off);
+        let ignore = |_: &str| false;
+        let opts = tooling::LintOptions {
+            severities,
+            window: 3,
+            ignore: &ignore,
+        };
+        let (main_path, util_path) = (canon.join("main.asm"), canon.join("util.asm"));
+        let files = [
+            tooling::ProgramFile {
+                path: &main_path,
+                source: PROGRAM_MAIN,
+                options: &opts,
+                report: true,
+            },
+            tooling::ProgramFile {
+                path: &util_path,
+                source: PROGRAM_UTIL,
+                options: &opts,
+                report: true,
+            },
+        ];
+        let expected: Vec<String> = tooling::lint_programs(&[program], &files).findings[0]
+            .iter()
+            .map(|f| f.message.clone())
+            .collect();
+        assert_eq!(lint_messages(d), expected);
+        assert!(
+            expected[0].contains("(X: `JSR helper` on line 4, whose contract clobbers X)"),
+            "{expected:?}"
+        );
+    }
+
+    #[test]
+    fn an_unsaved_edit_in_the_callee_changes_the_caller_s_finding() {
+        let w = program_workspace("program-edit");
+        let (main, util) = (w.join("main.asm"), w.join("util.asm"));
+        let mut server = server_for(&w);
+        let _ = did_open(&mut server, &main, PROGRAM_MAIN);
+        // Unsaved: the helper now declares (and writes) Y instead of X.
+        let edited = PROGRAM_UTIL
+            .replace("clobbers X", "clobbers Y")
+            .replace("ldx", "ldy");
+        let pubs = did_open(&mut server, &util, &edited);
+        let d = diags_for(&pubs, &main).expect("main.asm republished");
+        let msgs = lint_messages(d);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("writes Y but does not declare it")),
+            "{msgs:?}"
+        );
+        assert!(!msgs.iter().any(|m| m.contains("writes X")), "{msgs:?}");
+    }
+
+    #[test]
+    fn a_cache_miss_pseudo_op_in_a_routine_is_not_reported_unverifiable() {
+        let w = workspace("program-unmodelled");
+        write(
+            &w,
+            ".nessemblerc",
+            r#"{"entry":"main.asm","lint":{"rules":{"require-block-comment":"off"}}}"#,
+        );
+        let main_text = "; @nessemble-clobbers A, X\nroutine:\n    lda #1\n    .gen\n    rts\n";
+        write(&w, "main.asm", main_text);
+        let main = w.join("main.asm");
+        let mut server = Server {
+            workspace_roots: vec![w.clone()],
+            hooks: Some(ServerHooks {
+                custom_resolver: Box::new(|_| {
+                    Box::new(|_, _, _, _, _| Ok(CustomOutput::Unmodeled))
+                }),
+            }),
+            ..Default::default()
+        };
+        let pubs = did_open(&mut server, &main, main_text);
+        let msgs = lint_messages(diags_for(&pubs, &main).expect("published"));
+        // Neither unverifiable (the editor did not run it) nor over-declared
+        // (its bytes are unknown).
+        assert!(msgs.is_empty(), "{msgs:?}");
+    }
+
+    #[test]
+    fn program_mode_quick_fixes_add_a_clobber_and_remove_a_suppression() {
+        let w = program_workspace("program-fixes");
+        let main_text = format!(
+            "; @nessemble-lint-ignore-next-line overdeclared-clobber, require-block-comment\n{PROGRAM_MAIN}"
+        );
+        write(&w, "main.asm", &main_text);
+        let main = w.join("main.asm");
+        let uri = Url::from_file_path(&main).unwrap();
+        let mut server = server_for(&w);
+        let _ = did_open(&mut server, &main, &main_text);
+
+        // The label is on line 3 now: add X, which the callee's contract writes.
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(2, 0), Position::new(2, 0)));
+        let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(action.title, "Add `X` to `@nessemble-clobbers`");
+
+        // Both suppressed rules report nothing (`require-block-comment` is off,
+        // so only `overdeclared-clobber` is judged): remove just that one.
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(0, 0), Position::new(0, 0)));
+        let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(
+            action.title,
+            "Remove `overdeclared-clobber` from the suppression"
+        );
+        let edits = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+        assert_eq!(edits[&uri][0].new_text, " require-block-comment");
+    }
+
+    #[test]
+    fn remove_unused_suppression_deletes_the_directive_line() {
+        let mut server = Server::default();
+        let text = "; documented\n; @nessemble-lint-ignore-next-line require-block-comment\ndocumented:\n    rts\n";
+        open(&mut server, "file:///u.asm", text);
+        let uri = Url::parse("file:///u.asm").unwrap();
+        let actions =
+            server.code_actions(&uri, Range::new(Position::new(1, 0), Position::new(1, 0)));
+        let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(action.title, "Remove unused suppression");
+        let edit = &action.edit.as_ref().unwrap().changes.as_ref().unwrap()[&uri][0];
+        assert_eq!(
+            edit.range,
+            Range::new(Position::new(1, 0), Position::new(2, 0))
+        );
+        assert_eq!(edit.new_text, "");
     }
 }
