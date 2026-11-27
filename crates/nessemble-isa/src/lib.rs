@@ -99,6 +99,10 @@ pub const DIRECTIVES: &[(&str, &str)] = &[
     ),
     (".macro / .macrodef / .endm", "invoke / define macros"),
     (".for / .endfor", "repeat a block, unrolled"),
+    (
+        ".table / .endtable",
+        "check an indexed table's entries against their keys",
+    ),
     (".include", "include another source file"),
     (".incbin", "include a raw binary"),
     (".incpng", "include a PNG as CHR tiles"),

@@ -156,6 +156,12 @@ pub enum Pseudo {
     For(Expr, Expr),
     /// `.endfor` — end the innermost `.for` block.
     EndFor,
+    /// `.table [COUNT | ENUM][, FIRST]` — open an index-keyed table whose
+    /// `[KEY]`-tagged entries the assembler checks against their index, size
+    /// and count (`plans/020-index-keyed-tables.md`).
+    Table(Option<Expr>, Option<Expr>),
+    /// `.endtable` — close the open `.table`.
+    EndTable,
     /// `.inestrn` — mark the iNES trainer region active (the trainer file's
     /// bytes are spliced in by the preprocessor immediately after this).
     InesTrn,
@@ -254,6 +260,11 @@ pub enum Stmt {
     Constant(Name, Option<Expr>),
     Instruction(Instruction),
     Pseudo(Pseudo),
+    /// A `[KEY]` entry tag inside a `.table` (`plans/020-index-keyed-tables.md`):
+    /// the key and its source text, as written. A marker that emits nothing;
+    /// it is its own [`Line`], executed before the statement sharing its source
+    /// line, so a table entry runs from one tag to the next.
+    Tag(Expr, String),
 }
 
 /// A statement together with its 1-based source line and source-file id.

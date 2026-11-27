@@ -114,6 +114,34 @@ enum-nested-named = An `.enum` cannot be opened inside another `.enum` when eith
 enum-unterminated = `.enum { $name }` has no matching `.endenum`
 enum-member-indented = Unknown opcode `{ $mnemonic }` (an `.enum` member must start in the first column)
 
+## Tables (`.table` / `.endtable`)
+
+table-tag-index = Entry tagged `{ $key }` ({ $value }) is at index { $index }
+table-tag-index-literal = Entry tagged { $value } is at index { $index }
+table-missing-member = Table `{ $set }` is missing `{ $member }` ({ $value })
+table-count-enum = Table has { $count } entries; `{ $set }` has { $expected }
+table-count = Table has { $count } entries; `.table` expects { $expected }
+table-entry-size = Entry at index { $index } is { $size } bytes; entries in this table are { $expected }
+table-entry-empty = Entry at index { $index } emits no bytes
+table-untagged = Untagged data inside `.table`; start each entry with a `[KEY]` tag
+table-not-contiguous = `{ $set }` is not a contiguous enum
+table-first-not-member = `{ $set }` has no member with value { $value }
+table-arg-unknown = `{ $name }` is neither a constant nor a named enum
+table-arg-count = `.table` takes at most two arguments (`.table [COUNT | ENUM][, FIRST]`), but { $count } were given
+table-count-invalid = `.table` expects at least 1 entry, not { $value }
+table-empty = `.table` has no entries
+table-unterminated = `.table` has no matching `.endtable`
+endtable-unmatched = `.endtable` has no open `.table`
+table-nested = `.table` inside another `.table` (opened on line { $line })
+table-for-unbalanced = A `.table` and a `.for` body must not overlap; close the inner one first
+table-if-unbalanced = A `.table` and an `.if` block must not overlap; close the inner one first
+tag-outside-table = A `[KEY]` tag must be inside a `.table`
+tag-before-definition = A `[KEY]` tag can't prefix a label or constant definition
+tag-before-block = A `[KEY]` tag can't prefix `{ $directive }`
+tag-twice = Only one `[KEY]` tag may start a line
+tag-unclosed = Expected `]` to close the `[KEY]` tag
+table-layout = `{ $directive }` can't be used inside `.table`; it moves the location counter
+
 ## Diagnostic framing (CLI)
 
 error-line = Error in `{ $file }` on line { $line }: { $message }

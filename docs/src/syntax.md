@@ -382,6 +382,7 @@ Read more about 6502 addressing modes
 | [.endfor](#loops)      | End a [`.for`](#loops) block                                                        |
 | [.endif](#endif)       | End [`.if`](#if)/[`.ifdef`](#ifdef)/[`.ifndef`](#ifndef) statement                  |
 | [.endm](#endm)         | End [`.macrodef`](#macrodef)                                                        |
+| [.endtable](#endtable) | End a [`.table`](#table)                                                            |
 | [.enum](#enum)         | Start a block of sequential constants                                               |
 | [.fill](#fill)         | Fill with bytes                                                                     |
 | [.font](#font)         | Generate font character tile                                                        |
@@ -429,6 +430,7 @@ Read more about 6502 addressing modes
 | [.rsset](#rsset)       | Set initial value for [`.rs`](#rs) declarations                                     |
 | [.rs](#rs)             | Reserve space for variable declaration                                              |
 | [.segment](#segment)   | Set code segment                                                                    |
+| [.table](#table)       | Check an indexed table's entries against their keys                                 |
 | [.word](#dw)           | Alias for [`.dw`](#dw)                                                              |
 
 ### .ascii
@@ -842,6 +844,25 @@ Example:
 ```
 
 See the section on [Macros](#macros) for more information.
+
+### .endtable
+
+End a [`.table`](#table).
+
+Usage:
+
+```nessemble
+.endtable
+```
+
+Example:
+
+```nessemble
+.table 2
+[0] .dw on_start
+[1] .dw on_select
+.endtable
+```
 
 ### .enum
 
@@ -2109,6 +2130,155 @@ Example:
 ```
 
 > This is an alias for `.prg x`.
+
+### .table
+
+Check an indexed table: tag each entry with the key it is looked up by, and
+the assembler checks that every entry is where its key says, that every entry
+is the same size and, when told, that the table has exactly the right number of
+entries. Closed by [`.endtable`](#endtable).
+
+Usage:
+
+```nessemble
+.table [COUNT | ENUM][, FIRST]
+    [KEY] statement
+    ...
+.endtable
+```
+
+Each entry starts with a `[KEY]` tag, written first on its line. Entry *n*
+(counting from 0) must be tagged `FIRST + n`: `.table` checks the order, it
+never reorders. A tag emits nothing, so converting a table whose entries carry
+`; $NN` comments into tags gives **byte-identical output**, and the build fails
+as soon as a key and its entry stop lining up.
+
+Example:
+
+```nessemble
+.enum $00, 1, OP
+OP_YIELD
+OP_DRAW
+OP_FRAME
+.endenum
+
+opcode_table:
+    .table OP
+    [OP_YIELD]  .dw op_yield
+    [OP_DRAW]   .dw op_draw
+    [OP_FRAME]  .dw op_frame
+    .endtable
+
+op_yield:
+    RTS
+op_draw:
+    RTS
+op_frame:
+    RTS
+```
+
+Output:
+
+```text
+00000000  06 00 07 00 08 00 60 60  60                       |......```|
+00000009
+```
+
+Try it (swap two entries to see the error):
+
+<nessemble-assembler>
+.enum $00, 1, OP
+OP_YIELD
+OP_DRAW
+OP_FRAME
+.endenum
+
+opcode_table:
+    .table OP
+    [OP_YIELD]  .dw op_yield
+    [OP_DRAW]   .dw op_draw
+    [OP_FRAME]  .dw op_frame
+    .endtable
+
+op_yield:
+    RTS
+op_draw:
+    RTS
+op_frame:
+    RTS
+</nessemble-assembler>
+
+The arguments choose what is checked:
+
+| Form                 | First key       | Entry count checked                                         |
+| -------------------- | --------------- | ----------------------------------------------------------- |
+| `.table`             | `0`             | no                                                          |
+| `.table COUNT`       | `0`             | exactly `COUNT`                                             |
+| `.table COUNT, FIRST`| `FIRST`         | exactly `COUNT`                                             |
+| `.table ENUM`        | the enum's first value | one entry per member                                 |
+| `.table ENUM, FIRST` | `FIRST`         | one entry per member from the one whose value is `FIRST` on |
+
+`COUNT` is any expression (`.table 40`, `.table OP_COUNT`). `ENUM` is the name
+of a [named `.enum`](#enum): the keys step by the enum's `STEP`, so an enum
+with a step of 2 takes the pre-doubled keys of a `.dw` table indexed with
+`ASL` / `TAX`. A missing member is reported by name. If a name is both a named
+enum and a constant, the enum wins. A table that starts at 1 states its count
+(`.table 24, 1`) or uses its enum; there is no `.table , 1`.
+
+**Keys.** A key is any expression: a constant, a number (`[$05]`), a sum
+(`[OBJ_FIRST + 2]`), a loop counter (`[\i]`) or a symbol defined further
+down. As everywhere, operators share one precedence level and group from the
+right, so `[KEY*2+1]` is `KEY*(2+1)`.
+
+**Entries.** An entry runs from its tag to the next tag (or `.endtable`), so
+one may span several lines; a tag can also stand on a line of its own:
+
+```nessemble
+.table 2
+[0] .db 1, 2
+    .lobytes handler_a
+[1]
+    .db 3, 4
+    .lobytes handler_b
+.endtable
+```
+
+A tag can prefix any statement: data, an instruction (`[K] JMP [ptr]` is a tag
+and an indirect jump), a [`.macro`](#macro) call or a custom
+pseudo-instruction, whose bytes all count toward the entry. Comments, blank
+lines, labels, constants and anything else that emits nothing may sit anywhere
+in a table; a label does not start an entry. A tag cannot prefix a label or
+constant on the same line, `.table`, `.endtable` or `.macrodef`, and a line
+starts with at most one tag.
+
+**Loops and conditionals.** A [`.for`](#loops) inside a table makes one entry
+per iteration:
+
+```nessemble
+.table 8
+.for 0, 7
+    [\i] .dw row\i
+.endfor
+.endtable
+```
+
+An [`.if`](#if) inside a table can drop entries, and the order check sees only
+the entries that were assembled. A `.table` inside a false `.if` is ignored. A
+`.table` must not straddle a `.for` body or an `.if` block.
+
+Notes:
+
+* Bytes inside a table before its first tag are an error, and so is an entry
+  that emits no bytes.
+* `.org`, `.prg`, `.chr`, `.segment` and `.inestrn` cannot be used inside a
+  table; `.phase` and `.dephase` can.
+* Only the first out-of-place entry is reported (one inserted entry shifts every
+  later one); every wrong-size entry is reported.
+* Tables don't nest, and a custom pseudo-instruction's emitted source cannot
+  contain `.table`, `.endtable` or a tag; put the tag on the line that invokes
+  it instead.
+* A table whose last entry is cut short (the next table's first byte doubles as
+  its last byte) fails the size check: end the `.table` before that entry.
 
 ## Optional Scripts
 

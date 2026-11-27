@@ -557,6 +557,7 @@ pub fn format_with(source: &str, opts: &FormatOptions) -> String {
 
     // Passes 1–3 — the opinionated structural rules.
     content = consolidate_data(&content, opts);
+    content = align_table_tags(content, opts);
     content = blank_line_after_return(content, opts);
     content = collapse_blank_lines(content, opts);
 
@@ -820,6 +821,146 @@ fn name_lexemes(source: &str, sig: &[&Lexeme]) -> usize {
     }
 }
 
+/// How many lexemes the `[KEY]` tag starting `sig[0]` spans, brackets
+/// included, or 0 when the line does not start with one
+/// (`plans/020-index-keyed-tables.md` §6). Shared by the formatter, the linter
+/// and the language server, so the three agree on what a tag is.
+#[must_use]
+pub fn tag_lexemes(source: &str, sig: &[&Lexeme]) -> usize {
+    if !sig.first().is_some_and(|l| is_punct(source, l, "[")) {
+        return 0;
+    }
+    let mut depth = 0usize;
+    for (i, l) in sig.iter().enumerate() {
+        if l.kind == LexKind::Comment {
+            return 0;
+        }
+        if is_punct(source, l, "[") {
+            depth += 1;
+        } else if is_punct(source, l, "]") {
+            depth -= 1;
+            if depth == 0 {
+                return i + 1;
+            }
+        }
+    }
+    0
+}
+
+// ── Pass 1b: `.table` tag alignment ──────────────────────────────────────────
+
+/// The first significant lexeme of `line` is the directive `name`
+/// (case-insensitively, without its dot).
+fn starts_with_directive(line: &str, name: &str) -> bool {
+    lex(line)
+        .iter()
+        .find(|l| l.kind != LexKind::Whitespace)
+        .filter(|l| l.kind == LexKind::Directive)
+        .and_then(|l| text(line, l).strip_prefix('.'))
+        .is_some_and(|d| d.eq_ignore_ascii_case(name))
+}
+
+/// A tagged line split into its normalized tag (`[KEY]`, the brackets' inner
+/// whitespace trimmed) and the statement after it (possibly empty).
+fn split_tag(line: &str) -> Option<(String, String)> {
+    let lexemes = lex(line);
+    let sig: Vec<&Lexeme> = lexemes
+        .iter()
+        .filter(|l| l.kind != LexKind::Whitespace)
+        .collect();
+    let n = tag_lexemes(line, &sig);
+    if n < 3 {
+        return None;
+    }
+    let inner = &line[sig[1].start..sig[n - 2].end];
+    let rest = sig.get(n).map_or("", |l| line[l.start..].trim_end());
+    Some((format!("[{inner}]"), rest.to_string()))
+}
+
+/// Align the statements of every `.table`'s tagged entries into one column
+/// (§6): each tagged line becomes `lead + tag + pad + rest`, where `pad`
+/// brings `rest` one space past the widest tag in that table and `lead` is what
+/// the statement would get untagged. Untagged statement lines inside the table
+/// (the continuation lines of a multi-line record) are padded to the same
+/// column; comments, blank lines, labels and constants are left alone.
+fn align_table_tags(mut lines: Vec<String>, opts: &FormatOptions) -> Vec<String> {
+    let indent = opts.indent_unit();
+    let lead_for = |stmt: &str| -> &str {
+        let first = lex(stmt)
+            .into_iter()
+            .find(|l| l.kind != LexKind::Whitespace);
+        match first.map(|l| l.kind) {
+            Some(LexKind::Ident) => indent.as_str(),
+            _ if opts.indent_directives => indent.as_str(),
+            _ => "",
+        }
+    };
+    let mut i = 0;
+    while i < lines.len() {
+        if !starts_with_directive(&lines[i], "table") {
+            i += 1;
+            continue;
+        }
+        let Some(end) = (i + 1..lines.len()).find(|&j| {
+            starts_with_directive(&lines[j], "endtable")
+                || starts_with_directive(&lines[j], "table")
+        }) else {
+            break;
+        };
+        let widest = (i + 1..end)
+            .filter_map(|k| split_tag(&lines[k]))
+            .map(|(tag, _)| tag.chars().count())
+            .max();
+        let Some(widest) = widest else {
+            i = end;
+            continue;
+        };
+        let column = " ".repeat(widest + 1);
+        // The lead for the continuation lines of an operand list carried by a
+        // trailing comma, under its first argument.
+        let mut continuation: Option<String> = None;
+        for line in &mut lines[i + 1..end] {
+            let trimmed = line.trim_start().to_string();
+            let lexemes = lex(&trimmed);
+            if let Some(lead) = continuation.take() {
+                if opts.align_continuations && !is_comment_only(&lexemes) {
+                    *line = format!("{lead}{trimmed}");
+                }
+                if ends_with_operand_comma(&trimmed, &lexemes) {
+                    continuation = Some(lead);
+                }
+                continue;
+            }
+            if is_blank(&lexemes) || is_comment_only(&lexemes) {
+                continue;
+            }
+            let (prefix, rest) = if let Some((tag, rest)) = split_tag(&trimmed) {
+                if rest.is_empty() {
+                    *line = format!("{}{tag}", lead_for(""));
+                    continue;
+                }
+                let pad = " ".repeat(widest - tag.chars().count() + 1);
+                (format!("{}{tag}{pad}", lead_for(&rest)), rest)
+            } else if is_label_or_constant(&trimmed) {
+                continue;
+            } else {
+                (format!("{}{column}", lead_for(&trimmed)), trimmed)
+            };
+            *line = format!("{prefix}{rest}");
+            let rest_lexemes = lex(&rest);
+            if ends_with_operand_comma(&rest, &rest_lexemes) {
+                let base: String = prefix
+                    .chars()
+                    .map(|c| if c == '\t' { '\t' } else { ' ' })
+                    .collect();
+                continuation = Some(format!("{base}{}", continuation_lead(&rest)));
+            }
+        }
+        i = end;
+    }
+    lines
+}
+
 // ── Pass 1: data-block consolidation ─────────────────────────────────────────
 
 /// Whether `name` is a consolidatable data directive (case-insensitively).
@@ -846,6 +987,12 @@ fn parse_data_line(line: &str) -> Option<(String, String, Vec<String>)> {
         return None;
     }
     if lexemes.iter().any(|l| l.kind == LexKind::Comment) {
+        return None;
+    }
+    // A trailing comma continues the operand list onto the next line, so this
+    // line is only the start of one statement: re-rendering it on its own would
+    // drop the comma and strand the continuation as a statement of its own.
+    if ends_with_operand_comma(line, &lexemes) {
         return None;
     }
     let indent = line[..first.start].to_string();
@@ -2814,6 +2961,8 @@ fn routine_effects_inner(ctx: &LintCtx, name: &str, visiting: &mut Vec<String>) 
             .iter()
             .filter(|l| l.kind != LexKind::Whitespace && l.kind != LexKind::Comment)
             .collect();
+        // A `.table` entry's `[KEY]` tag emits nothing: see through it.
+        let sig = &sig[tag_lexemes(ctx.source, &sig)..];
         let Some(first) = sig.first() else {
             continue;
         };
@@ -2835,7 +2984,7 @@ fn routine_effects_inner(ctx: &LintCtx, name: &str, visiting: &mut Vec<String>) 
                     effects.unknown = true;
                     continue;
                 }
-                let operand = operand_text(ctx.source, &sig);
+                let operand = operand_text(ctx.source, sig);
                 if mnemonic.eq_ignore_ascii_case("jsr") || mnemonic.eq_ignore_ascii_case("jmp") {
                     apply_call(ctx, &operand, visiting, &mut effects);
                     continue;
@@ -2966,8 +3115,19 @@ fn ends_with_index(operand: &str, index: char) -> bool {
 /// fully understood.
 fn is_transparent_directive(name: &str) -> bool {
     const TRANSPARENT: &[&str] = &[
-        ".if", ".ifdef", ".ifndef", ".else", ".elseif", ".endif", ".rs", ".rsset", ".enum",
-        ".ende", ".equ",
+        ".if",
+        ".ifdef",
+        ".ifndef",
+        ".else",
+        ".elseif",
+        ".endif",
+        ".rs",
+        ".rsset",
+        ".enum",
+        ".ende",
+        ".equ",
+        ".table",
+        ".endtable",
     ];
     TRANSPARENT
         .iter()
@@ -5596,5 +5756,158 @@ data:
         let hex = routine("$FF");
         assert_eq!(rules_of(&negative), rules_of(&hex));
         assert_eq!(rules_of(&negative), vec![RuleId::UndeclaredClobber]);
+    }
+    // -- `.table` tags (plans/020-index-keyed-tables.md §6) -----------------
+
+    #[test]
+    fn format_aligns_table_tags_to_the_widest() {
+        let src = ".table OP\n  [ OP_YIELD ] .dw op_yield\n      [OP_DRAW]   .dw op_draw\n\
+                   [OP_FRAME_LONG] .dw op_frame\n.endtable\n";
+        assert_eq!(
+            format(src),
+            ".table OP\n[OP_YIELD]      .dw op_yield\n[OP_DRAW]       .dw op_draw\n\
+             [OP_FRAME_LONG] .dw op_frame\n.endtable\n"
+        );
+    }
+
+    #[test]
+    fn format_indents_tagged_directives_with_indent_directives() {
+        let opts = FormatOptions {
+            indent_directives: true,
+            ..FormatOptions::default()
+        };
+        let src = ".table\n[0] .dw a\n[10] .dw b\n.endtable\n";
+        assert_eq!(
+            format_with(src, &opts),
+            "    .table\n    [0]  .dw a\n    [10] .dw b\n    .endtable\n"
+        );
+    }
+
+    #[test]
+    fn format_tagged_instructions_keep_their_indent() {
+        let src = ".table\n[0] JMP a\n[10] JMP b\n.endtable\n";
+        assert_eq!(
+            format(src),
+            ".table\n    [0]  JMP a\n    [10] JMP b\n.endtable\n"
+        );
+    }
+
+    #[test]
+    fn format_pads_continuation_lines_of_a_record() {
+        let src = ".table\n[0] .db 1\n.lobytes h_a\n; note\nmid:\n[10]\n  .db 2\n.endtable\n";
+        assert_eq!(
+            format(src),
+            ".table\n[0]  .db 1\n     .lobytes h_a\n; note\nmid:\n[10]\n     .db 2\n.endtable\n"
+        );
+    }
+
+    #[test]
+    fn format_aligns_an_operand_list_continued_after_a_tag() {
+        let src = ".table\n[0] .db 1,\n2\n[10] .db 3, 4\n.endtable\n";
+        let out = format(src);
+        assert_eq!(
+            out,
+            ".table\n[0]  .db 1,\n         2\n[10] .db 3, 4\n.endtable\n"
+        );
+        assert_eq!(format(&out), out);
+    }
+
+    #[test]
+    fn format_of_a_table_is_idempotent() {
+        let src =
+            ".table\n  [ OP_A ] .dw a\n[OP_LONGER]   .dw b\n  .db 1\n[\\i] LDA #1\n.endtable\n";
+        let once = format(src);
+        assert_eq!(format(&once), once);
+    }
+
+    #[test]
+    fn format_never_merges_data_across_tags() {
+        let src = ".table\n[0] .db 1\n[1] .db 2\n.endtable\n";
+        assert_eq!(format(src), ".table\n[0] .db 1\n[1] .db 2\n.endtable\n");
+    }
+
+    #[test]
+    fn tag_lexemes_counts_the_bracketed_key() {
+        let src = "[OBJ + (2)] .db 1";
+        let lexemes = lex(src);
+        let sig: Vec<&Lexeme> = lexemes
+            .iter()
+            .filter(|l| l.kind != LexKind::Whitespace)
+            .collect();
+        assert_eq!(tag_lexemes(src, &sig), 7);
+        let src = "JMP [ptr]";
+        let lexemes = lex(src);
+        let sig: Vec<&Lexeme> = lexemes
+            .iter()
+            .filter(|l| l.kind != LexKind::Whitespace)
+            .collect();
+        assert_eq!(tag_lexemes(src, &sig), 0);
+    }
+
+    #[test]
+    fn a_label_inside_a_table_still_follows_code() {
+        let src = "\n; the table\ntbl:\n.table\n[0] .db 1\nmid:\n[1] .db 2\n.endtable\n";
+        assert_eq!(lint_default(src, 3), [] as [Finding; 0]);
+    }
+
+    #[test]
+    fn routine_effects_see_through_tags() {
+        let findings = lint_routines(
+            "; @nessemble-clobbers A\n\
+             draw:\n\
+             .table\n\
+             [0] LDA #$00\n\
+             [1] LDX #$10\n\
+             .endtable\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::UndeclaredClobber]);
+        assert!(
+            findings[0].message.contains("writes X"),
+            "{:?}",
+            findings[0]
+        );
+        // A tagged `JMP` to an annotated routine is a call like any other.
+        let findings = lint_routines(
+            "; @nessemble-clobbers Y\n\
+             sub:\n\
+             \x20   LDY #0\n\
+             \x20   RTS\n\
+             \n\
+             ; @nessemble-clobbers none\n\
+             go:\n\
+             .table\n\
+             [0] JMP sub\n\
+             .endtable\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::UndeclaredClobber]);
+        assert!(
+            findings[0].message.contains("writes Y"),
+            "{:?}",
+            findings[0]
+        );
+    }
+    #[test]
+    fn format_keeps_a_data_list_continued_onto_the_next_line() {
+        // The trailing comma used to be dropped by consolidation, leaving `2, 3`
+        // as a statement of its own, which no longer assembles.
+        let src = "lbl:\n  .db 1,\n2, 3\n  .lobytes x\n";
+        let out = format(src);
+        assert_eq!(out, "lbl:\n.db 1,\n    2, 3\n.lobytes x\n");
+        assert_eq!(format(&out), out);
+        // Lines around it still consolidate, but never into it.
+        let src = ".db 0\n.db 9\n.db 1,\n  2\n.db 3\n.db 4\n";
+        assert_eq!(format(src), ".db 0, 9\n.db 1,\n    2\n.db 3, 4\n");
+    }
+
+    #[test]
+    fn format_preserves_the_bytes_of_a_continued_data_list() {
+        let src = "lbl:\n  .db 1,\n2, 3\n  .dw $1234,\n    $5678\n  .color $FF0000,\n$00FF00\n";
+        let opts = crate::Options::default();
+        let before = crate::assemble(src, &opts).expect("original assembles").rom;
+        let after = crate::assemble(&format(src), &opts)
+            .expect("formatted assembles")
+            .rom;
+        assert_eq!(before, after);
     }
 }

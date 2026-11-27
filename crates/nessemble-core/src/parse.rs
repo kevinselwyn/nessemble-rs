@@ -35,6 +35,26 @@ pub fn parse(tokens: Vec<Token>, sources: &[&str]) -> Result<Vec<Line>, ParseErr
         enum_depth: 0,
     }
     .parse_program()?;
+    let mut errors = validate_loops(&lines);
+    errors.extend(validate_tables(&lines));
+    match errors.into_iter().next() {
+        Some(e) => Err(e),
+        None => Ok(lines),
+    }
+}
+
+/// Parse a fragment of source that is not a whole program — the text a
+/// custom pseudo-op's script returns through `emit_source`. Like [`parse`],
+/// but without the `.table` pairing check, so a tag or `.table` in the
+/// fragment reaches the assembler's clearer "unsupported directive" error.
+pub fn parse_fragment(tokens: Vec<Token>, sources: &[&str]) -> Result<Vec<Line>, ParseError> {
+    let lines = Parser {
+        toks: tokens,
+        pos: 0,
+        sources,
+        enum_depth: 0,
+    }
+    .parse_program()?;
     match validate_loops(&lines).into_iter().next() {
         Some(e) => Err(e),
         None => Ok(lines),
@@ -54,7 +74,88 @@ pub fn parse_recovering(tokens: Vec<Token>, sources: &[&str]) -> (Vec<Line>, Vec
     }
     .parse_program_recovering();
     errors.extend(validate_loops(&lines));
+    errors.extend(validate_tables(&lines));
     (lines, errors)
+}
+
+/// Check the `.table` / `.endtable` structure of a parsed program in one pass
+/// (`plans/020-index-keyed-tables.md` §3.3): tables pair up and don't nest, a
+/// `[KEY]` tag is inside one, and a table neither straddles a `.for` body nor
+/// an `.if` block. Runs on the preprocessed stream, so a table may hold
+/// `.include`d lines and macro expansions.
+fn validate_tables(lines: &[Line]) -> Vec<ParseError> {
+    /// The open `.table`: where it was written and the block depths there.
+    struct Open {
+        line: u32,
+        file: u32,
+        expansion: u32,
+        for_depth: usize,
+        if_depth: usize,
+    }
+    let mut errors = Vec::new();
+    let mut open: Option<Open> = None;
+    let mut for_depth = 0usize;
+    let mut if_depth = 0usize;
+    for l in lines {
+        let err = |message: String| ParseError {
+            line: l.line,
+            file: l.file,
+            expansion: l.expansion,
+            message,
+        };
+        match &l.stmt {
+            Stmt::Pseudo(Pseudo::Table(..)) => match &open {
+                Some(outer) => errors.push(err(t!("table-nested", line = outer.line))),
+                None => {
+                    open = Some(Open {
+                        line: l.line,
+                        file: l.file,
+                        expansion: l.expansion,
+                        for_depth,
+                        if_depth,
+                    });
+                }
+            },
+            Stmt::Pseudo(Pseudo::EndTable) => match open.take() {
+                None => errors.push(err(t!("endtable-unmatched"))),
+                Some(t) => {
+                    if t.for_depth != for_depth {
+                        errors.push(err(t!("table-for-unbalanced")));
+                    } else if t.if_depth != if_depth {
+                        errors.push(err(t!("table-if-unbalanced")));
+                    }
+                }
+            },
+            Stmt::Pseudo(Pseudo::For(..)) => for_depth += 1,
+            Stmt::Pseudo(Pseudo::EndFor) => {
+                // Closing a loop the table opened inside of.
+                if open.as_ref().is_some_and(|t| t.for_depth == for_depth) {
+                    errors.push(err(t!("table-for-unbalanced")));
+                    open = None;
+                }
+                for_depth = for_depth.saturating_sub(1);
+            }
+            Stmt::Pseudo(Pseudo::If(_) | Pseudo::Ifdef(_) | Pseudo::Ifndef(_)) => if_depth += 1,
+            Stmt::Pseudo(Pseudo::Endif) => {
+                if open.as_ref().is_some_and(|t| t.if_depth == if_depth) {
+                    errors.push(err(t!("table-if-unbalanced")));
+                    open = None;
+                }
+                if_depth = if_depth.saturating_sub(1);
+            }
+            Stmt::Tag(..) if open.is_none() => errors.push(err(t!("tag-outside-table"))),
+            _ => {}
+        }
+    }
+    if let Some(t) = open {
+        errors.push(ParseError {
+            line: t.line,
+            file: t.file,
+            expansion: t.expansion,
+            message: t!("table-unterminated"),
+        });
+    }
+    errors
 }
 
 /// Check the `.for` / `.endfor` structure of a parsed program in one pass, so a
@@ -275,28 +376,8 @@ impl Parser<'_> {
                     continue;
                 }
             }
-            let line_no = self.cur_line();
-            let file_no = self.cur_file();
-            let from_macro = self.cur_from_macro();
-            let expansion = self.cur_expansion();
-            let start = self.pos;
-            if let Some(stmt) = self.parse_stmt(indented)? {
-                self.expect_end(start, &stmt)?;
-                lines.push(Line {
-                    stmt,
-                    line: line_no,
-                    file: file_no,
-                    from_macro,
-                    expansion,
-                });
-            }
-            // Consume through end-of-line.
-            while !matches!(self.peek(), Some(Tok::Endl) | None) {
-                self.pos += 1;
-            }
-            if matches!(self.peek(), Some(Tok::Endl)) {
-                self.pos += 1;
-            }
+            self.parse_line(indented, &mut lines)?;
+            self.skip_to_next_line();
         }
         Ok(lines)
     }
@@ -321,34 +402,123 @@ impl Parser<'_> {
                     continue;
                 }
             }
-            let line_no = self.cur_line();
-            let file_no = self.cur_file();
-            let from_macro = self.cur_from_macro();
-            let expansion = self.cur_expansion();
-            let start = self.pos;
-            match self.parse_stmt(indented).and_then(|stmt| match stmt {
-                Some(stmt) => self.expect_end(start, &stmt).map(|()| Some(stmt)),
-                None => Ok(None),
-            }) {
-                Ok(Some(stmt)) => lines.push(Line {
-                    stmt,
-                    line: line_no,
-                    file: file_no,
-                    from_macro,
-                    expansion,
-                }),
-                Ok(None) => {}
-                Err(e) => errors.push(e),
+            if let Err(e) = self.parse_line(indented, &mut lines) {
+                errors.push(e);
             }
             // Skip to (and past) end-of-line: the recovery point.
-            while !matches!(self.peek(), Some(Tok::Endl) | None) {
-                self.pos += 1;
-            }
-            if matches!(self.peek(), Some(Tok::Endl)) {
-                self.pos += 1;
-            }
+            self.skip_to_next_line();
         }
         (lines, errors)
+    }
+
+    /// Consume through the end of the current line.
+    fn skip_to_next_line(&mut self) {
+        while !matches!(self.peek(), Some(Tok::Endl) | None) {
+            self.pos += 1;
+        }
+        if matches!(self.peek(), Some(Tok::Endl)) {
+            self.pos += 1;
+        }
+    }
+
+    /// The (line, file, expansion) of the token at `pos`, identifying the
+    /// source line it was written on.
+    fn site_at(&self, pos: usize) -> Option<(u32, u32, u32)> {
+        self.toks.get(pos).map(|t| (t.line, t.file, t.expansion))
+    }
+
+    /// Parse one statement — with any `[KEY]` tags in front of it — pushing
+    /// each onto `lines`. A tag is its own [`Stmt::Tag`] line
+    /// (`plans/020-index-keyed-tables.md` §4.2); the statement after it, if
+    /// any, follows. A tag may stand alone, and a macro call's tag may be
+    /// followed directly by the macro body's lines, so after a tag the next
+    /// token can start a new source line, which is parsed as one.
+    fn parse_line(&mut self, mut indented: bool, lines: &mut Vec<Line>) -> Result<(), ParseError> {
+        let mut tag_site: Option<(u32, u32, u32)> = None;
+        while matches!(self.peek(), Some(Tok::OpenBrack)) {
+            let site = self.site_at(self.pos);
+            if tag_site.is_some() && tag_site == site {
+                return self.err(t!("tag-twice"));
+            }
+            let line = self.cur_line();
+            let file = self.cur_file();
+            let from_macro = self.cur_from_macro();
+            let expansion = self.cur_expansion();
+            self.pos += 1;
+            let start = self.pos;
+            let key = self.parse_expr()?;
+            let end = self.pos;
+            if !matches!(self.peek(), Some(Tok::CloseBrack)) {
+                return self.err(t!("tag-unclosed"));
+            }
+            self.pos += 1;
+            let text = self.render(start, end);
+            lines.push(Line {
+                stmt: Stmt::Tag(key, text),
+                line,
+                file,
+                from_macro,
+                expansion,
+            });
+            tag_site = site;
+            let close = self.pos - 1;
+            // A tag is followed by its statement on the same line, by nothing,
+            // or (a tagged `.macro` call) by the next line's tokens.
+            let mut next_indented = false;
+            if matches!(self.peek(), Some(Tok::Indent)) {
+                self.pos += 1;
+                next_indented = true;
+            }
+            if matches!(self.peek(), Some(Tok::Endl) | None) {
+                return Ok(());
+            }
+            indented = if self.site_at(self.pos) == self.site_at(close) {
+                // After a tag the statement is never a column-0 constant.
+                true
+            } else {
+                // A fresh line: a different tag may start it.
+                tag_site = None;
+                next_indented
+            };
+        }
+        let line_no = self.cur_line();
+        let file_no = self.cur_file();
+        let from_macro = self.cur_from_macro();
+        let expansion = self.cur_expansion();
+        let start = self.pos;
+        let stmt_site = self.site_at(start);
+        let Some(stmt) = self.parse_stmt(indented)? else {
+            return Ok(());
+        };
+        if let (Some(site), true) = (tag_site, tag_site == stmt_site) {
+            let message = match &stmt {
+                Stmt::Label(_) | Stmt::Constant(..) => Some(t!("tag-before-definition")),
+                Stmt::Pseudo(Pseudo::Table(..)) => {
+                    Some(t!("tag-before-block", directive = ".table"))
+                }
+                Stmt::Pseudo(Pseudo::EndTable) => {
+                    Some(t!("tag-before-block", directive = ".endtable"))
+                }
+                _ => None,
+            };
+            if let Some(message) = message {
+                return Err(ParseError {
+                    line: site.0,
+                    file: site.1,
+                    expansion: site.2,
+                    message,
+                });
+            }
+        }
+        self.expect_end(start, &stmt)?;
+        lines.push(Line {
+            stmt,
+            line: line_no,
+            file: file_no,
+            from_macro,
+            expansion,
+        });
+        Ok(())
     }
 
     fn parse_stmt(&mut self, indented: bool) -> Result<Option<Stmt>, ParseError> {
@@ -598,6 +768,25 @@ impl Parser<'_> {
                 }
             }
             "endfor" => Pseudo::EndFor,
+            "table" => {
+                let mut args = Vec::new();
+                if !matches!(self.peek(), Some(Tok::Endl) | None) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if !matches!(self.peek(), Some(Tok::Comma)) {
+                            break;
+                        }
+                        self.pos += 1;
+                    }
+                }
+                let count = args.len();
+                let mut it = args.into_iter();
+                match (it.next(), it.next(), it.next()) {
+                    (first, second, None) => Pseudo::Table(first, second),
+                    _ => return self.err(t!("table-arg-count", count = count)),
+                }
+            }
+            "endtable" => Pseudo::EndTable,
             "incbin" => {
                 let (file, a, b) = self.parse_inc_args("incbin")?;
                 Pseudo::Incbin(file, a, b)
@@ -1306,5 +1495,80 @@ mod tests {
             }
             other => panic!("expected .ascii, got {other:?}"),
         }
+    }
+    /// Every statement of `src`, parsed without the program-level checks.
+    fn stmts(src: &str) -> Vec<Stmt> {
+        let toks = crate::lexer::Lexer::new(src).tokenize();
+        parse_fragment(toks, &[src])
+            .expect("parses")
+            .into_iter()
+            .map(|l| l.stmt)
+            .collect()
+    }
+
+    #[test]
+    fn indirect_operands_parse_unchanged() {
+        assert_eq!(
+            operand("  JMP [ptr]\n"),
+            Operand::Indirect(Expr::Symbol("ptr".into()))
+        );
+        assert_eq!(
+            operand("  JMP [ptr, X]\n"),
+            Operand::IndirectIndexed(Expr::Symbol("ptr".into()), 'X')
+        );
+        assert_eq!(
+            operand("  LDA [zp], Y\n"),
+            Operand::IndirectIndexed(Expr::Symbol("zp".into()), 'Y')
+        );
+    }
+
+    #[test]
+    fn a_tag_is_its_own_statement_before_the_tagged_one() {
+        let s = stmts("[KK] JMP [ptr]\n");
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0], Stmt::Tag(Expr::Symbol("KK".into()), "KK".into()));
+        assert_eq!(
+            s[1],
+            Stmt::Instruction(Instruction {
+                mnemonic: "JMP".into(),
+                operand: Operand::Indirect(Expr::Symbol("ptr".into())),
+            })
+        );
+    }
+
+    #[test]
+    fn a_column_zero_statement_after_a_tag_is_an_instruction() {
+        let s = stmts("[KK] LDA #1\n");
+        assert!(matches!(&s[1], Stmt::Instruction(i) if i.mnemonic == "LDA"));
+    }
+
+    #[test]
+    fn a_tag_keeps_its_key_text_as_written() {
+        let s = stmts("    [ OBJ_FIRST+2 ]   .db 1\n");
+        assert!(matches!(&s[0], Stmt::Tag(_, text) if text == "OBJ_FIRST+2"));
+        assert_eq!(stmts("[KK]\n").len(), 1);
+    }
+
+    #[test]
+    fn a_tagged_statement_still_checks_its_end() {
+        let ok = ".table\n[KK] .db 1\n.endtable\n";
+        assert!(parse(crate::lexer::Lexer::new(ok).tokenize(), &[ok]).is_ok());
+        let bad = ".table\n[KK] .db 1 junk\n.endtable\n";
+        let e = parse(crate::lexer::Lexer::new(bad).tokenize(), &[bad]).expect_err("rejected");
+        assert_eq!(e.line, 2);
+        assert!(e.message.contains("`junk`"), "{}", e.message);
+    }
+
+    #[test]
+    fn table_takes_up_to_two_arguments() {
+        assert_eq!(
+            stmts(".table\n")[0],
+            Stmt::Pseudo(Pseudo::Table(None, None))
+        );
+        assert_eq!(
+            stmts(".table 24, 1\n")[0],
+            Stmt::Pseudo(Pseudo::Table(Some(Expr::Num(24)), Some(Expr::Num(1))))
+        );
+        assert_eq!(stmts(".endtable\n")[0], Stmt::Pseudo(Pseudo::EndTable));
     }
 }

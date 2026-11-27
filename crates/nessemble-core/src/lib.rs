@@ -22,7 +22,7 @@ pub mod tooling;
 
 pub use assemble::{
     crc_32, CustomOutput, CustomResolver, EnumInfo, EnumMember, ListSymbol, PrewarmCandidate,
-    SourceMap, SourceSpan,
+    SourceMap, SourceSpan, TableEntryInfo,
 };
 pub use diagnostic::{AsmRule, AsmRules, Diag, RuleSeverity};
 pub use paths::{
@@ -286,6 +286,8 @@ pub struct Diagnostics {
     pub warnings: Vec<Diag>,
     /// Symbols defined by the (best-effort) assembly, for completion.
     pub symbols: Vec<ListSymbol>,
+    /// Every checked `.table` entry (`plans/020-index-keyed-tables.md` §4.5).
+    pub tables: Vec<TableEntryInfo>,
 }
 
 /// Collect all diagnostics for in-memory `source` as though it were the file at
@@ -354,6 +356,7 @@ fn diagnose_impl(
                 errors: vec![diag],
                 warnings: Vec::new(),
                 symbols: Vec::new(),
+                tables: Vec::new(),
             }
         }
     };
@@ -371,6 +374,7 @@ fn diagnose_impl(
             errors,
             warnings: Vec::new(),
             symbols: Vec::new(),
+            tables: Vec::new(),
         };
     }
 
@@ -380,6 +384,7 @@ fn diagnose_impl(
         errors,
         warnings,
         symbols: asm.list_symbols(),
+        tables: asm.table_entries().to_vec(),
     }
 }
 
@@ -395,6 +400,8 @@ pub struct ProjectDiagnostics {
     pub warnings: Vec<Diag>,
     /// Symbols defined by the (best-effort) assembly of the whole project.
     pub symbols: Vec<ListSymbol>,
+    /// Every checked `.table` entry (`plans/020-index-keyed-tables.md` §4.5).
+    pub tables: Vec<TableEntryInfo>,
     /// Display name of each flattened file, as referenced by [`Diag::file`],
     /// parallel to `paths`.
     pub files: Vec<String>,
@@ -442,6 +449,7 @@ pub fn diagnose_project_with(
                 errors: vec![diag],
                 warnings: Vec::new(),
                 symbols: Vec::new(),
+                tables: Vec::new(),
                 files: vec![top_name],
                 paths: vec![path.to_path_buf()],
             };
@@ -461,6 +469,7 @@ pub fn diagnose_project_with(
             errors,
             warnings: Vec::new(),
             symbols: Vec::new(),
+            tables: Vec::new(),
             files,
             paths,
         };
@@ -472,6 +481,7 @@ pub fn diagnose_project_with(
         errors,
         warnings,
         symbols: asm.list_symbols(),
+        tables: asm.table_entries().to_vec(),
         files,
         paths,
     }

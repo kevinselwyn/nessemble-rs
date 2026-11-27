@@ -317,6 +317,112 @@ struct OpenEnum {
     seen: HashMap<String, bool>,
 }
 
+/// Where a deferred check reports: the line the author wrote
+/// (`plans/020-index-keyed-tables.md` §5.2).
+#[derive(Debug, Clone)]
+pub(crate) struct Origin {
+    pub file: u32,
+    pub line: u32,
+    /// `Line.expansion`; `locate` turns it into the body file and notes.
+    pub expansion: u32,
+    /// The `.for` iteration counters captured at record time, if any.
+    pub suffix: Option<String>,
+}
+
+/// A check that needs settled symbol values and runs exactly once per build.
+pub(crate) struct Deferred {
+    pub origin: Origin,
+    pub check: DeferredCheck,
+}
+
+pub(crate) enum DeferredCheck {
+    Table(OpenTable),
+}
+
+/// The `.table` being assembled (pass 2 only).
+pub(crate) struct OpenTable {
+    /// The `.table` line.
+    origin: Origin,
+    spec: TableSpec,
+    entries: Vec<EntryRec>,
+    untagged_reported: bool,
+}
+
+/// What a `.table`'s arguments resolved to.
+enum TableSpec {
+    /// `.table`: keys from 0, any count.
+    Order { first: i64 },
+    /// `.table COUNT[, FIRST]`.
+    Count { count: i64, first: i64 },
+    /// `.table ENUM[, FIRST]`: one entry per member from `FIRST` on.
+    KeySet {
+        name: String,
+        first: i64,
+        step: i64,
+        /// The members checked: `(name, value)` from `FIRST` on.
+        members: Vec<(String, i64)>,
+    },
+    /// The arguments were in error (already reported): check sizes only.
+    Invalid,
+}
+
+impl TableSpec {
+    fn first_and_step(&self) -> Option<(i64, i64)> {
+        match self {
+            TableSpec::Order { first } | TableSpec::Count { first, .. } => Some((*first, 1)),
+            TableSpec::KeySet { first, step, .. } => Some((*first, *step)),
+            TableSpec::Invalid => None,
+        }
+    }
+}
+
+/// One recorded `[KEY]` entry.
+struct EntryRec {
+    origin: Origin,
+    key_text: String,
+    /// The key was a numeric literal, so messages don't repeat its value.
+    literal: bool,
+    key: i64,
+    bytes: usize,
+}
+
+/// One checked `.table` entry, for tooling (the language server's hovers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableEntryInfo {
+    /// Display file and line of the entry's tag.
+    pub file: String,
+    pub line: u32,
+    /// Display file and line of its `.table`.
+    pub table_file: String,
+    pub table_line: u32,
+    /// The tag's value.
+    pub key: i64,
+    /// The key the entry's position calls for (`FIRST + n·STEP`), or the
+    /// tag's value when the table's arguments were in error.
+    pub index: i64,
+    /// Bytes the entry emitted.
+    pub size: usize,
+    /// The table's entry size (entry 0's).
+    pub table_size: usize,
+    /// How many entries the table has.
+    pub table_entries: usize,
+    /// The named enum the table is keyed by, if any.
+    pub keyed_by: Option<String>,
+    /// The entry passed its index and size checks.
+    pub ok: bool,
+}
+
+/// `$NN` for 0–255, `$NNNN` above that, decimal when negative.
+fn hex_value(v: i64) -> String {
+    if v < 0 {
+        v.to_string()
+    } else if v <= 0xFF {
+        format!("${v:02X}")
+    } else {
+        format!("${v:04X}")
+    }
+}
+
 /// The assembler state for a single run.
 pub struct Assembler {
     nes: bool,
@@ -447,6 +553,15 @@ pub struct Assembler {
     /// source increments this around the nested call. See
     /// [`MAX_EMIT_SOURCE_DEPTH`].
     custom_expansion_depth: usize,
+    /// The `.table` open on pass 2 (`None` outside one, or when suppressed).
+    table: Option<OpenTable>,
+    /// Checks queued on the final pass, run once by [`Self::run_deferred`].
+    deferred: Vec<Deferred>,
+    /// Deferred diagnostics already reported, keyed by (file, line, expansion,
+    /// message without its `.for` suffix).
+    deferred_seen: std::collections::HashSet<(u32, u32, u32, String)>,
+    /// Every checked `.table` entry, for tooling.
+    table_entries: Vec<TableEntryInfo>,
 }
 
 /// A source span as collected during assembly: like [`SourceSpan`] but keyed by
@@ -601,6 +716,10 @@ impl Assembler {
             custom,
             custom_memo: HashMap::new(),
             custom_expansion_depth: 0,
+            table: None,
+            deferred: Vec::new(),
+            deferred_seen: std::collections::HashSet::new(),
+            table_entries: Vec::new(),
         }
     }
 
@@ -625,6 +744,7 @@ impl Assembler {
         self.reset_state();
         self.run_pass(lines);
         self.validate_ines();
+        self.run_deferred();
         (dedup(&self.errors), dedup(&self.warnings))
     }
 
@@ -737,6 +857,9 @@ impl Assembler {
         self.reset_state();
         self.run_pass(lines);
         self.validate_ines();
+        if self.errors.is_empty() {
+            self.run_deferred();
+        }
         if let Some(d) = self.errors.last() {
             return Err(d.clone());
         }
@@ -762,7 +885,11 @@ impl Assembler {
         self.loop_err_seen.clear();
         if self.pass == 1 {
             self.for_log.clear();
+            self.deferred.clear();
+            self.deferred_seen.clear();
+            self.table_entries.clear();
         }
+        self.table = None;
         self.for_cursor = 0;
         self.offset_trainer = 0;
         // Spans are collected fresh on pass 2; clearing here drops any from an
@@ -1342,7 +1469,6 @@ impl Assembler {
     }
 
     /// The enum registry entry for `name`, for `.table NAME` (plan 020).
-    #[allow(dead_code)]
     pub(crate) fn enum_info(&self, name: &str) -> Option<&EnumInfo> {
         self.enum_index.get(name).map(|&i| &self.enums[i])
     }
@@ -1351,6 +1477,337 @@ impl Assembler {
     #[must_use]
     pub fn enums(&self) -> &[EnumInfo] {
         &self.enums
+    }
+
+    // -- tables (`plans/020-index-keyed-tables.md`) --------------------------
+
+    /// The current origin: file, line and expansion, plus the `.for`
+    /// counters when inside a loop body.
+    fn origin(&self) -> Origin {
+        Origin {
+            file: self.cur_file,
+            line: self.cur_line,
+            expansion: self.cur_expansion,
+            suffix: (!self.loop_stack.is_empty()).then(|| self.loop_counters()),
+        }
+    }
+
+    /// Queue a check for [`Self::run_deferred`]. A no-op except on the final
+    /// pass, so each check is recorded once per build; the caller applies its
+    /// own suppression rule first.
+    fn defer(&mut self, origin: Origin, check: DeferredCheck) {
+        if self.pass == 2 {
+            self.deferred.push(Deferred { origin, check });
+        }
+    }
+
+    /// Run every queued check once, in queue order. In non-collect mode the
+    /// first error stops reporting, so `run()`'s `errors.last()` is that
+    /// first error.
+    fn run_deferred(&mut self) {
+        for d in std::mem::take(&mut self.deferred) {
+            match d.check {
+                DeferredCheck::Table(t) => self.check_table(&d.origin, &t),
+            }
+            if !self.collect_all && !self.errors.is_empty() {
+                break;
+            }
+        }
+    }
+
+    /// Report `message` at a stored origin (an expanded line names its body
+    /// file and the calls), with its `.for` suffix, once per (site, message).
+    fn report_at(&mut self, origin: &Origin, message: String) {
+        if !self.collect_all && !self.errors.is_empty() {
+            return;
+        }
+        if !self
+            .deferred_seen
+            .insert((origin.file, origin.line, origin.expansion, message.clone()))
+        {
+            return;
+        }
+        let message = match &origin.suffix {
+            Some(counters) => t!(
+                "for-iteration-suffix",
+                message = message,
+                counters = counters.as_str()
+            ),
+            None => message,
+        };
+        let diag = crate::diagnostic::locate(
+            &self.files,
+            &self.expansions,
+            origin.file,
+            origin.line,
+            origin.expansion,
+            message,
+        );
+        self.errors.push(diag);
+    }
+
+    /// Execute `.table [COUNT | ENUM][, FIRST]`. Pass 1 only evaluates the
+    /// arguments (so an undefined name is reported like any other); pass 2
+    /// resolves the form and opens the table.
+    fn exec_table(&mut self, count: Option<&Expr>, first: Option<&Expr>) {
+        if self.if_suppressed() {
+            return;
+        }
+        if self.pass != 2 {
+            if let Some(e) = count.filter(|e| !matches!(e, Expr::Symbol(_))) {
+                self.eval(e);
+            }
+            if let Some(e) = first {
+                self.eval(e);
+            }
+            return;
+        }
+        let spec = self.resolve_table_spec(count, first);
+        self.table = Some(OpenTable {
+            origin: self.origin(),
+            spec,
+            entries: Vec::new(),
+            untagged_reported: false,
+        });
+    }
+
+    /// Resolve a `.table`'s arguments (§2.2), reporting any error at the
+    /// `.table` line.
+    fn resolve_table_spec(&mut self, count: Option<&Expr>, first: Option<&Expr>) -> TableSpec {
+        let Some(count) = count else {
+            return TableSpec::Order { first: 0 };
+        };
+        if let Expr::Symbol(name) = count {
+            if let Some(info) = self.enum_info(name) {
+                let info = info.clone();
+                return self.resolve_key_set(&info, first);
+            }
+            let known = self
+                .find_symbol(name)
+                .is_some_and(|id| self.symbols[id].kind != SymType::Undefined);
+            if !known {
+                self.error(t!("table-arg-unknown", name = name.as_str()));
+                return TableSpec::Invalid;
+            }
+        }
+        let n = self.eval(count);
+        let first = first.map_or(0, |e| self.eval(e));
+        if n < 1 {
+            self.error(t!("table-count-invalid", value = n));
+            return TableSpec::Invalid;
+        }
+        TableSpec::Count { count: n, first }
+    }
+
+    /// Resolve `.table ENUM[, FIRST]` against plan 019's registry (§5.3).
+    fn resolve_key_set(&mut self, info: &EnumInfo, first: Option<&Expr>) -> TableSpec {
+        if !info.contiguous || info.step == 0 {
+            self.error(t!("table-not-contiguous", set = info.name.as_str()));
+            return TableSpec::Invalid;
+        }
+        let (first, from) = match first {
+            None => (info.start, 0),
+            Some(e) => {
+                let v = self.eval(e);
+                let Some(i) = info.members.iter().position(|m| m.value == v) else {
+                    self.error(t!(
+                        "table-first-not-member",
+                        set = info.name.as_str(),
+                        value = hex_value(v)
+                    ));
+                    return TableSpec::Invalid;
+                };
+                (v, i)
+            }
+        };
+        TableSpec::KeySet {
+            name: info.name.clone(),
+            first,
+            step: info.step,
+            members: info.members[from..]
+                .iter()
+                .map(|m| (m.name.clone(), m.value))
+                .collect(),
+        }
+    }
+
+    /// Execute a `[KEY]` tag: start a new entry of the open table.
+    fn exec_tag(&mut self, key: &Expr, text: &str) {
+        if self.if_suppressed() {
+            return;
+        }
+        if self.pass != 2 {
+            // Register any name the key uses, so an undefined one is reported.
+            self.eval(key);
+            return;
+        }
+        if self.table.is_none() {
+            return;
+        }
+        let value = self.eval(key);
+        let origin = self.origin();
+        if let Some(t) = self.table.as_mut() {
+            t.entries.push(EntryRec {
+                origin,
+                key_text: text.to_string(),
+                literal: matches!(key, Expr::Num(_)),
+                key: value,
+                bytes: 0,
+            });
+        }
+    }
+
+    /// Count one emitted byte toward the open table's current entry, or
+    /// report it as untagged when no entry has started.
+    fn count_table_byte(&mut self) {
+        let Some(t) = self.table.as_mut() else {
+            return;
+        };
+        if let Some(last) = t.entries.last_mut() {
+            last.bytes += 1;
+        } else if !t.untagged_reported {
+            t.untagged_reported = true;
+            self.error(t!("table-untagged"));
+        }
+    }
+
+    /// Execute `.endtable`: queue the open table's checks.
+    fn exec_endtable(&mut self) {
+        let Some(t) = self.table.take() else {
+            return;
+        };
+        if t.entries.is_empty() {
+            self.error(t!("table-empty"));
+            return;
+        }
+        let origin = t.origin.clone();
+        self.defer(origin, DeferredCheck::Table(t));
+    }
+
+    /// Report a layout directive used inside an open table (§3.4).
+    fn check_table_layout(&mut self, directive: &str) {
+        if self.table.is_some() && !self.if_suppressed() {
+            self.error(t!("table-layout", directive = directive));
+        }
+    }
+
+    /// The final-pass checks of one table (§5.1).
+    fn check_table(&mut self, origin: &Origin, t: &OpenTable) {
+        let step_info = t.spec.first_and_step();
+        // 1. Index: only the first mismatch is reported.
+        if let Some((first, step)) = step_info {
+            let mut expected = first;
+            for e in &t.entries {
+                if e.key != expected {
+                    let message = if e.literal {
+                        t!(
+                            "table-tag-index-literal",
+                            value = hex_value(e.key),
+                            index = hex_value(expected)
+                        )
+                    } else {
+                        t!(
+                            "table-tag-index",
+                            key = e.key_text.as_str(),
+                            value = hex_value(e.key),
+                            index = hex_value(expected)
+                        )
+                    };
+                    self.report_at(&e.origin, message);
+                    // Later entries are not marked: only the first is known
+                    // to be wrong, the rest may just be shifted.
+                    break;
+                }
+                expected = expected.wrapping_add(step);
+            }
+        }
+        // 2. Size.
+        let size = t.entries[0].bytes;
+        let index_of = |n: usize, key: i64| {
+            step_info.map_or(key, |(first, step)| {
+                first.wrapping_add((n as i64).wrapping_mul(step))
+            })
+        };
+        let mut size_ok = vec![true; t.entries.len()];
+        for (n, e) in t.entries.iter().enumerate() {
+            let index = hex_value(index_of(n, e.key));
+            if e.bytes == 0 {
+                size_ok[n] = false;
+                self.report_at(&e.origin, t!("table-entry-empty", index = index));
+            } else if t.entries.len() > 1 && size > 0 && e.bytes != size {
+                size_ok[n] = false;
+                self.report_at(
+                    &e.origin,
+                    t!(
+                        "table-entry-size",
+                        index = index,
+                        size = e.bytes,
+                        expected = size
+                    ),
+                );
+            }
+        }
+        // 3. Count.
+        let len = t.entries.len();
+        let mut keyed_by = None;
+        match &t.spec {
+            TableSpec::Count { count, .. } if len as i64 != *count => {
+                self.report_at(origin, t!("table-count", count = len, expected = *count));
+            }
+            TableSpec::KeySet { name, members, .. } => {
+                keyed_by = Some(name.clone());
+                for (member, value) in members {
+                    if !t.entries.iter().any(|e| e.key == *value) {
+                        self.report_at(
+                            origin,
+                            t!(
+                                "table-missing-member",
+                                set = name.as_str(),
+                                member = member.as_str(),
+                                value = hex_value(*value)
+                            ),
+                        );
+                    }
+                }
+                if len > members.len() {
+                    self.report_at(
+                        origin,
+                        t!(
+                            "table-count-enum",
+                            count = len,
+                            set = name.as_str(),
+                            expected = members.len()
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+        // 4. Record for tooling.
+        let table_at = self.diag_at(origin.file, origin.line, origin.expansion);
+        for (n, e) in t.entries.iter().enumerate() {
+            let at = self.diag_at(e.origin.file, e.origin.line, e.origin.expansion);
+            let index = index_of(n, e.key);
+            self.table_entries.push(TableEntryInfo {
+                file: at.file,
+                line: at.line,
+                table_file: table_at.file.clone(),
+                table_line: table_at.line,
+                key: e.key,
+                index,
+                size: e.bytes,
+                table_size: size,
+                table_entries: len,
+                keyed_by: keyed_by.clone(),
+                ok: e.key == index && size_ok[n],
+            });
+        }
+    }
+
+    /// Every `.table` entry the last [`Self::diagnostics`] run checked.
+    #[must_use]
+    pub fn table_entries(&self) -> &[TableEntryInfo] {
+        &self.table_entries
     }
 
     // -- error helpers ------------------------------------------------------
@@ -1753,6 +2210,9 @@ impl Assembler {
         if self.if_suppressed() {
             return;
         }
+        if self.table.is_some() {
+            self.count_table_byte();
+        }
 
         // While a trainer is active every emitted byte is redirected into the
         // 512-byte trainer region and does not advance the ROM counters.
@@ -1852,12 +2312,14 @@ impl Assembler {
             }
             Stmt::Instruction(instr) => self.exec_instruction(instr),
             Stmt::Pseudo(p) => self.exec_pseudo(p),
+            Stmt::Tag(key, text) => self.exec_tag(key, text),
         }
     }
 
     fn exec_pseudo(&mut self, p: &Pseudo) {
         match p {
             Pseudo::Org(e) => {
+                self.check_table_layout(".org");
                 let addr = self.eval(e);
                 self.exec_org(addr);
             }
@@ -2010,16 +2472,19 @@ impl Assembler {
                 self.ines.timing = Some(self.eval(e));
             }
             Pseudo::Prg(e) => {
+                self.check_table_layout(".prg");
                 self.segment_prg = true;
                 self.prg_index = self.eval(e).max(0) as usize % MAX_BANKS;
                 self.phase_delta = 0;
             }
             Pseudo::Chr(e) => {
+                self.check_table_layout(".chr");
                 self.segment_prg = false;
                 self.chr_index = self.eval(e).max(0) as usize % MAX_BANKS;
                 self.phase_delta = 0;
             }
             Pseudo::InesTrn => {
+                self.check_table_layout(".inestrn");
                 self.nes = true;
                 self.ines.trn = true;
             }
@@ -2047,6 +2512,7 @@ impl Assembler {
                 self.if_stack.pop();
             }
             Pseudo::Segment(name) => {
+                self.check_table_layout(".segment");
                 if let Some(rest) = name.strip_prefix("PRG") {
                     self.segment_prg = true;
                     self.prg_index = rest.parse::<usize>().unwrap_or(0) % MAX_BANKS;
@@ -2125,6 +2591,8 @@ impl Assembler {
             // `.for` / `.endfor` move the line cursor, so `run_lines` handles
             // them before a statement ever reaches here.
             Pseudo::For(..) | Pseudo::EndFor => {}
+            Pseudo::Table(count, first) => self.exec_table(count.as_ref(), first.as_ref()),
+            Pseudo::EndTable => self.exec_endtable(),
         }
     }
 
@@ -2273,7 +2741,7 @@ impl Assembler {
         }
 
         let tokens = crate::lexer::Lexer::new(src).tokenize();
-        let lines = match crate::parse::parse(tokens, &[src]) {
+        let lines = match crate::parse::parse_fragment(tokens, &[src]) {
             Ok(lines) => lines,
             Err(e) => {
                 self.hard_error(t!(
@@ -2291,16 +2759,19 @@ impl Assembler {
                 Stmt::Pseudo(Pseudo::Custom(n, _))
                     if matches!(n.as_str(), "include" | "macro" | "macrodef") =>
                 {
-                    Some(n.clone())
+                    Some(format!(".{n}"))
                 }
-                Stmt::Pseudo(Pseudo::InesTrn) => Some("inestrn".to_string()),
+                Stmt::Pseudo(Pseudo::InesTrn) => Some(".inestrn".to_string()),
+                Stmt::Pseudo(Pseudo::Table(..)) => Some(".table".to_string()),
+                Stmt::Pseudo(Pseudo::EndTable) => Some(".endtable".to_string()),
+                Stmt::Tag(..) => Some("[KEY] tag".to_string()),
                 _ => None,
             };
             if let Some(directive) = unsupported {
                 self.hard_error(t!(
                     "emit-source-unsupported-directive",
                     pseudo = format!(".{name}"),
-                    directive = format!(".{directive}")
+                    directive = directive
                 ));
                 return;
             }
