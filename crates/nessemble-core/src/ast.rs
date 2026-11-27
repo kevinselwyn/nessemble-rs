@@ -162,6 +162,14 @@ pub enum Pseudo {
     Table(Option<Expr>, Option<Expr>),
     /// `.endtable` — close the open `.table`.
     EndTable,
+    /// `.assert EXPR[, "message"]` (`plans/022-assertions.md`): fail the build
+    /// when `EXPR` is 0. Holds the expression, its source text as written, and
+    /// the message (unquoted). Checked once, after the final pass.
+    Assert(Expr, String, Option<String>),
+    /// `.error "message"` — fail the build whenever this line is assembled.
+    Error(String),
+    /// `.out "message"` — print a line (to stderr) while assembling.
+    Out(String),
     /// `.inestrn` — mark the iNES trainer region active (the trainer file's
     /// bytes are spliced in by the preprocessor immediately after this).
     InesTrn,

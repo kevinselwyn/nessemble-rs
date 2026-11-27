@@ -518,6 +518,10 @@ sections above:
   a tag is aligned under its first argument, past the tag.
 - **LSP.** The multi-entry hover on a `.for` tag also names the table's line:
   "8 entries from this line ($10–$17) of the table on line 9".
+- **Editor taint (added by [plan 022](022-assertions.md) §12).** In collect mode
+  a table's checks skip what an unmodeled custom op makes unknown: an entry
+  holding one skips its size check, and index, count and membership failures
+  that read an approximate symbol are not reported. The CLI build is unchanged.
 
 ## Decisions settled with the maintainer
 

@@ -2682,7 +2682,7 @@ fn rule_require_block_comment(ctx: &LintCtx, opts: &LintOptions, out: &mut Vec<F
         if (opts.ignore)(name) {
             continue;
         }
-        if !is_block_entry(ctx.lines, idx) {
+        if !is_block_entry(ctx.source, ctx.lines, idx) {
             continue;
         }
         if has_comment_within(ctx.lines, idx, opts.window) {
@@ -2919,7 +2919,7 @@ fn rule_require_routine_doc(ctx: &LintCtx, opts: &LintOptions, out: &mut Vec<Fin
         let Some((name, column)) = block_label(ctx.source, line) else {
             continue;
         };
-        if (opts.ignore)(name) || !is_block_entry(ctx.lines, idx) {
+        if (opts.ignore)(name) || !is_block_entry(ctx.source, ctx.lines, idx) {
             continue;
         }
         if !called.contains(name) {
@@ -3137,13 +3137,14 @@ fn apply_call(ctx: &LintCtx, operand: &str, visiting: &mut Vec<String>, effects:
 fn body_lines(ctx: &LintCtx, name: &str) -> std::ops::Range<usize> {
     let Some(start) = ctx.lines.iter().enumerate().position(|(idx, line)| {
         block_label(ctx.source, line).is_some_and(|(label, _)| label == name)
-            && is_block_entry(ctx.lines, idx)
+            && is_block_entry(ctx.source, ctx.lines, idx)
     }) else {
         return 0..0;
     };
     let end = ((start + 1)..ctx.lines.len())
         .find(|&idx| {
-            block_label(ctx.source, &ctx.lines[idx]).is_some() && is_block_entry(ctx.lines, idx)
+            block_label(ctx.source, &ctx.lines[idx]).is_some()
+                && is_block_entry(ctx.source, ctx.lines, idx)
         })
         .unwrap_or(ctx.lines.len());
     (start + 1)..end
@@ -3226,6 +3227,9 @@ fn is_transparent_directive(name: &str) -> bool {
         ".equ",
         ".table",
         ".endtable",
+        ".assert",
+        ".error",
+        ".out",
     ];
     TRANSPARENT
         .iter()
@@ -3308,17 +3312,30 @@ fn block_label<'a>(source: &'a str, line: &[Lexeme]) -> Option<(&'a str, u32)> {
 /// comment-only lines, the first non-comment line is blank or the top of the
 /// file. A label directly following code is an internal branch target, not a
 /// documented block entry.
-fn is_block_entry(lines: &[Vec<Lexeme>], idx: usize) -> bool {
+fn is_block_entry(source: &str, lines: &[Vec<Lexeme>], idx: usize) -> bool {
     for i in (0..idx).rev() {
         if is_blank(&lines[i]) {
             return true;
         }
-        if is_comment_only(&lines[i]) {
+        // An `.assert`/`.error`/`.out` line emits nothing, so it is skipped
+        // like a comment (`plans/022-assertions.md` §3).
+        if is_comment_only(&lines[i]) || is_check_line(source, &lines[i]) {
             continue;
         }
         return false;
     }
     true
+}
+
+/// Whether a line's first significant lexeme is `.assert`, `.error` or
+/// `.out`, which emit nothing.
+fn is_check_line(source: &str, line: &[Lexeme]) -> bool {
+    line.iter()
+        .find(|l| l.kind != LexKind::Whitespace)
+        .is_some_and(|l| {
+            l.kind == LexKind::Directive
+                && matches!(&source[l.start..l.end], ".assert" | ".error" | ".out")
+        })
 }
 
 /// Whether a line has no significant tokens (only whitespace, or empty).
@@ -4792,30 +4809,36 @@ data:
 
     #[test]
     fn block_entry_top_of_file() {
-        let lines = split_lines(&lex("label:\n"));
-        assert!(is_block_entry(&lines, 0));
+        let src = "label:\n";
+        let lines = split_lines(&lex(src));
+        assert!(is_block_entry(src, &lines, 0));
     }
 
     #[test]
     fn block_entry_after_blank_or_comment_run() {
         // blank directly above
-        let lines = split_lines(&lex("    nop\n\nlabel:\n"));
-        assert!(is_block_entry(&lines, 2));
+        let src = "    nop\n\nlabel:\n";
+        let lines = split_lines(&lex(src));
+        assert!(is_block_entry(src, &lines, 2));
         // comment run back to the top
-        let lines = split_lines(&lex("; a\n; b\nlabel:\n"));
-        assert!(is_block_entry(&lines, 2));
+        let src = "; a\n; b\nlabel:\n";
+        let lines = split_lines(&lex(src));
+        assert!(is_block_entry(src, &lines, 2));
         // blank, then a comment, then the label
-        let lines = split_lines(&lex("\n; note\nlabel:\n"));
-        assert!(is_block_entry(&lines, 2));
+        let src = "\n; note\nlabel:\n";
+        let lines = split_lines(&lex(src));
+        assert!(is_block_entry(src, &lines, 2));
     }
 
     #[test]
     fn block_entry_false_when_code_precedes() {
-        let lines = split_lines(&lex("    nop\nlabel:\n"));
-        assert!(!is_block_entry(&lines, 1));
+        let src = "    nop\nlabel:\n";
+        let lines = split_lines(&lex(src));
+        assert!(!is_block_entry(src, &lines, 1));
         // code, then a comment, then the label → still an internal target
-        let lines = split_lines(&lex("    nop\n; c\nlabel:\n"));
-        assert!(!is_block_entry(&lines, 2));
+        let src = "    nop\n; c\nlabel:\n";
+        let lines = split_lines(&lex(src));
+        assert!(!is_block_entry(src, &lines, 2));
     }
 
     #[test]
@@ -6099,5 +6122,76 @@ data:
             .expect("formatted assembles")
             .rom;
         assert_eq!(before, after);
+    }
+
+    // ── Assertions (plan 022) ───────────────────────────────────────────────
+
+    #[test]
+    fn format_keeps_assertion_lines_under_both_indent_settings() {
+        let src = "KIND = 1\n.assert KIND == 1 ,\"one\"\n.error \"\\1 \\i\"\n.out \"hi\"\n";
+        for indent_directives in [false, true] {
+            let opts = FormatOptions {
+                indent_directives,
+                ..FormatOptions::default()
+            };
+            let once = format_with(src, &opts);
+            let pad = if indent_directives { "    " } else { "" };
+            assert_eq!(
+                once,
+                format!(
+                    "KIND = 1\n{pad}.assert KIND == 1, \"one\"\n{pad}.error \"\\1 \\i\"\n{pad}.out \"hi\"\n"
+                )
+            );
+            assert_eq!(format_with(&once, &opts), once);
+        }
+    }
+
+    #[test]
+    fn assertion_directives_are_transparent_to_the_verifier() {
+        for d in [".assert", ".error", ".out"] {
+            assert!(is_transparent_directive(d));
+        }
+        // Over-declared Y is reported, so the body is still fully understood.
+        let findings = lint_routines(
+            "; @nessemble-clobbers A, Y\n\
+             touch:\n\
+             \x20   LDA #$00\n\
+             \x20   .assert touch == $8000, \"fixed\"\n\
+             \x20   .out \"touch\"\n\
+             \x20   RTS\n",
+        );
+        assert_eq!(rules_of(&findings), vec![RuleId::OverdeclaredClobber]);
+    }
+
+    #[test]
+    fn an_assertion_above_a_label_keeps_it_a_block_entry() {
+        let src = "    nop\n\n    .assert next == $8000\nnext:\n";
+        let lines = split_lines(&lex(src));
+        assert!(is_block_entry(src, &lines, 3));
+        // The first routine's body ends at the second, so the second's write
+        // to X is not charged to the first.
+        let two = "; @nessemble-clobbers A\n\
+                   first:\n\
+                   \x20   LDA #$00\n\
+                   \x20   RTS\n\
+                   \n\
+                   \x20   .assert second == $8005\n\
+                   ; @nessemble-clobbers X\n\
+                   second:\n\
+                   \x20   LDX #$00\n\
+                   \x20   RTS\n";
+        assert!(lint_routines(two).is_empty(), "{:?}", lint_routines(two));
+        // `require-block-comment` sees the same blocks with or without it.
+        let block = |src: &str| -> Vec<String> {
+            lint_all(src)
+                .into_iter()
+                .filter(|f| f.rule == RuleId::RequireBlockComment)
+                .map(|f| f.subject)
+                .collect()
+        };
+        let with = "a:\n    nop\n\n    .assert 1\nb:\n    nop\n";
+        let without = "a:\n    nop\n\nb:\n    nop\n";
+        assert_eq!(block(with), block(without));
+        assert_eq!(block(with), vec!["a".to_string(), "b".to_string()]);
     }
 }

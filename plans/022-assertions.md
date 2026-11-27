@@ -1,9 +1,9 @@
 # nessemble-rs: A Plan for Build-Time Assertions (`.assert`, `.error`, `.out`)
 
-> Status: **Proposed.** Points marked **decided** were settled with the
-> maintainer. Every **proposed** point is refined below, and where this plan
-> departs from the brief it says so ([§11](#11-decisions-proposed)). Extends the
-> final-pass hook introduced by [plan 020](020-index-keyed-tables.md) §5.2.
+> Status: **Implemented** (Phase 1, plus Phase 2's wasm `out()` getter). The
+> proposed points shipped as written; [§12](#12-as-shipped) lists where the
+> implementation differs in detail. Extends the final-pass hook introduced by
+> [plan 020](020-index-keyed-tables.md) §5.2.
 
 ---
 
@@ -96,7 +96,7 @@ Without a message, the `MESSAGE — ` part is left out.
   Values use the same number format. Anonymous labels are not listed.
 - **Example:**
 
-  ``Error in `tables.asm` on line 440: assertion failed: one pointer per KIND_* — `(kind_table - ptr_table) == (2 * (KIND_LAST + 1))` is 0 ($0E == $10; kind_table = $8A1E, ptr_table = $8A10, KIND_LAST = $07)``
+  ``Error in `tables.asm` on line 440: assertion failed: one pointer per KIND_* — `(kind_table - ptr_table) == (2 * (KIND_LAST + 1))` is 0 ($0E == $10; kind_table = $8A1E, ptr_table = $8A10, KIND_LAST = 7)``
 
 ### 2.6 `.out`
 
@@ -365,7 +365,24 @@ A failure inside a `.for` body gets the existing `for-iteration-suffix`. `$detai
 
 ---
 
+## 12. As shipped
+
+Where the implementation differs in detail from the sections above:
+
+- **Arity counts message references.** A `\N` or `\#` inside an `.assert`/`.error`/`.out` message counts toward the macro's arity (`capture_macro`), as one in code does. Otherwise a body whose only `\2` is in its message would reject a two-argument call.
+- **Argument text in a nested macro.** When an argument is itself an enclosing macro's `\N` (its tokens share that `\N`'s span), `arg_text` renders those tokens rather than quoting `\1`, without the parentheses substitution added.
+- **The `@local` scope is captured too.** `EvalCtx` also holds the `@local` scope open on the line, so `.assert @x == …` resolves in the scope it was written in, not the one open at the drain. It also holds whether the line's bank was approximate (for `:+`/`:-`).
+- **`Unresolved` has three variants:** `Symbol`, `Loop { depth, open }` and `Local`. `BANK(x)` reports through `Symbol`, and it now requires `x` to be defined (an `Undefined` placeholder does not count).
+- **The de-dup key keeps the expansion.** `report_keyed` keys on `(file, line, expansion, kind + expression text + message as written)`, so each `.macro` call of a failing body line is reported (each names its own call), while `.for` iterations still collapse to one.
+- **`.error` and `.out` substitute `\i`/`\j`/`\k` too**, at queue time, like `.assert`.
+- **Value format.** The §2.5 rule (decimal for 0–9) wins over the original example, which printed `KIND_LAST = $07`; the example above is corrected.
+- **Taint, as built.** `approx_bank` has one slot per PRG bank and one per CHR bank, keyed by the bank being written. `.org` clears the slot. Labels defined in a marked bank, and constants whose expression read an approximate symbol, get `Symbol.approx`. `eval_final` reports taint, and so does `:+`/`:-` from a marked line.
+- **Tables are covered** (§8, settled). In collect mode: an entry holding an unmodeled custom op skips its size check, and the reference size is the first entry whose size is known; an index mismatch whose key (or the `.table` arguments) read an approximate symbol is not reported, and neither are count or membership failures when any key or argument is approximate.
+- **`is_block_entry` takes the source text** (`is_block_entry(source, lines, idx)`) so it can recognise the directive name.
+- **Phase 2:** the wasm `out()` getter shipped. No docs "Try it" block shows `.out`, because the embedded assembler does not display `out()` yet.
+
 ## Decisions settled with the maintainer
 
 1. `.out` prints to **stderr** (Q4).
 2. `.assert` and `.error` use the **strict** `.if` test: they never run in any branch written as false, however deeply nested. `.table` keeps `if_suppressed()` (§2.3).
+3. The editor taint rule also covers plan 020's `.table` checks (§8).

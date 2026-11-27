@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 
 use nessemble_core::tooling::{self, TokenClass};
-use nessemble_core::{assemble_with, AssembleError, CustomResolver, Diag, Options};
+use nessemble_core::{assemble_with_out, AssembleError, CustomResolver, Diag, Options};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
@@ -70,6 +70,7 @@ pub struct AssembleResult {
     rom: Vec<u8>,
     errors: Vec<String>,
     warnings: Vec<String>,
+    out: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -93,6 +94,14 @@ impl AssembleResult {
     #[wasm_bindgen(getter)]
     pub fn warnings(&self) -> Vec<String> {
         self.warnings.clone()
+    }
+
+    /// The lines the program printed with `.out`, in order (also when
+    /// assembly failed partway).
+    #[must_use]
+    #[wasm_bindgen(getter)]
+    pub fn out(&self) -> Vec<String> {
+        self.out.clone()
     }
 
     /// Whether assembly succeeded (no errors).
@@ -128,13 +137,19 @@ pub fn assemble(source: &str, opts_json: &str) -> AssembleResult {
     };
 
     let resolver = build_resolver(&opts.pseudo);
-    match assemble_with(source, &options, resolver) {
+    let outcome = assemble_with_out(source, &options, resolver);
+    let out = outcome.out.into_iter().map(|d| d.message).collect();
+    match outcome.result {
         Ok(assembly) => AssembleResult {
             rom: assembly.rom,
             errors: Vec::new(),
             warnings: assembly.warnings.iter().map(format_diag).collect(),
+            out,
         },
-        Err(AssembleError(diag)) => AssembleResult::from_error(format_diag(&diag)),
+        Err(AssembleError(diag)) => AssembleResult {
+            out,
+            ..AssembleResult::from_error(format_diag(&diag))
+        },
     }
 }
 
@@ -144,6 +159,7 @@ impl AssembleResult {
             rom: Vec::new(),
             errors: vec![message],
             warnings: Vec::new(),
+            out: Vec::new(),
         }
     }
 }

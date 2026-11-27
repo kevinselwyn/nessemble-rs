@@ -155,6 +155,18 @@ tag-twice = Only one `[KEY]` tag may start a line
 tag-unclosed = Expected `]` to close the `[KEY]` tag
 table-layout = `{ $directive }` can't be used inside `.table`; it moves the location counter
 
+## Assertions (`.assert` / `.error` / `.out`)
+
+assert-failed = assertion failed: { $message } — `{ $expr }` is 0{ $detail }
+assert-failed-bare = assertion failed: `{ $expr }` is 0{ $detail }
+assert-undefined = Symbol `{ $name }` in `.assert` was not defined
+assert-no-local = No anonymous label for `{ $dir }` in `.assert`
+error-directive = { $message }
+error-directive-empty = `.error` reached
+assert-needs-expression = `.assert` needs an expression to check
+assert-message-not-string = The `.assert` message must be a quoted string
+directive-needs-message = `.{ $directive }` needs a quoted message
+
 ## Diagnostic framing (CLI)
 
 error-line = Error in `{ $file }` on line { $line }: { $message }

@@ -188,6 +188,10 @@ struct Symbol {
     /// The `@local` scope (global label) open where the symbol was defined, if
     /// any. Names a private local's parent in the list file.
     parent: Option<String>,
+    /// The value may be wrong in the editor: a label after an unmodeled custom
+    /// op in its bank, or a constant computed from such a symbol
+    /// (`plans/022-assertions.md` §3).
+    approx: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -341,6 +345,47 @@ pub(crate) struct Deferred {
 
 pub(crate) enum DeferredCheck {
     Table(OpenTable),
+    /// `.assert` (`plans/022-assertions.md` §2.2).
+    Assert(Box<AssertCheck>),
+    /// `.error`: the message (counters substituted) and the message as
+    /// written, which de-duplicates it across `.for` iterations.
+    Error {
+        message: String,
+        template: String,
+    },
+}
+
+/// A queued `.assert`.
+pub(crate) struct AssertCheck {
+    expr: Expr,
+    /// The expression as written.
+    text: String,
+    /// The message with `\i`/`\j`/`\k` substituted.
+    message: Option<String>,
+    /// The message as written, for de-duplication across iterations.
+    template: Option<String>,
+    ctx: EvalCtx,
+}
+
+/// What an assertion's expression needs from the line it was written on,
+/// captured at queue time so the drain can evaluate it later.
+pub(crate) struct EvalCtx {
+    /// Loop counter values, innermost first (`\i`, `\j`, `\k`).
+    loops: Vec<i64>,
+    /// `address_offset()` and `prg_index`, for `:+` / `:-`.
+    address: i64,
+    bank: usize,
+    /// The `@local` scope open on the line.
+    scope: Option<String>,
+    /// The line sits after an unmodeled custom op in its bank (§4).
+    approx: bool,
+}
+
+/// Why the drain's evaluator could not settle an expression (§2.7).
+enum Unresolved {
+    Symbol(String),
+    Loop { depth: u8, open: usize },
+    Local(i32),
 }
 
 /// The `.table` being assembled (pass 2 only).
@@ -350,6 +395,8 @@ pub(crate) struct OpenTable {
     spec: TableSpec,
     entries: Vec<EntryRec>,
     untagged_reported: bool,
+    /// The `COUNT`/`FIRST` arguments read an approximate symbol.
+    spec_approx: bool,
 }
 
 /// What a `.table`'s arguments resolved to.
@@ -388,6 +435,11 @@ struct EntryRec {
     literal: bool,
     key: i64,
     bytes: usize,
+    /// The entry holds an unmodeled custom op, so its size is not known (§4
+    /// of plan 022; editor only).
+    approx: bool,
+    /// The key read a symbol whose value is approximate.
+    key_approx: bool,
 }
 
 /// One checked `.table` entry, for tooling (the language server's hovers).
@@ -415,6 +467,34 @@ pub struct TableEntryInfo {
     /// The entry passed its index and size checks.
     pub ok: bool,
 }
+
+/// A value in an assertion failure (§2.5): decimal for 0–9 and negatives,
+/// else `$`-hex padded to 2 or 4 digits (wider when needed).
+fn assert_value(v: i64) -> String {
+    if (0..=9).contains(&v) || v < 0 {
+        v.to_string()
+    } else if v <= 0xFF {
+        format!("${v:02X}")
+    } else {
+        format!("${v:04X}")
+    }
+}
+
+/// The operator a comparison is written with, for an assertion's detail.
+fn comparison(op: BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::Le => "<=",
+        BinOp::Ge => ">=",
+        _ => return None,
+    })
+}
+
+/// Most `name = VALUE` entries an assertion failure lists.
+const ASSERT_DETAIL_NAMES: usize = 8;
 
 /// `$NN` for 0–255, `$NNNN` above that, decimal when negative.
 fn hex_value(v: i64) -> String {
@@ -581,6 +661,16 @@ pub struct Assembler {
     /// The emitted-source expansion running now (`0` for none) and the index of
     /// the line it is executing.
     emit_ctx: (u32, usize),
+    /// `.out` lines recorded on the final pass, in execution order.
+    out_lines: Vec<Diag>,
+    /// Per bank (PRG `0..MAX_BANKS`, then CHR), whether an unmodeled custom op
+    /// has been written since the bank's last `.org`, so later addresses there
+    /// are approximate (the editor's lenient resolver only).
+    approx_bank: Vec<bool>,
+    /// Set when an evaluation reads an approximate symbol; reset by callers.
+    eval_taint: bool,
+    /// The constant being defined was computed from an approximate symbol.
+    def_taint: bool,
 }
 
 /// A source span as collected during assembly: like [`SourceSpan`] but keyed by
@@ -626,6 +716,11 @@ pub enum CustomOutput {
     /// Assembly source to lex, parse, and execute inline
     /// ([`Assembler::exec_emitted_source`]).
     Source(String),
+    /// What the directive emits is not known (tooling did not run its
+    /// script). Writes nothing, and marks later addresses in the bank as
+    /// approximate so checks that read them are not reported
+    /// (`plans/022-assertions.md` §4).
+    Unmodeled,
 }
 
 /// Identifies one custom-directive invocation: the directive name, its evaluated
@@ -743,6 +838,10 @@ impl Assembler {
             emitted_ids: HashMap::new(),
             emitted_names: HashMap::new(),
             emit_ctx: (0, 0),
+            out_lines: Vec::new(),
+            approx_bank: vec![false; MAX_BANKS * 2],
+            eval_taint: false,
+            def_taint: false,
         }
     }
 
@@ -848,6 +947,12 @@ impl Assembler {
         std::mem::take(&mut self.warnings)
     }
 
+    /// The `.out` lines the last run printed, in execution order
+    /// (`plans/022-assertions.md` §2.6).
+    pub fn take_out(&mut self) -> Vec<Diag> {
+        std::mem::take(&mut self.out_lines)
+    }
+
     /// Run both passes over the parsed program, returning the output bytes
     /// (including the iNES header in NES mode) or the diagnostic to report.
     pub fn run(&mut self, lines: &[Line]) -> Result<Vec<u8>, Diag> {
@@ -913,6 +1018,10 @@ impl Assembler {
             self.table_entries.clear();
         }
         self.table = None;
+        self.out_lines.clear();
+        self.approx_bank.fill(false);
+        self.eval_taint = false;
+        self.def_taint = false;
         self.for_cursor = 0;
         self.offset_trainer = 0;
         self.scopes.clear();
@@ -942,6 +1051,12 @@ impl Assembler {
             return true;
         }
         depth >= 2 && !self.if_stack[depth - 2]
+    }
+
+    /// Whether any open conditional level is false: the strict test `.assert`,
+    /// `.error` and `.out` use (`plans/022-assertions.md` §2.3).
+    fn if_any_false(&self) -> bool {
+        self.if_stack.iter().any(|c| !c)
     }
 
     /// Assemble the final output bytes: raw ROM, or an iNES / NES 2.0 file in
@@ -1534,6 +1649,15 @@ impl Assembler {
         for d in std::mem::take(&mut self.deferred) {
             match d.check {
                 DeferredCheck::Table(t) => self.check_table(&d.origin, &t),
+                DeferredCheck::Assert(a) => self.check_assert(&d.origin, &a),
+                DeferredCheck::Error { message, template } => {
+                    let text = if message.is_empty() {
+                        t!("error-directive-empty")
+                    } else {
+                        t!("error-directive", message = message)
+                    };
+                    self.report_keyed(&d.origin, format!("error\0{template}"), text);
+                }
             }
             if !self.collect_all && !self.errors.is_empty() {
                 break;
@@ -1544,12 +1668,18 @@ impl Assembler {
     /// Report `message` at a stored origin (an expanded line names its body
     /// file and the calls), with its `.for` suffix, once per (site, message).
     fn report_at(&mut self, origin: &Origin, message: String) {
+        self.report_keyed(origin, message.clone(), message);
+    }
+
+    /// [`Self::report_at`], de-duplicated by `key` rather than the message
+    /// (an assertion's message carries per-iteration values).
+    fn report_keyed(&mut self, origin: &Origin, key: String, message: String) {
         if !self.collect_all && !self.errors.is_empty() {
             return;
         }
         if !self
             .deferred_seen
-            .insert((origin.file, origin.line, origin.expansion, message.clone()))
+            .insert((origin.file, origin.line, origin.expansion, key))
         {
             return;
         }
@@ -1588,12 +1718,15 @@ impl Assembler {
             }
             return;
         }
+        self.eval_taint = false;
         let spec = self.resolve_table_spec(count, first);
+        let spec_approx = std::mem::take(&mut self.eval_taint);
         self.table = Some(OpenTable {
             origin: self.origin(),
             spec,
             entries: Vec::new(),
             untagged_reported: false,
+            spec_approx,
         });
     }
 
@@ -1671,7 +1804,9 @@ impl Assembler {
         if self.table.is_none() {
             return;
         }
+        self.eval_taint = false;
         let value = self.eval(key);
+        let key_approx = std::mem::take(&mut self.eval_taint);
         let origin = self.origin();
         if let Some(t) = self.table.as_mut() {
             t.entries.push(EntryRec {
@@ -1680,6 +1815,8 @@ impl Assembler {
                 literal: matches!(key, Expr::Num(_)),
                 key: value,
                 bytes: 0,
+                approx: false,
+                key_approx,
             });
         }
     }
@@ -1721,11 +1858,19 @@ impl Assembler {
     /// The final-pass checks of one table (§5.1).
     fn check_table(&mut self, origin: &Origin, t: &OpenTable) {
         let step_info = t.spec.first_and_step();
+        // In the editor, values that read an unmodeled custom op's layout are
+        // not checked (`plans/022-assertions.md` §4).
+        let lenient = self.collect_all;
+        let spec_approx = lenient && t.spec_approx;
+        let size_unknown = |e: &EntryRec| lenient && e.approx;
         // 1. Index: only the first mismatch is reported.
         if let Some((first, step)) = step_info {
             let mut expected = first;
             for e in &t.entries {
                 if e.key != expected {
+                    if spec_approx || (lenient && e.key_approx) {
+                        break;
+                    }
                     let message = if e.literal {
                         t!(
                             "table-tag-index-literal",
@@ -1748,8 +1893,12 @@ impl Assembler {
                 expected = expected.wrapping_add(step);
             }
         }
-        // 2. Size.
-        let size = t.entries[0].bytes;
+        // 2. Size, against the first entry whose size is known.
+        let size = t
+            .entries
+            .iter()
+            .find(|e| !size_unknown(e))
+            .map_or(t.entries[0].bytes, |e| e.bytes);
         let index_of = |n: usize, key: i64| {
             step_info.map_or(key, |(first, step)| {
                 first.wrapping_add((n as i64).wrapping_mul(step))
@@ -1758,6 +1907,9 @@ impl Assembler {
         let mut size_ok = vec![true; t.entries.len()];
         for (n, e) in t.entries.iter().enumerate() {
             let index = hex_value(index_of(n, e.key));
+            if size_unknown(e) {
+                continue;
+            }
             if e.bytes == 0 {
                 size_ok[n] = false;
                 self.report_at(&e.origin, t!("table-entry-empty", index = index));
@@ -1777,7 +1929,13 @@ impl Assembler {
         // 3. Count.
         let len = t.entries.len();
         let mut keyed_by = None;
+        let keys_approx = spec_approx || (lenient && t.entries.iter().any(|e| e.key_approx));
         match &t.spec {
+            _ if keys_approx => {
+                if let TableSpec::KeySet { name, .. } = &t.spec {
+                    keyed_by = Some(name.clone());
+                }
+            }
             TableSpec::Count { count, .. } if len as i64 != *count => {
                 self.report_at(origin, t!("table-count", count = len, expected = *count));
             }
@@ -1835,6 +1993,294 @@ impl Assembler {
     #[must_use]
     pub fn table_entries(&self) -> &[TableEntryInfo] {
         &self.table_entries
+    }
+
+    // -- assertions (`plans/022-assertions.md`) -----------------------------
+
+    /// The `approx_bank` slot of the bank being written.
+    fn layout_bank(&self) -> usize {
+        if self.segment_prg {
+            self.prg_index
+        } else {
+            MAX_BANKS + self.chr_index
+        }
+    }
+
+    /// A custom op whose bytes are not modeled ran here: later addresses in
+    /// this bank, and the open table entry's size, are approximate.
+    fn mark_unmodeled(&mut self) {
+        if self.if_suppressed() {
+            return;
+        }
+        let bank = self.layout_bank();
+        self.approx_bank[bank] = true;
+        if let Some(e) = self.table.as_mut().and_then(|t| t.entries.last_mut()) {
+            e.approx = true;
+        }
+    }
+
+    /// `text` with each `\i`, `\j` and `\k` replaced by its counter's value
+    /// when that many loops are open; anything else is left as written.
+    fn substitute_counters(&self, text: &str) -> String {
+        let open = self.loop_stack.len();
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                let depth = match chars.peek() {
+                    Some('i') => Some(0),
+                    Some('j') => Some(1),
+                    Some('k') => Some(2),
+                    _ => None,
+                };
+                if let Some(d) = depth.filter(|d| *d < open) {
+                    chars.next();
+                    out.push_str(&self.loop_stack[open - 1 - d].current.to_string());
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// Whether a final-pass `.assert`/`.error`/`.out` here is assembled.
+    fn assembles_check(&self) -> bool {
+        self.pass == 2 && !self.if_any_false()
+    }
+
+    /// What an assertion's expression needs from this line.
+    fn eval_ctx(&self) -> EvalCtx {
+        EvalCtx {
+            loops: self.loop_stack.iter().rev().map(|f| f.current).collect(),
+            address: self.address_offset(),
+            bank: self.prg_index,
+            scope: self.scope().map(str::to_string),
+            approx: self.approx_bank[self.layout_bank()],
+        }
+    }
+
+    /// Execute `.assert`: on the final pass, queue it for the drain.
+    fn exec_assert(&mut self, expr: &Expr, text: &str, message: Option<&str>) {
+        if !self.assembles_check() {
+            return;
+        }
+        let check = AssertCheck {
+            expr: expr.clone(),
+            text: text.to_string(),
+            message: message.map(|m| self.substitute_counters(m)),
+            template: message.map(str::to_string),
+            ctx: self.eval_ctx(),
+        };
+        let origin = self.origin();
+        self.defer(origin, DeferredCheck::Assert(Box::new(check)));
+    }
+
+    /// Execute `.error`: on the final pass, queue its failure.
+    fn exec_error(&mut self, message: &str) {
+        if !self.assembles_check() {
+            return;
+        }
+        let check = DeferredCheck::Error {
+            message: self.substitute_counters(message),
+            template: message.to_string(),
+        };
+        let origin = self.origin();
+        self.defer(origin, check);
+    }
+
+    /// Execute `.out`: on the final pass, record the line.
+    fn exec_out(&mut self, message: &str) {
+        if !self.assembles_check() {
+            return;
+        }
+        let text = self.substitute_counters(message);
+        let diag = self.diag_here(text);
+        self.out_lines.push(diag);
+    }
+
+    /// Drain one assertion against the final symbol table (§2.2).
+    fn check_assert(&mut self, origin: &Origin, a: &AssertCheck) {
+        let mut taint = false;
+        let message = match self.eval_final(&a.ctx, &a.expr, &mut taint) {
+            Ok(v) if v != 0 => return,
+            // In the editor a failure that reads an unmodeled layout is not
+            // trusted (§4).
+            Ok(_) if taint && self.collect_all => return,
+            Ok(_) => {
+                let detail = self.assert_detail(&a.ctx, &a.expr);
+                let detail = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({detail})")
+                };
+                match &a.message {
+                    Some(m) => t!(
+                        "assert-failed",
+                        message = m.as_str(),
+                        expr = a.text.as_str(),
+                        detail = detail
+                    ),
+                    None => t!(
+                        "assert-failed-bare",
+                        expr = a.text.as_str(),
+                        detail = detail
+                    ),
+                }
+            }
+            Err(Unresolved::Symbol(name)) => t!("assert-undefined", name = name),
+            Err(Unresolved::Loop { depth, open }) => {
+                let counter = ["\\i", "\\j", "\\k"][usize::from(depth).min(2)];
+                if open == 0 {
+                    t!("loop-index-outside", counter = counter)
+                } else {
+                    t!(
+                        "loop-index-too-deep",
+                        counter = counter,
+                        needed = usize::from(depth) + 1,
+                        open = open
+                    )
+                }
+            }
+            Err(Unresolved::Local(direction)) => {
+                let sign = if direction > 0 { "+" } else { "-" };
+                let dir = format!(":{}", sign.repeat(direction.unsigned_abs() as usize));
+                t!("assert-no-local", dir = dir)
+            }
+        };
+        let key = format!(
+            "assert\0{}\0{}",
+            a.text,
+            a.template.as_deref().unwrap_or_default()
+        );
+        self.report_keyed(origin, key, message);
+    }
+
+    /// The DETAIL of an assertion failure (§2.5): both sides of a top-level
+    /// comparison, then the value of each name the expression reads.
+    fn assert_detail(&self, ctx: &EvalCtx, expr: &Expr) -> String {
+        let mut taint = false;
+        let mut parts = Vec::new();
+        if let Expr::Binary(a, op, b) = expr {
+            if let Some(op) = comparison(*op) {
+                if !(matches!(**a, Expr::Num(_)) && matches!(**b, Expr::Num(_))) {
+                    if let (Ok(l), Ok(r)) = (
+                        self.eval_final(ctx, a, &mut taint),
+                        self.eval_final(ctx, b, &mut taint),
+                    ) {
+                        parts.push(format!("{} {op} {}", assert_value(l), assert_value(r)));
+                    }
+                }
+            }
+        }
+        let mut names: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_names(ctx, expr, &mut names);
+        let mut listed: Vec<String> = Vec::new();
+        for (name, e) in names.iter().take(ASSERT_DETAIL_NAMES) {
+            if let Ok(v) = self.eval_final(ctx, e, &mut taint) {
+                listed.push(format!("{name} = {}", assert_value(v)));
+            }
+        }
+        if names.len() > ASSERT_DETAIL_NAMES {
+            listed.push("…".to_string());
+        }
+        if !listed.is_empty() {
+            parts.push(listed.join(", "));
+        }
+        parts.join("; ")
+    }
+
+    /// Each distinct name `expr` reads, in first-appearance order, with the
+    /// sub-expression that reads it.
+    fn collect_names<'e>(ctx: &EvalCtx, expr: &'e Expr, out: &mut Vec<(String, &'e Expr)>) {
+        let name = match expr {
+            Expr::Symbol(n) => Some(n.clone()),
+            Expr::PastedSymbol(base, depth) => Some(match ctx.loops.get(usize::from(*depth)) {
+                Some(v) => format!("{base}{v}"),
+                None => base.clone(),
+            }),
+            Expr::Bank(n) => Some(format!("BANK({n})")),
+            Expr::High(e) | Expr::Low(e) | Expr::Unary(_, e) => {
+                Self::collect_names(ctx, e, out);
+                None
+            }
+            Expr::Binary(a, _, b) => {
+                Self::collect_names(ctx, a, out);
+                Self::collect_names(ctx, b, out);
+                None
+            }
+            _ => None,
+        };
+        if let Some(n) = name {
+            if !out.iter().any(|(seen, _)| *seen == n) {
+                out.push((n, expr));
+            }
+        }
+    }
+
+    /// The defined symbol `name` resolves to under `scope`, for the drain.
+    fn final_symbol(&self, scope: Option<&str>, name: &str) -> Result<&Symbol, Unresolved> {
+        let key = match locals::classify(name) {
+            LocalName::Local(local) => scope.map(|s| format!("{s}{local}")),
+            _ => Some(name.to_string()),
+        };
+        key.and_then(|k| self.find_symbol(&k))
+            .map(|id| &self.symbols[id])
+            .filter(|s| s.kind != SymType::Undefined)
+            .ok_or_else(|| Unresolved::Symbol(locals::display(name).to_string()))
+    }
+
+    /// Evaluate `e` against the final symbol table, without side effects: no
+    /// symbol is registered and nothing is guessed (§2.7). Sets `taint` when
+    /// a value read is approximate.
+    fn eval_final(&self, ctx: &EvalCtx, e: &Expr, taint: &mut bool) -> Result<i64, Unresolved> {
+        Ok(match e {
+            Expr::Num(n) => *n,
+            Expr::Symbol(name) => {
+                let s = self.final_symbol(ctx.scope.as_deref(), name)?;
+                *taint |= s.approx;
+                s.value
+            }
+            Expr::PastedSymbol(base, depth) => {
+                let v = Self::final_loop(ctx, *depth)?;
+                let s = self.final_symbol(ctx.scope.as_deref(), &format!("{base}{v}"))?;
+                *taint |= s.approx;
+                s.value
+            }
+            Expr::Bank(name) => self.final_symbol(ctx.scope.as_deref(), name)?.bank as i64,
+            Expr::LocalForward(n) | Expr::LocalBackward(n) => {
+                let direction = if matches!(e, Expr::LocalForward(_)) {
+                    *n as i32
+                } else {
+                    -(*n as i32)
+                };
+                let id = self
+                    .get_symbol_local_at(direction, ctx.address, ctx.bank)
+                    .ok_or(Unresolved::Local(direction))?;
+                *taint |= ctx.approx || self.symbols[id].approx;
+                self.symbols[id].value
+            }
+            Expr::LoopIndex(depth) => Self::final_loop(ctx, *depth)?,
+            Expr::High(e) => (self.eval_final(ctx, e, taint)? >> 8) & 0xFF,
+            Expr::Low(e) => self.eval_final(ctx, e, taint)? & 0xFF,
+            Expr::Unary(op, e) => Self::apply_unary(*op, self.eval_final(ctx, e, taint)?),
+            Expr::Binary(a, op, b) => {
+                let lhs = self.eval_final(ctx, a, taint)?;
+                let rhs = self.eval_final(ctx, b, taint)?;
+                Self::apply(lhs, *op, rhs)
+            }
+        })
+    }
+
+    /// The captured value of the loop counter `depth` levels out.
+    fn final_loop(ctx: &EvalCtx, depth: u8) -> Result<i64, Unresolved> {
+        ctx.loops
+            .get(usize::from(depth))
+            .copied()
+            .ok_or(Unresolved::Loop {
+                depth,
+                open: ctx.loops.len(),
+            })
     }
 
     // -- error helpers ------------------------------------------------------
@@ -2048,6 +2494,11 @@ impl Assembler {
         });
         let parent = self.scope().map(str::to_string);
         let site = self.cur_site();
+        let approx = match kind {
+            SymType::Label => self.approx_bank[self.layout_bank()],
+            SymType::Constant => self.def_taint,
+            _ => false,
+        };
         // A local or private key (`p1@x`, `\@7@x`): global names never hold `@`.
         let scoped = name.contains('@');
         match existing {
@@ -2069,6 +2520,7 @@ impl Assembler {
                 sym.bank = bank;
                 sym.kind = kind;
                 sym.from_macro = from_macro;
+                sym.approx = approx;
                 if here.is_some() {
                     sym.defined_at = here;
                     sym.site = site;
@@ -2084,6 +2536,7 @@ impl Assembler {
                 defined_at: here,
                 site,
                 parent,
+                approx,
             }),
         }
     }
@@ -2334,13 +2787,17 @@ impl Assembler {
     }
 
     fn get_symbol_local(&self, direction: i32) -> Option<usize> {
+        self.get_symbol_local_at(direction, self.address_offset(), self.prg_index)
+    }
+
+    /// The anonymous label `direction` steps from `offset` in `bank`.
+    fn get_symbol_local_at(&self, direction: i32, offset: i64, bank: usize) -> Option<usize> {
         use std::cmp::Ordering;
-        let offset = self.address_offset();
         match direction.cmp(&0) {
             Ordering::Greater => {
                 let mut remaining = direction;
                 for (i, s) in self.symbols.iter().enumerate() {
-                    if s.name == ":" && s.bank == self.prg_index && s.value > offset {
+                    if s.name == ":" && s.bank == bank && s.value > offset {
                         remaining -= 1;
                         if remaining == 0 {
                             return Some(i);
@@ -2352,7 +2809,7 @@ impl Assembler {
             Ordering::Less => {
                 let mut remaining = direction;
                 for (i, s) in self.symbols.iter().enumerate().rev() {
-                    if s.name == ":" && s.bank == self.prg_index && s.value < offset {
+                    if s.name == ":" && s.bank == bank && s.value < offset {
                         remaining += 1;
                         if remaining == 0 {
                             return Some(i);
@@ -2513,16 +2970,19 @@ impl Assembler {
                 self.enum_member(name, value, 1, bare);
             }
             Stmt::Constant(name, expr) => {
+                self.eval_taint = false;
                 let value = match expr {
                     Some(e) => self.eval(e),
                     None => 1,
                 };
+                self.def_taint = std::mem::take(&mut self.eval_taint);
                 match name {
                     Name::Plain(name) => self.add_symbol(name, value, SymType::Constant),
                     Name::Pasted(base, depth) => {
                         self.add_pasted_symbol(base, *depth, SymType::Constant, Some(value));
                     }
                 }
+                self.def_taint = false;
             }
             Stmt::Instruction(instr) => self.exec_instruction(instr),
             Stmt::Pseudo(p) => self.exec_pseudo(p),
@@ -2536,6 +2996,9 @@ impl Assembler {
                 self.check_table_layout(".org");
                 let addr = self.eval(e);
                 self.exec_org(addr);
+                // A fixed address ends any approximation in this bank.
+                let bank = self.layout_bank();
+                self.approx_bank[bank] = false;
             }
             Pseudo::Phase(e) => {
                 // Store the delta against the *un-phased* load address so the run
@@ -2807,6 +3270,9 @@ impl Assembler {
             Pseudo::For(..) | Pseudo::EndFor => {}
             Pseudo::Table(count, first) => self.exec_table(count.as_ref(), first.as_ref()),
             Pseudo::EndTable => self.exec_endtable(),
+            Pseudo::Assert(expr, text, message) => self.exec_assert(expr, text, message.as_deref()),
+            Pseudo::Error(message) => self.exec_error(message),
+            Pseudo::Out(message) => self.exec_out(message),
         }
     }
 
@@ -2922,6 +3388,7 @@ impl Assembler {
         match result {
             Ok(CustomOutput::Bytes(bytes)) => self.write_all(&bytes),
             Ok(CustomOutput::Source(src)) => self.exec_emitted_source(name, &src),
+            Ok(CustomOutput::Unmodeled) => self.mark_unmodeled(),
             Err(msg) => self.hard_error(msg),
         }
     }
@@ -3406,6 +3873,7 @@ impl Assembler {
                     self.error(msg);
                 }
             }
+            self.eval_taint |= self.symbols[id].approx;
             self.symbols[id].value
         } else {
             self.note_unknown(locals::display(name));
@@ -3443,8 +3911,12 @@ impl Assembler {
             self.note_unknown(name);
             return 1;
         }
+        self.eval_taint |= self.approx_bank[self.layout_bank()];
         match self.get_symbol_local(direction) {
-            Some(id) => self.symbols[id].value,
+            Some(id) => {
+                self.eval_taint |= self.symbols[id].approx;
+                self.symbols[id].value
+            }
             None => 1,
         }
     }
