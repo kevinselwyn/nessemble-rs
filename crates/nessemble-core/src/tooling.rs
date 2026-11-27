@@ -3028,9 +3028,7 @@ fn analyse_program(
         program,
         &contracts,
         &entries,
-        WalkOptions {
-            memory_saves: false,
-        },
+        WalkOptions { memory_saves: true },
     );
 
     let name_of = |file: u32| -> String {

@@ -1029,3 +1029,72 @@ routine:
 ";
     assert_rows(&lint_project(&[("main.asm", main)]), &[]);
 }
+
+// ─── Memory saves (Phase 4) ──────────────────────────────────────────────────
+
+const TMP: &str = "tmp_x = $10\n";
+
+#[test]
+fn a_store_and_reload_preserves_the_register() {
+    let main = format!(
+        "{TMP}; @nessemble-clobbers none\nroutine:\n    stx tmp_x\n    ldx #1\n    ldx tmp_x\n    rts\n"
+    );
+    assert_rows(&lint_project(&[("main.asm", &main)]), &[]);
+}
+
+#[test]
+fn an_intervening_inc_releases_the_save() {
+    let main = format!(
+        "{TMP}; @nessemble-clobbers none\nroutine:\n    stx tmp_x\n    ldx #1\n    inc tmp_x\n    ldx tmp_x\n    rts\n"
+    );
+    assert_rows(
+        &lint_project(&[("main.asm", &main)]),
+        &[
+            "main.asm:3 undeclared-clobber: routine `routine` writes X but does not declare it \
+           clobbered (X: `LDX` on line 5)",
+        ],
+    );
+}
+
+#[test]
+fn a_contracted_callee_clobbering_the_slot_releases_the_save() {
+    let main = format!(
+        "{TMP}; @nessemble-clobbers none\nroutine:\n    stx tmp_x\n    ldx #1\n    jsr scratch\n    ldx tmp_x\n    rts\n\n; @nessemble-clobbers [tmp_x]\nscratch:\n    rts\n"
+    );
+    let rows = lint_project(&[("main.asm", &main)]);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].contains("routine `routine` writes X"), "{rows:?}");
+}
+
+#[test]
+fn exiting_before_the_reload_commits() {
+    let main = format!(
+        "{TMP}; @nessemble-clobbers none\nroutine:\n    stx tmp_x\n    ldx #1\n    bit $2002\n    beq :+\n    ldx tmp_x\n:\n    rts\n"
+    );
+    let rows = lint_project(&[("main.asm", &main)]);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].contains("routine `routine` writes X"), "{rows:?}");
+}
+
+#[test]
+fn an_indexed_store_does_not_release_the_documented_limitation() {
+    let main = format!(
+        "{TMP}; @nessemble-clobbers none\nroutine:\n    stx tmp_x\n    ldx #0\n    sta tmp_x,x\n    ldx tmp_x\n    rts\n"
+    );
+    // `STA tmp_x,X` may overwrite `tmp_x`; the analysis does not model it.
+    assert_rows(&lint_project(&[("main.asm", &main)]), &[]);
+}
+
+#[test]
+fn a_memory_save_explains_an_over_declared_register() {
+    let main = format!(
+        "{TMP}; @nessemble-clobbers X\nroutine:\n    stx tmp_x\n    ldx #1\n    ldx tmp_x\n    rts\n"
+    );
+    assert_rows(
+        &lint_project(&[("main.asm", &main)]),
+        &[
+            "main.asm:3 overdeclared-clobber: routine `routine` declares X clobbered but never \
+           writes it (it is saved on line 4 and restored on line 6)",
+        ],
+    );
+}
