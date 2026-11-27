@@ -9,11 +9,21 @@
 //! Configuration is the discovered `.nessemblerc` `lint` block (see
 //! [`nessemble_rc`]); `--config <file>` forces one and `--no-config` uses
 //! built-in defaults (the one rule at `warn`, window 3, no ignores).
+//!
+//! **Program mode** (`plans/023-whole-program-clobber-analysis.md` §2.1): when
+//! the project assembles from an entry file — `--entry`, the `.nessemblerc`
+//! `entry`, or a file argument that assembles on its own — the routine rules
+//! run over the assembled program. Every other file is linted in **file
+//! mode**, exactly as before.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use nessemble_core::tooling::{lint, LintOptions, RuleSeverity};
+use nessemble_core::tooling::{
+    lint, lint_programs, Finding, LintOptions, ProgramFile, RuleId, RuleSeverity,
+};
+use nessemble_core::{build_program, Options, ProgramBuild};
 use nessemble_rc::{Choice, Config, LintConfig};
 
 use crate::{RETURN_EPERM, RETURN_OK};
@@ -60,8 +70,27 @@ pub struct LintArgs {
     paths: Vec<String>,
 }
 
-/// A file to lint together with its resolved lint configuration.
-type Job = (PathBuf, LintConfig);
+/// A file to lint: the path as reports print it, and whether it was named on
+/// the command line (rather than found by walking a directory).
+struct Job {
+    path: PathBuf,
+    named: bool,
+}
+
+/// One file to report, by canonical path.
+struct Reported {
+    /// The path as the report's header prints it.
+    shown: PathBuf,
+    lint: LintConfig,
+}
+
+/// An entry assembled for program mode.
+struct Built {
+    entry: PathBuf,
+    build: ProgramBuild,
+    /// The entry came from `--entry` or the rc (a failure is reported).
+    explicit: bool,
+}
 
 /// Run `lint` with its parsed options.
 pub fn run(opts: &LintArgs) -> u8 {
@@ -74,6 +103,7 @@ pub fn run(opts: &LintArgs) -> u8 {
     };
 
     let mut jobs: Vec<Job> = Vec::new();
+    let mut configs: Vec<Config> = Vec::new();
     for p in &opts.paths {
         let path = Path::new(p);
         let config = match Config::resolve(path, &choice) {
@@ -86,38 +116,251 @@ pub fn run(opts: &LintArgs) -> u8 {
         if path.is_dir() {
             let mut found = Vec::new();
             crate::format::collect_files(path, &config, &mut found);
-            for file in found {
-                let lint_cfg = config.lint_for(&file);
-                jobs.push((file, lint_cfg));
-            }
+            jobs.extend(found.into_iter().map(|path| Job { path, named: false }));
         } else if path.is_file() {
-            let lint_cfg = config.lint_for(path);
-            jobs.push((path.to_path_buf(), lint_cfg));
+            jobs.push(Job {
+                path: path.to_path_buf(),
+                named: true,
+            });
         } else {
             eprintln!("nessemble: no such file or directory: {p}");
             return RETURN_EPERM;
         }
+        configs.push(config);
     }
-    jobs.sort_by(|a, b| a.0.cmp(&b.0));
-    jobs.dedup_by(|a, b| a.0 == b.0);
 
-    if crate::resolve_root_flag(opts.root.as_deref()).is_err() {
-        return RETURN_EPERM;
-    }
-    let first = Path::new(&opts.paths[0]);
-    let config = match Config::resolve(first, &choice) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("nessemble: {e}");
-            return RETURN_EPERM;
-        }
+    let root = match crate::resolve_root_flag(opts.root.as_deref()) {
+        Ok(root) => root,
+        Err(code) => return code,
     };
-    if let Err(code) = explicit_entries(opts, &config) {
-        return code;
-    }
-    let _ = (&opts.pseudo, opts.no_cache);
 
-    report(&jobs, opts)
+    // The entries, by §2.1's precedence.
+    let mut explicit: Vec<PathBuf> = Vec::new();
+    for config in &configs {
+        match explicit_entries(opts, config) {
+            Ok(list) => {
+                for e in list {
+                    if !explicit.iter().any(|x| same_file(x, &e)) {
+                        explicit.push(e);
+                    }
+                }
+            }
+            Err(code) => return code,
+        }
+        if !opts.entry.is_empty() {
+            break;
+        }
+    }
+    let opportunistic: Vec<PathBuf> = if explicit.is_empty() {
+        jobs.iter()
+            .filter(|j| j.named)
+            .map(|j| j.path.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut code = RETURN_OK;
+    let mut built: Vec<Built> = Vec::new();
+    for (entry, is_explicit) in explicit
+        .iter()
+        .map(|e| (e, true))
+        .chain(opportunistic.iter().map(|e| (e, false)))
+    {
+        let config = &configs[0];
+        let build = assemble(entry, opts, config, root.clone());
+        if is_explicit && build.program.is_none() {
+            for d in &build.errors {
+                crate::print_diag("error-line", d);
+            }
+            eprintln!(
+                "nessemble: lint: `{}` did not assemble, so routine rules were skipped for it",
+                entry.display()
+            );
+            code = RETURN_EPERM;
+        }
+        built.push(Built {
+            entry: entry.clone(),
+            build,
+            explicit: is_explicit,
+        });
+    }
+
+    // What to report: the named and walked files, plus every file in the
+    // closure of an entry that was itself named.
+    let mut reported: BTreeMap<PathBuf, Reported> = BTreeMap::new();
+    for job in &jobs {
+        let canon = canonical(&job.path);
+        let lint = resolve_lint(&job.path, &choice);
+        reported.entry(canon).or_insert(Reported {
+            shown: job.path.clone(),
+            lint,
+        });
+    }
+    for b in &built {
+        if b.build.program.is_none() {
+            continue;
+        }
+        let named = jobs.iter().any(|j| j.named && same_file(&j.path, &b.entry));
+        if !named {
+            continue;
+        }
+        for path in &b.build.paths {
+            let canon = canonical(path);
+            if reported.contains_key(&canon) {
+                continue;
+            }
+            let config = Config::resolve(path, &choice).ok();
+            if config.as_ref().is_some_and(|c| c.is_ignored(path)) {
+                continue;
+            }
+            reported.insert(
+                canon.clone(),
+                Reported {
+                    shown: display_rel(&canon),
+                    lint: config.map_or_else(LintConfig::default, |c| c.lint_for(path)),
+                },
+            );
+        }
+    }
+
+    // Program mode: every file of an assembled program (reported or not, so
+    // the contracts of the whole closure are known).
+    let programs: Vec<_> = built
+        .iter()
+        .filter_map(|b| b.build.program.clone())
+        .collect();
+    let mut closure: Vec<PathBuf> = Vec::new();
+    for b in built.iter().filter(|b| b.build.program.is_some()) {
+        for path in &b.build.paths {
+            let canon = canonical(path);
+            if !closure.contains(&canon) {
+                closure.push(canon);
+            }
+        }
+    }
+    // A failed explicit entry's files get no routine rules at all (§2.1).
+    let skipped: HashSet<PathBuf> = built
+        .iter()
+        .filter(|b| b.explicit && b.build.program.is_none())
+        .flat_map(|b| b.build.paths.iter().map(|p| canonical(p)))
+        .filter(|p| !closure.contains(p))
+        .collect();
+
+    let mut findings: BTreeMap<PathBuf, Vec<Finding>> = BTreeMap::new();
+    if !programs.is_empty() {
+        let mut sources: Vec<(PathBuf, String, LintConfig)> = Vec::new();
+        for canon in &closure {
+            let Ok(source) = std::fs::read_to_string(canon) else {
+                continue;
+            };
+            let lint = match reported.get(canon) {
+                Some(r) => r.lint.clone(),
+                None => resolve_lint(canon, &choice),
+            };
+            sources.push((canon.clone(), source, lint));
+        }
+        let ignores: Vec<_> = sources
+            .iter()
+            .map(|(_, _, cfg)| move |n: &str| cfg.is_ignored_name(n))
+            .collect();
+        let options: Vec<LintOptions> = sources
+            .iter()
+            .zip(&ignores)
+            .map(|((_, _, cfg), ignore)| LintOptions {
+                severities: cfg.severities.clone(),
+                window: cfg.window,
+                ignore,
+            })
+            .collect();
+        let files: Vec<ProgramFile> = sources
+            .iter()
+            .zip(&options)
+            .map(|((path, source, _), options)| ProgramFile {
+                path,
+                source,
+                options,
+                report: reported.contains_key(path),
+            })
+            .collect();
+        let result = lint_programs(&programs, &files);
+        for ((path, _, _), f) in sources.iter().zip(result.findings) {
+            if reported.contains_key(path) {
+                findings.insert(path.clone(), f);
+            }
+        }
+    }
+
+    // File mode for everything else.
+    let mut io_code = RETURN_OK;
+    for (canon, r) in &reported {
+        if findings.contains_key(canon) {
+            continue;
+        }
+        let source = match std::fs::read_to_string(&r.shown) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("nessemble: could not read `{}`: {e}", r.shown.display());
+                io_code = RETURN_EPERM;
+                continue;
+            }
+        };
+        let ignore = |name: &str| r.lint.is_ignored_name(name);
+        let mut severities = r.lint.severities.clone();
+        if skipped.contains(canon) {
+            for rule in RuleId::ALL.into_iter().filter(|r| r.needs_program()) {
+                severities.set(rule, RuleSeverity::Off);
+            }
+        }
+        let options = LintOptions {
+            severities,
+            window: r.lint.window,
+            ignore: &ignore,
+        };
+        findings.insert(canon.clone(), lint(&source, &options));
+    }
+
+    let mut rows: Vec<(&Reported, &[Finding])> = reported
+        .iter()
+        .filter_map(|(canon, r)| findings.get(canon).map(|f| (r, f.as_slice())))
+        .collect();
+    rows.sort_by(|a, b| a.0.shown.cmp(&b.0.shown));
+    let report_code = report(&rows, opts);
+    [io_code, code, report_code]
+        .into_iter()
+        .find(|&c| c != RETURN_OK)
+        .unwrap_or(RETURN_OK)
+}
+
+/// Assemble `entry` for program mode, reading from disk.
+fn assemble(entry: &Path, opts: &LintArgs, config: &Config, root: Option<PathBuf>) -> ProgramBuild {
+    let options = Options {
+        project_root: root,
+        rules: config.assemble_rules(),
+        ..Options::default()
+    };
+    let pseudo = opts
+        .pseudo
+        .clone()
+        .or_else(|| config.pseudo().map(|p| p.display().to_string()));
+    let resolver = crate::custom::build_resolver(pseudo.as_deref(), !opts.no_cache, None);
+    let source = std::fs::read_to_string(entry).unwrap_or_default();
+    let none = |_: &Path| None;
+    build_program(entry, &source, &options, &none, resolver)
+}
+
+/// The lint configuration for `path`, or the defaults when its config cannot
+/// be read (already reported when the path was a job).
+fn resolve_lint(path: &Path, choice: &Choice) -> LintConfig {
+    Config::resolve(path, choice).map_or_else(|_| LintConfig::default(), |c| c.lint_for(path))
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    canonical(a) == canonical(b)
 }
 
 /// The explicit entries — `--entry` flags, else the `.nessemblerc` `entry` —
@@ -140,7 +383,7 @@ fn explicit_entries(opts: &LintArgs, config: &Config) -> Result<Vec<PathBuf>, u8
         if !entry.is_file() {
             let rc = config
                 .rc_path()
-                .map(|p| display_rel(&p))
+                .map(|p| display_rel(&p).display().to_string())
                 .unwrap_or_default();
             let shown = config
                 .rc_dir()
@@ -154,7 +397,7 @@ fn explicit_entries(opts: &LintArgs, config: &Config) -> Result<Vec<PathBuf>, u8
 }
 
 /// `path` relative to the current directory when it is under it.
-fn display_rel(path: &Path) -> String {
+fn display_rel(path: &Path) -> PathBuf {
     std::env::current_dir()
         .ok()
         .and_then(|cwd| {
@@ -162,39 +405,19 @@ fn display_rel(path: &Path) -> String {
             path.strip_prefix(&cwd).ok().map(Path::to_path_buf)
         })
         .unwrap_or_else(|| path.to_path_buf())
-        .display()
-        .to_string()
 }
 
-/// Lint every job, print the grouped report, and return the exit code.
-fn report(jobs: &[Job], opts: &LintArgs) -> u8 {
+/// Print the grouped report and return the exit code.
+fn report(files: &[(&Reported, &[Finding])], opts: &LintArgs) -> u8 {
     let mut total_errors = 0usize;
     let mut total_warnings = 0usize;
-    let mut io_code = RETURN_OK;
 
-    for (file, lint_cfg) in jobs {
-        let source = match std::fs::read_to_string(file) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("nessemble: could not read `{}`: {e}", file.display());
-                io_code = RETURN_EPERM;
-                continue;
-            }
-        };
-
-        let ignore = |name: &str| lint_cfg.is_ignored_name(name);
-        let options = LintOptions {
-            severities: lint_cfg.severities.clone(),
-            window: lint_cfg.window,
-            ignore: &ignore,
-        };
-        let findings = lint(&source, &options);
-
+    for (file, findings) in files {
         // Map each finding to its severity, filtering out warnings under
         // `--quiet`, and collect the rows to print for this file.
-        let mut rows: Vec<(&nessemble_core::tooling::Finding, &'static str)> = Vec::new();
-        for f in &findings {
-            match lint_cfg.severities.get(f.rule) {
+        let mut rows: Vec<(&Finding, &'static str)> = Vec::new();
+        for f in *findings {
+            match file.lint.severities.get(f.rule) {
                 RuleSeverity::Error => {
                     total_errors += 1;
                     rows.push((f, "error"));
@@ -214,7 +437,7 @@ fn report(jobs: &[Job], opts: &LintArgs) -> u8 {
         if rows.is_empty() {
             continue;
         }
-        println!("\n{}", file.display());
+        println!("\n{}", file.shown.display());
         for (f, severity) in rows {
             // ESLint's row shape: position, severity, what is wrong, rule id.
             // The message names the subject, so it is not printed twice.
@@ -231,9 +454,6 @@ fn report(jobs: &[Job], opts: &LintArgs) -> u8 {
 
     print_summary(total_errors, total_warnings);
 
-    if io_code != RETURN_OK {
-        return io_code;
-    }
     if total_errors > 0 {
         return RETURN_EPERM;
     }

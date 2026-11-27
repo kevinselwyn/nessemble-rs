@@ -906,11 +906,18 @@ impl Assembler {
         }
         let builder = std::mem::take(&mut self.program);
         let files = self.paths.clone();
+        let symbols = self
+            .symbols
+            .iter()
+            .filter(|s| s.kind != SymType::Undefined && s.name != ":")
+            .map(|s| (s.name.clone(), s.value))
+            .collect();
         Some(builder.finish(
             self.rom.clone(),
             self.coverage.clone(),
             files,
             self.undocumented,
+            symbols,
         ))
     }
 
@@ -3099,9 +3106,9 @@ impl Assembler {
             self.exec_stmt_inner(stmt);
             return;
         }
-        let anchor = match stmt {
-            Stmt::Instruction(instr) => self.operand_anchor(instr),
-            _ => None,
+        let (anchor, operand) = match stmt {
+            Stmt::Instruction(instr) => (self.operand_anchor(instr), operand_text(&instr.operand)),
+            _ => (None, None),
         };
         let (site, via) = self.author_site();
         let outer = std::mem::take(&mut self.program.cur);
@@ -3125,6 +3132,7 @@ impl Assembler {
                 site,
                 via: via.clone(),
                 kind,
+                operand: operand.clone(),
             });
             self.program.anchors.push(anchor);
         }
@@ -4159,6 +4167,66 @@ impl Assembler {
             BinOp::Gt => (a > b) as i64,
             BinOp::Le => (a <= b) as i64,
             BinOp::Ge => (a >= b) as i64,
+        }
+    }
+}
+
+/// An instruction's operand rendered back to source, for messages: the forms a
+/// control transfer can take (`helper`, `[vec_ptr]`, `:+`).
+fn operand_text(op: &Operand) -> Option<String> {
+    match op {
+        Operand::Absolute(e) | Operand::ZeroPage(e) => Some(expr_text(e)),
+        Operand::Indirect(e) => Some(format!("[{}]", expr_text(e))),
+        _ => None,
+    }
+}
+
+/// `expr` rendered back to source text (normalized spacing; numbers in hex).
+fn expr_text(expr: &Expr) -> String {
+    match expr {
+        Expr::Num(n) if (0..10).contains(n) => n.to_string(),
+        Expr::Num(n) if (0..=0xFF).contains(n) => format!("${n:02X}"),
+        Expr::Num(n) if (0..=0xFFFF).contains(n) => format!("${n:04X}"),
+        Expr::Num(n) => n.to_string(),
+        Expr::Symbol(name) => name.clone(),
+        Expr::LocalForward(n) => format!(":{}", "+".repeat(*n as usize)),
+        Expr::LocalBackward(n) => format!(":{}", "-".repeat(*n as usize)),
+        Expr::High(e) => format!(">{}", expr_text(e)),
+        Expr::Low(e) => format!("<{}", expr_text(e)),
+        Expr::Bank(name) => format!("BANK({name})"),
+        Expr::LoopIndex(d) => ["\\i", "\\j", "\\k"][usize::from(*d).min(2)].to_string(),
+        Expr::PastedSymbol(base, d) => {
+            format!("{base}{}", ["\\i", "\\j", "\\k"][usize::from(*d).min(2)])
+        }
+        Expr::Unary(op, e) => {
+            let op = match op {
+                UnOp::Neg => "-",
+                UnOp::Not => "!",
+                UnOp::Compl => "~",
+            };
+            format!("{op}{}", expr_text(e))
+        }
+        Expr::Binary(a, op, b) => {
+            let op = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Pow => "**",
+                BinOp::And => "&",
+                BinOp::Or => "|",
+                BinOp::Xor => "^",
+                BinOp::Rshift => ">>",
+                BinOp::Lshift => "<<",
+                BinOp::Mod => "%",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::Lt => "<",
+                BinOp::Gt => ">",
+                BinOp::Le => "<=",
+                BinOp::Ge => ">=",
+            };
+            format!("{}{op}{}", expr_text(a), expr_text(b))
         }
     }
 }

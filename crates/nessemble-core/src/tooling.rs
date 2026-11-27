@@ -7,11 +7,14 @@
 //! trivia can be classified for highlighting. It is intentionally separate from
 //! the parity lexer, which stays byte-for-byte untouched.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use nessemble_isa::RegSet;
+
+use crate::program::{EmitKind, ProgramMap, Resolution, Site, Via};
 
 /// The kind of a lexeme. Every byte of the input belongs to exactly one lexeme,
 /// so the stream is gap-free and reversible.
@@ -2363,11 +2366,14 @@ pub enum RuleId {
     OverdeclaredClobber,
     /// A called routine with no signature annotations. Off by default.
     RequireRoutineDoc,
+    /// A routine with a clobber list that the whole-program analysis cannot
+    /// follow on some path (an indirect jump, …). Program mode only.
+    UnverifiableClobbers,
 }
 
 impl RuleId {
     /// Every rule, in a stable order (also the [`SeverityMap`] index order).
-    pub const ALL: [RuleId; 8] = [
+    pub const ALL: [RuleId; 9] = [
         RuleId::RequireBlockComment,
         RuleId::UnknownCommentDirective,
         RuleId::DeprecatedCommentDirective,
@@ -2376,6 +2382,7 @@ impl RuleId {
         RuleId::UndeclaredClobber,
         RuleId::OverdeclaredClobber,
         RuleId::RequireRoutineDoc,
+        RuleId::UnverifiableClobbers,
     ];
 
     /// The stable kebab-case identifier used in `.nessemblerc` and in reports.
@@ -2390,6 +2397,7 @@ impl RuleId {
             RuleId::UndeclaredClobber => "undeclared-clobber",
             RuleId::OverdeclaredClobber => "overdeclared-clobber",
             RuleId::RequireRoutineDoc => "require-routine-doc",
+            RuleId::UnverifiableClobbers => "unverifiable-clobbers",
         }
     }
 
@@ -2425,6 +2433,7 @@ impl RuleId {
             RuleId::UndeclaredClobber => 5,
             RuleId::OverdeclaredClobber => 6,
             RuleId::RequireRoutineDoc => 7,
+            RuleId::UnverifiableClobbers => 8,
         }
     }
 
@@ -2437,6 +2446,20 @@ impl RuleId {
                 | RuleId::UndeclaredClobber
                 | RuleId::OverdeclaredClobber
                 | RuleId::RequireRoutineDoc
+                | RuleId::UnverifiableClobbers
+        )
+    }
+
+    /// Whether this rule uses the whole-program analysis when a program is
+    /// available (`plans/023-whole-program-clobber-analysis.md` §2.1).
+    #[must_use]
+    pub fn needs_program(self) -> bool {
+        matches!(
+            self,
+            RuleId::UndeclaredClobber
+                | RuleId::OverdeclaredClobber
+                | RuleId::RequireRoutineDoc
+                | RuleId::UnverifiableClobbers
         )
     }
 }
@@ -2603,6 +2626,620 @@ pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
     findings.retain(|f| !suppressions.suppresses(f.rule, f.line));
     findings.sort_by_key(|f| (f.line, f.column));
     findings
+}
+
+// ─── Program mode ────────────────────────────────────────────────────────────
+//
+// The routine rules over the assembled program, rather than over text blocks
+// (`plans/023-whole-program-clobber-analysis.md`). Text rules are unchanged.
+
+/// One file to lint in program mode.
+pub struct ProgramFile<'a> {
+    /// The path as reports print it.
+    pub path: &'a Path,
+    pub source: &'a str,
+    /// This file's own lint configuration (per-glob overrides and `ignore`
+    /// apply as in file mode).
+    pub options: &'a LintOptions<'a>,
+    /// Whether the caller reports this file's findings. A file in the include
+    /// closure that is not reported still supplies its contracts.
+    pub report: bool,
+}
+
+/// The result of [`lint_programs`].
+#[derive(Debug, Default)]
+pub struct ProgramLint {
+    /// Findings per file, parallel to the `files` given (empty when not
+    /// reported), sorted by position.
+    pub findings: Vec<Vec<Finding>>,
+    /// Per `(file index, routine name)`, the registers it writes but does not
+    /// declare — what "Add `X` to clobbers" offers.
+    missing: HashMap<(usize, String), Vec<Slot>>,
+    /// The canonical path of each file, parallel to `findings`.
+    paths: Vec<PathBuf>,
+}
+
+/// The registers the routine `name` in `path` writes but does not declare,
+/// according to a [`lint_programs`] run: [`missing_clobbers`] for program
+/// mode. `None` when the routine was not analysed.
+#[must_use]
+pub fn missing_clobbers_in(lint: &ProgramLint, path: &Path, name: &str) -> Option<Vec<Slot>> {
+    let canon = canonical(path);
+    let file = lint.paths.iter().position(|p| *p == canon)?;
+    lint.missing.get(&(file, name.to_string())).cloned()
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// One file's text analysis, shared by every rule.
+struct Prepared<'a> {
+    source: &'a str,
+    lines: Vec<Vec<Lexeme>>,
+    directives: Vec<Directive>,
+    malformed: Vec<MalformedDirective>,
+    signatures: Vec<Signature>,
+    problems: Vec<SignatureProblem>,
+    /// 1-based lines of the block-opening labels, ascending.
+    block_starts: Vec<u32>,
+}
+
+impl<'a> Prepared<'a> {
+    fn new(source: &'a str) -> Prepared<'a> {
+        let lexemes = lex(source);
+        let lines = split_lines(&lexemes);
+        let (directives, malformed) = scan_directive_lines(source, &lines);
+        let (signatures, problems) = resolve_signature_lines(source, &lines, &directives);
+        let block_starts = lines
+            .iter()
+            .enumerate()
+            .filter(|(idx, line)| {
+                block_label(source, line).is_some() && is_block_entry(source, &lines, *idx)
+            })
+            .map(|(idx, _)| idx as u32 + 1)
+            .collect();
+        Prepared {
+            source,
+            lines,
+            directives,
+            malformed,
+            signatures,
+            problems,
+            block_starts,
+        }
+    }
+
+    fn ctx(&self) -> LintCtx<'_> {
+        LintCtx {
+            source: self.source,
+            lines: &self.lines,
+            directives: &self.directives,
+            malformed: &self.malformed,
+            signatures: &self.signatures,
+            signature_problems: &self.problems,
+        }
+    }
+
+    /// The text block holding 1-based `line`: its opening label's line.
+    fn block_of(&self, line: u32) -> Option<u32> {
+        self.block_starts
+            .iter()
+            .rev()
+            .find(|&&b| b <= line)
+            .copied()
+    }
+}
+
+/// One routine's merged result across every program it is assembled in.
+#[derive(Default)]
+struct Merged {
+    /// Registers written but not declared (union), with each one's origin.
+    undeclared: RegSet,
+    origins: [Option<String>; 4],
+    /// Declared clobbers never written, in every program (intersection); `None`
+    /// before the first program.
+    extra: Option<RegSet>,
+    /// A save that explains an extra register, per register.
+    preserved: [Option<String>; 4],
+    /// Unverifiable reasons, rendered (union).
+    reasons: Vec<String>,
+    /// The editor did not run a pseudo-op this routine reaches.
+    editor: bool,
+}
+
+/// Lint `files` in program mode against the assembled `programs`
+/// (`plans/023-whole-program-clobber-analysis.md` §2.6). Text rules run per
+/// file exactly as [`lint`] runs them; the routine rules run once over the
+/// programs, and a file in several programs gets the merge of §2.1.
+#[must_use]
+pub fn lint_programs(programs: &[ProgramMap], files: &[ProgramFile]) -> ProgramLint {
+    let prepared: Vec<Prepared> = files.iter().map(|f| Prepared::new(f.source)).collect();
+    let paths: Vec<PathBuf> = files.iter().map(|f| canonical(f.path)).collect();
+    let mut merged: HashMap<(usize, u32), Merged> = HashMap::new();
+    let mut called: HashSet<(usize, u32)> = HashSet::new();
+
+    for program in programs {
+        analyse_program(program, files, &prepared, &paths, &mut merged, &mut called);
+    }
+
+    let mut out = ProgramLint {
+        findings: Vec::with_capacity(files.len()),
+        missing: HashMap::new(),
+        paths,
+    };
+    for (fi, (file, prep)) in files.iter().zip(&prepared).enumerate() {
+        for sig in prep.signatures.iter().filter(|s| s.declares_clobbers) {
+            if let Some(m) = merged.get(&(fi, sig.line)) {
+                out.missing
+                    .insert((fi, sig.name.clone()), regs_to_slots(m.undeclared));
+            }
+        }
+        if !file.report {
+            out.findings.push(Vec::new());
+            continue;
+        }
+        let opts = file.options;
+        let ctx = prep.ctx();
+        let mut findings = Vec::new();
+        for &(rule, run) in RULES {
+            if !rule.needs_program() && opts.severities.get(rule) != RuleSeverity::Off {
+                run(&ctx, opts, &mut findings);
+            }
+        }
+        program_findings(fi, prep, opts, &merged, &called, &mut findings);
+        let suppressions = LintSuppressions::resolve(&prep.lines, &prep.directives);
+        findings.retain(|f| !suppressions.suppresses(f.rule, f.line));
+        findings.sort_by_key(|f| (f.line, f.column));
+        out.findings.push(findings);
+    }
+    out
+}
+
+/// The routine-rule findings for file `fi` from the merged analysis.
+fn program_findings(
+    fi: usize,
+    prep: &Prepared,
+    opts: &LintOptions,
+    merged: &HashMap<(usize, u32), Merged>,
+    called: &HashSet<(usize, u32)>,
+    out: &mut Vec<Finding>,
+) {
+    let ctx = prep.ctx();
+    let on = |rule| opts.severities.get(rule) != RuleSeverity::Off;
+    for sig in prep.signatures.iter().filter(|s| s.declares_clobbers) {
+        if (opts.ignore)(&sig.name) {
+            continue;
+        }
+        let Some(m) = merged.get(&(fi, sig.line)) else {
+            continue;
+        };
+        let column = label_column(&ctx, sig.line);
+        let name = &sig.name;
+        if on(RuleId::UndeclaredClobber) && !m.undeclared.is_empty() {
+            let details: Vec<String> = (0..4)
+                .filter(|&r| m.undeclared.contains(crate::clobbers::reg_set(r)))
+                .filter_map(|r| {
+                    m.origins[r]
+                        .as_ref()
+                        .map(|o| format!("{}: {o}", crate::clobbers::reg_name(r)))
+                })
+                .collect();
+            out.push(Finding {
+                rule: RuleId::UndeclaredClobber,
+                line: sig.line,
+                column,
+                subject: name.clone(),
+                message: format!(
+                    "routine `{name}` writes {} but does not declare {} clobbered ({})",
+                    reg_list(m.undeclared),
+                    it_or_them(m.undeclared),
+                    details.join("; ")
+                ),
+            });
+        }
+        let extra = m.extra.unwrap_or(RegSet::EMPTY);
+        if on(RuleId::OverdeclaredClobber) && !extra.is_empty() {
+            let mut message = format!(
+                "routine `{name}` declares {} clobbered but never writes {}",
+                reg_list(extra),
+                it_or_them(extra),
+            );
+            if extra.bits().is_power_of_two() {
+                let reg = extra.bits().trailing_zeros() as usize;
+                if let Some(p) = &m.preserved[reg] {
+                    message = format!("{message} ({p})");
+                }
+            }
+            out.push(Finding {
+                rule: RuleId::OverdeclaredClobber,
+                line: sig.line,
+                column,
+                subject: name.clone(),
+                message,
+            });
+        }
+        if on(RuleId::UnverifiableClobbers) && !m.reasons.is_empty() {
+            let more = match m.reasons.len() - 1 {
+                0 => String::new(),
+                n => format!(" (and {n} more)"),
+            };
+            out.push(Finding {
+                rule: RuleId::UnverifiableClobbers,
+                line: sig.line,
+                column,
+                subject: name.clone(),
+                message: format!(
+                    "routine `{name}` cannot be fully verified: {}{more}",
+                    m.reasons[0]
+                ),
+            });
+        }
+    }
+    if on(RuleId::RequireRoutineDoc) {
+        for &line in &prep.block_starts {
+            if !called.contains(&(fi, line)) {
+                continue;
+            }
+            let Some((name, column)) = block_label(prep.source, &prep.lines[line as usize - 1])
+            else {
+                continue;
+            };
+            if (opts.ignore)(name) || prep.signatures.iter().any(|s| s.name == name) {
+                continue;
+            }
+            out.push(Finding {
+                rule: RuleId::RequireRoutineDoc,
+                line,
+                column,
+                subject: name.to_string(),
+                message: format!("called routine `{name}` has no signature annotations"),
+            });
+        }
+    }
+}
+
+/// The verifier registers in `regs`, as slots in canonical order.
+fn regs_to_slots(regs: RegSet) -> Vec<Slot> {
+    [
+        (RegSet::A, Slot::A),
+        (RegSet::X, Slot::X),
+        (RegSet::Y, Slot::Y),
+        (RegSet::S, Slot::S),
+    ]
+    .into_iter()
+    .filter(|&(bit, _)| regs.contains(bit))
+    .map(|(_, slot)| slot)
+    .collect()
+}
+
+/// Run the analysis over one program and merge its results.
+fn analyse_program(
+    program: &ProgramMap,
+    files: &[ProgramFile],
+    prepared: &[Prepared],
+    paths: &[PathBuf],
+    merged: &mut HashMap<(usize, u32), Merged>,
+    called: &mut HashSet<(usize, u32)>,
+) {
+    use crate::clobbers::{analyze, Contract, Contracts, WalkOptions};
+
+    // Program file id → index into `files`.
+    let file_of: Vec<Option<usize>> = program
+        .files
+        .iter()
+        .map(|p| {
+            let c = canonical(p);
+            paths.iter().position(|q| *q == c)
+        })
+        .collect();
+    let symbols: HashMap<&str, i64> = program
+        .symbols
+        .iter()
+        .map(|(n, v)| (n.as_str(), *v))
+        .collect();
+
+    let mut contracts = Contracts::default();
+    // Contracted labels to walk: (rom offset, file, signature line).
+    let mut routines: Vec<(usize, usize, u32)> = Vec::new();
+    for def in program
+        .labels
+        .iter()
+        .filter(|l| !l.in_expansion && !l.local)
+    {
+        let Some(fi) = file_of.get(def.site.file as usize).copied().flatten() else {
+            continue;
+        };
+        let Some(sig) = prepared[fi]
+            .signatures
+            .iter()
+            .find(|s| s.line == def.site.line && s.name == def.name && s.declares_clobbers)
+        else {
+            continue;
+        };
+        let memory = sig
+            .clobbers
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Address(lo, hi) => Some((*lo, *hi)),
+                Slot::Symbol(name) => symbols
+                    .get(name.as_str())
+                    .and_then(|&v| u16::try_from(v).ok().map(|v| (v, v))),
+                _ => None,
+            })
+            .collect();
+        contracts.insert(
+            def.rom_offset,
+            Contract {
+                name: sig.name.clone(),
+                writes: declared_regs(sig),
+                memory,
+                site: def.site,
+            },
+        );
+        routines.push((def.rom_offset, fi, sig.line));
+    }
+
+    let mut entries: Vec<usize> = routines.iter().map(|r| r.0).collect();
+    entries.sort_unstable();
+    entries.dedup();
+    let effects = analyze(
+        program,
+        &contracts,
+        &entries,
+        WalkOptions {
+            memory_saves: false,
+        },
+    );
+
+    let name_of = |file: u32| -> String {
+        match file_of.get(file as usize).copied().flatten() {
+            Some(fi) => files[fi].path.display().to_string(),
+            None => program
+                .files
+                .get(file as usize)
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        }
+    };
+
+    // Each routine: the union over its definitions in this program.
+    let mut per_routine: HashMap<(usize, u32), crate::clobbers::RoutineEffect> = HashMap::new();
+    for &(off, fi, line) in &routines {
+        if let Some(effect) = effects.get(&off) {
+            per_routine.entry((fi, line)).or_default().join(effect);
+        }
+    }
+    for ((fi, line), effect) in per_routine {
+        let Some(sig) = prepared[fi].signatures.iter().find(|s| s.line == line) else {
+            continue;
+        };
+        let own = files[fi].path.display().to_string();
+        let render = Render {
+            own: &own,
+            name_of: &name_of,
+        };
+        let declared = declared_regs(sig);
+        let undeclared = RegSet::from_bits(effect.writes.bits() & !declared.bits());
+        let mut reasons: Vec<String> = effect
+            .reasons
+            .iter()
+            .filter(|r| !matches!(r.kind, crate::clobbers::ReasonKind::EditorNotRun(_)))
+            .map(|r| render.reason(r))
+            .collect();
+        if let Some(pull) = &effect.pulls_return {
+            if pull.text == "PLA" || pull.text == "PLP" {
+                reasons.push(format!(
+                    "`{}` on {} pulls the routine's own return address",
+                    pull.text,
+                    render.at(pull.site)
+                ));
+            }
+        }
+        let verifiable = reasons.is_empty() && !effect.editor_not_run();
+        let clobbers = slots_to_regs(&sig.clobbers);
+        let extra = if verifiable {
+            RegSet::from_bits(clobbers.bits() & !effect.writes.bits())
+        } else {
+            RegSet::EMPTY
+        };
+
+        let m = merged.entry((fi, line)).or_default();
+        for reg in 0..4 {
+            let bit = crate::clobbers::reg_set(reg);
+            if undeclared.contains(bit) && !m.undeclared.contains(bit) {
+                m.origins[reg] = effect.origins[reg]
+                    .as_ref()
+                    .map(|o| render.origin(o, crate::clobbers::reg_name(reg)));
+            }
+            if m.preserved[reg].is_none() {
+                if let Some(p) = effect.preserved.iter().find(|p| p.reg == reg) {
+                    m.preserved[reg] = Some(format!(
+                        "it is saved on {} and restored on {}",
+                        render.at(p.saved),
+                        render.at(p.restored)
+                    ));
+                }
+            }
+        }
+        m.undeclared = m.undeclared.union(undeclared);
+        m.extra = Some(match m.extra {
+            None => extra,
+            Some(prev) => RegSet::from_bits(prev.bits() & extra.bits()),
+        });
+        for r in reasons {
+            if !m.reasons.contains(&r) {
+                m.reasons.push(r);
+            }
+        }
+        m.editor |= effect.editor_not_run();
+    }
+
+    // `require-routine-doc`: what a `JSR` anywhere, or a tail `JMP`, reaches.
+    for emit in &program.emits {
+        let EmitKind::Instruction {
+            target: Some(target),
+        } = &emit.kind
+        else {
+            continue;
+        };
+        let op = program.image.get(emit.rom_offset).copied();
+        if op != Some(0x20) && op != Some(0x4C) {
+            continue;
+        }
+        let Resolution::At(t) = program.resolve(target, emit.bank) else {
+            continue;
+        };
+        for def in program.labels_at(t).filter(|l| !l.in_expansion && !l.local) {
+            let Some(fi) = file_of.get(def.site.file as usize).copied().flatten() else {
+                continue;
+            };
+            if op == Some(0x4C) {
+                // A loop back to the top of the same text block is not a call.
+                let same_file = file_of.get(emit.site.file as usize).copied().flatten() == Some(fi);
+                if same_file && prepared[fi].block_of(emit.site.line) == Some(def.site.line) {
+                    continue;
+                }
+            }
+            called.insert((fi, def.site.line));
+        }
+    }
+}
+
+/// Message rendering for one routine: lines in the routine's own file are
+/// bare, others name their file.
+struct Render<'a> {
+    own: &'a str,
+    name_of: &'a dyn Fn(u32) -> String,
+}
+
+impl Render<'_> {
+    /// "line 14", or "line 14 of \`util.asm\`" for another file.
+    fn at(&self, site: Site) -> String {
+        let file = (self.name_of)(site.file);
+        if file == self.own {
+            format!("line {}", site.line)
+        } else {
+            format!("line {} of `{file}`", site.line)
+        }
+    }
+
+    fn step(&self, step: &crate::clobbers::Step) -> String {
+        format!("`{}` on {}", step.text, self.at(step.site))
+    }
+
+    fn origin(&self, origin: &crate::clobbers::WriteOrigin, reg: &str) -> String {
+        use crate::clobbers::OriginBase;
+        let base = match &origin.base {
+            OriginBase::Instr {
+                mnemonic,
+                site,
+                via,
+                data,
+            } => match (data, via) {
+                (Some(directive), _) => {
+                    format!(
+                        "hand-encoded `{mnemonic}` in `{directive}` on {}",
+                        self.at(*site)
+                    )
+                }
+                (None, Some(Via::Macro(name))) => {
+                    format!("`{mnemonic}` in `.macro {name}` on {}", self.at(*site))
+                }
+                (None, Some(Via::Pseudo(name))) => {
+                    format!("`{mnemonic}` in `.{name}` on {}", self.at(*site))
+                }
+                (None, None) => format!("`{mnemonic}` on {}", self.at(*site)),
+            },
+            OriginBase::Contract { how, name, site } => match how {
+                Some(step) => format!("{}, whose contract clobbers {reg}", self.step(step)),
+                None => format!(
+                    "falls through into `{name}` on {}, whose contract clobbers {reg}",
+                    self.at(*site)
+                ),
+            },
+        };
+        match &origin.through {
+            Some(step) => format!("{base}, reached through {}", self.step(step)),
+            None => base,
+        }
+    }
+
+    fn reason(&self, reason: &crate::clobbers::Reason) -> String {
+        use crate::clobbers::ReasonKind;
+        let text = match &reason.kind {
+            ReasonKind::IndirectJmp(step) => format!("indirect {} ends a path", self.step(step)),
+            ReasonKind::ReturnThroughPushed(step) => format!(
+                "{} returns through values the routine pushed (a computed jump)",
+                self.step(step)
+            ),
+            ReasonKind::ReturnAfterTxs { ret, txs } => format!(
+                "{} follows `TXS` on {}, so its return address is unknown",
+                self.step(ret),
+                self.at(*txs)
+            ),
+            ReasonKind::PullsReturn { call, callee } => format!(
+                "{} enters `{callee}`, which pulls its own return address",
+                self.step(call)
+            ),
+            ReasonKind::SelfPullsReturn(step) => {
+                format!("{} pulls the routine's own return address", self.step(step))
+            }
+            ReasonKind::Ambiguous { from, addr, banks } => {
+                let where_ = if banks.len() == 1 {
+                    format!("which bank {} assembles code at more than once", banks[0])
+                } else {
+                    let names: Vec<String> = banks.iter().map(u16::to_string).collect();
+                    let (last, rest) = names.split_last().expect("two or more");
+                    let all = if banks.len() == 2 { "both" } else { "all" };
+                    format!(
+                        "which banks {} and {last} {all} assemble code at",
+                        rest.join(", ")
+                    )
+                };
+                format!("{} targets ${addr:04X}, {where_}", self.step(from))
+            }
+            ReasonKind::Nothing { from, addr } => format!(
+                "{} targets ${addr:04X}, where nothing was assembled",
+                self.step(from)
+            ),
+            ReasonKind::UnknownOpcode { site, byte, data } => {
+                if *data {
+                    format!(
+                        "the path reaches data on {} that is not a known instruction (`${byte:02X}`)",
+                        self.at(*site)
+                    )
+                } else {
+                    format!(
+                        "the path reaches `${byte:02X}` on {}, which is not a known instruction",
+                        self.at(*site)
+                    )
+                }
+            }
+            ReasonKind::ReturnsIntoData { call, data } => {
+                format!(
+                    "{} returns into data on {}",
+                    self.step(call),
+                    self.at(*data)
+                )
+            }
+            ReasonKind::RunsPast { bank, after } => match after {
+                Some(site) => format!(
+                    "the path runs past the last byte assembled in bank {bank} after {}",
+                    self.at(*site)
+                ),
+                None => format!("the path runs past the last byte assembled in bank {bank}"),
+            },
+            ReasonKind::EditorNotRun(site) => {
+                format!("the editor did not run the pseudo-op on {}", self.at(*site))
+            }
+            ReasonKind::TooComplex => "it has too many paths to follow".to_string(),
+        };
+        match &reason.through {
+            Some(step) => format!("through {}, {text}", self.step(step)),
+            None => text,
+        }
+    }
 }
 
 /// The `@nessemble-lint-ignore…` suppressions in one file, as line ranges each

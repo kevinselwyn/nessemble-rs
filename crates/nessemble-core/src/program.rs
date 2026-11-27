@@ -26,7 +26,7 @@ pub struct Site {
 }
 
 /// What produced a statement's bytes, when it was not written out in the file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Via {
     /// Expanded from `.macro NAME` (the outermost expansion).
     Macro(String),
@@ -72,6 +72,9 @@ pub struct Emit {
     /// What produced the bytes, if not the line itself.
     pub via: Option<Via>,
     pub kind: EmitKind,
+    /// An instruction's operand as written (`helper`, `[vec_ptr]`), for
+    /// messages; `None` for data and operand-less instructions.
+    pub operand: Option<String>,
 }
 
 /// One label definition executed on pass 2.
@@ -113,6 +116,9 @@ pub struct ProgramMap {
     pub written: Vec<bool>,
     /// The program was assembled with `-u`.
     pub undocumented: bool,
+    /// Every defined symbol's name and value (labels and constants), for
+    /// resolving a contract's `[symbol]` memory slots.
+    pub symbols: Vec<(String, i64)>,
     /// Per ROM byte, the index of the emit that last wrote it (`u32::MAX`
     /// for none). Built by [`ProgramMap::index`].
     owner: Vec<u32>,
@@ -285,6 +291,7 @@ impl ProgramBuilder {
         written: Vec<bool>,
         files: Vec<PathBuf>,
         undocumented: bool,
+        symbols: Vec<(String, i64)>,
     ) -> ProgramMap {
         for (emit, anchor) in self.emits.iter_mut().zip(&self.anchors) {
             let decoded = decode_target(&image, emit);
@@ -303,6 +310,7 @@ impl ProgramBuilder {
             image,
             written,
             undocumented,
+            symbols,
             owner: Vec::new(),
             by_addr: HashMap::new(),
         };

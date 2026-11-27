@@ -12,6 +12,7 @@ pub use nessemble_isa as isa;
 
 mod assemble;
 pub mod ast;
+pub mod clobbers;
 pub mod coverage;
 mod diagnostic;
 mod lexer;
