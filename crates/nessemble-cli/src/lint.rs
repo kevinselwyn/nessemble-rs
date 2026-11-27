@@ -37,6 +37,24 @@ pub struct LintArgs {
     #[arg(long)]
     quiet: bool,
 
+    /// assemble the program from <file> and run the routine rules over it
+    /// (repeatable; default: the `.nessemblerc` `entry`)
+    #[arg(long, value_name = "file")]
+    entry: Vec<String>,
+
+    /// custom pseudo-instruction functions for assembling the entry (default:
+    /// the `.nessemblerc` `assemble.pseudo`)
+    #[arg(short = 'p', long, value_name = "pseudo.txt")]
+    pseudo: Option<String>,
+
+    /// project root for `@/`-relative paths when assembling the entry
+    #[arg(long, value_name = "dir")]
+    root: Option<String>,
+
+    /// do not read or write the custom pseudo-instruction cache
+    #[arg(long)]
+    no_cache: bool,
+
     /// assembly source file or directory to lint
     #[arg(value_name = "path", required = true)]
     paths: Vec<String>,
@@ -83,7 +101,69 @@ pub fn run(opts: &LintArgs) -> u8 {
     jobs.sort_by(|a, b| a.0.cmp(&b.0));
     jobs.dedup_by(|a, b| a.0 == b.0);
 
+    if crate::resolve_root_flag(opts.root.as_deref()).is_err() {
+        return RETURN_EPERM;
+    }
+    let first = Path::new(&opts.paths[0]);
+    let config = match Config::resolve(first, &choice) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("nessemble: {e}");
+            return RETURN_EPERM;
+        }
+    };
+    if let Err(code) = explicit_entries(opts, &config) {
+        return code;
+    }
+    let _ = (&opts.pseudo, opts.no_cache);
+
     report(&jobs, opts)
+}
+
+/// The explicit entries — `--entry` flags, else the `.nessemblerc` `entry` —
+/// each checked to exist. A missing one is reported and fails the run.
+fn explicit_entries(opts: &LintArgs, config: &Config) -> Result<Vec<PathBuf>, u8> {
+    if !opts.entry.is_empty() {
+        let mut out = Vec::new();
+        for e in &opts.entry {
+            let path = PathBuf::from(e);
+            if !path.is_file() {
+                eprintln!("nessemble: entry `{e}` does not exist");
+                return Err(RETURN_EPERM);
+            }
+            out.push(path);
+        }
+        return Ok(out);
+    }
+    let entries = config.entries();
+    for entry in &entries {
+        if !entry.is_file() {
+            let rc = config
+                .rc_path()
+                .map(|p| display_rel(&p))
+                .unwrap_or_default();
+            let shown = config
+                .rc_dir()
+                .and_then(|d| entry.strip_prefix(d).ok())
+                .map_or_else(|| entry.display().to_string(), |p| p.display().to_string());
+            eprintln!("nessemble: entry `{shown}` (set in `{rc}`) does not exist");
+            return Err(RETURN_EPERM);
+        }
+    }
+    Ok(entries)
+}
+
+/// `path` relative to the current directory when it is under it.
+fn display_rel(path: &Path) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            let cwd = cwd.canonicalize().unwrap_or(cwd);
+            path.strip_prefix(&cwd).ok().map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 /// Lint every job, print the grouped report, and return the exit code.

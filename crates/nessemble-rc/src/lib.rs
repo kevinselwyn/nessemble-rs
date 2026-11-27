@@ -278,6 +278,48 @@ struct RcAssemble {
     /// Rule id → `"off"` / `"warn"` / `"error"`.
     #[serde(default)]
     rules: BTreeMap<String, String>,
+    /// The custom pseudo-instruction file (`-p/--pseudo`), relative to the
+    /// directory of the `.nessemblerc` that declares it. Read by `nessemble
+    /// lint` and the language server; the plain build does not read it.
+    #[serde(default)]
+    pseudo: Option<String>,
+}
+
+/// The `entry` key: one entry file, or several for projects that build more
+/// than one ROM.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RcEntry {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// `assemble` is project-wide (an assembly is one program), so an `overrides`
+/// entry may not set it. serde would reject it as an unknown field anyway; this
+/// names the key that was misplaced.
+fn reject_override_assemble(text: &str, path: &Path) -> Result<(), String> {
+    let Ok(Value::Object(root)) = serde_json::from_str::<Value>(text) else {
+        return Ok(()); // the typed parse reports the syntax error
+    };
+    let Some(Value::Array(overrides)) = root.get("overrides") else {
+        return Ok(());
+    };
+    for ov in overrides {
+        let Some(asm) = ov.get("options").and_then(|o| o.get("assemble")) else {
+            continue;
+        };
+        let glob = ov.get("files").and_then(Value::as_str).unwrap_or("?");
+        let key = match asm {
+            Value::Object(m) if m.contains_key("pseudo") => "assemble.pseudo",
+            Value::Object(m) if m.contains_key("rules") => "assemble.rules",
+            _ => "assemble",
+        };
+        return Err(format!(
+            "in `{}` overrides for `{glob}`: `{key}` may only be set at the top level",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Parse one assembler rule setting, as written in `assemble.rules` or a
@@ -307,6 +349,9 @@ pub fn parse_asm_rule_flag(flag: &str) -> Result<(AsmRule, RuleSeverity), String
 struct RcConfig {
     #[serde(default)]
     extensions: Option<Vec<String>>,
+    /// The program's entry file(s), for whole-program lint. Root only.
+    #[serde(default)]
+    entry: Option<RcEntry>,
     /// Severities of the assembler's configurable diagnostics.
     #[serde(default)]
     assemble: Option<RcAssemble>,
@@ -328,6 +373,14 @@ pub struct Config {
     lint_overrides: Vec<(String, LintDelta)>,
     /// `assemble.rules`, validated.
     assemble_rules: Vec<(AsmRule, RuleSeverity)>,
+    /// `entry`, as written (relative to `rc_dir`).
+    entries: Vec<String>,
+    /// `assemble.pseudo`, as written (relative to `rc_dir`).
+    pseudo: Option<String>,
+    /// The directory of the `.nessemblerc` this config was read from (`None`
+    /// for built-in defaults). `entry` and `assemble.pseudo` resolve against
+    /// it — not against `root`, which `.nessembleignore` can move.
+    rc_dir: Option<PathBuf>,
     root: PathBuf,
 }
 
@@ -352,6 +405,9 @@ impl Config {
             overrides: Vec::new(),
             lint_overrides: Vec::new(),
             assemble_rules: Vec::new(),
+            entries: Vec::new(),
+            pseudo: None,
+            rc_dir: None,
             root,
         }
     }
@@ -360,6 +416,7 @@ impl Config {
     fn from_file(path: &Path) -> Result<Config, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("could not read config `{}`: {e}", path.display()))?;
+        reject_override_assemble(&text, path)?;
         let rc: RcConfig = serde_json::from_str(&text)
             .map_err(|e| format!("invalid config `{}`: {e}", path.display()))?;
 
@@ -413,6 +470,15 @@ impl Config {
             |list| list.iter().map(|e| normalize_ext(e)).collect(),
         );
 
+        let entries = match rc.entry {
+            None => Vec::new(),
+            Some(RcEntry::One(e)) => vec![e],
+            Some(RcEntry::Many(list)) => list,
+        };
+        let pseudo = rc.assemble.and_then(|a| a.pseudo);
+        let rc_dir = dir_of(path);
+        let rc_dir = rc_dir.canonicalize().unwrap_or(rc_dir);
+
         Ok(Config {
             base,
             base_lint,
@@ -421,6 +487,9 @@ impl Config {
             overrides,
             lint_overrides,
             assemble_rules,
+            entries,
+            pseudo,
+            rc_dir: Some(rc_dir),
             root: dir_of(path),
         })
     }
@@ -468,6 +537,41 @@ impl Config {
             rules.set(*rule, *severity);
         }
         rules
+    }
+
+    /// The directory of the `.nessemblerc` this config came from, if any.
+    #[must_use]
+    pub fn rc_dir(&self) -> Option<&Path> {
+        self.rc_dir.as_deref()
+    }
+
+    /// The `.nessemblerc` file this config came from, if any (for messages).
+    #[must_use]
+    pub fn rc_path(&self) -> Option<PathBuf> {
+        let dir = self.rc_dir.as_ref()?;
+        [".nessemblerc", ".nessemblerc.json"]
+            .iter()
+            .map(|n| dir.join(n))
+            .find(|p| p.is_file())
+            .or_else(|| Some(dir.join(".nessemblerc")))
+    }
+
+    /// The configured `entry` files, resolved against the directory of the
+    /// `.nessemblerc` that declares them. Existence is not checked here: a
+    /// missing entry is reported where it is used, so a fresh checkout still
+    /// formats.
+    #[must_use]
+    pub fn entries(&self) -> Vec<PathBuf> {
+        let Some(dir) = &self.rc_dir else {
+            return Vec::new();
+        };
+        self.entries.iter().map(|e| dir.join(e)).collect()
+    }
+
+    /// The configured `assemble.pseudo` file, resolved like [`Config::entries`].
+    #[must_use]
+    pub fn pseudo(&self) -> Option<PathBuf> {
+        Some(self.rc_dir.as_ref()?.join(self.pseudo.as_ref()?))
     }
 
     /// Whether `file`'s extension is in the configured set (directory walks).
@@ -740,6 +844,9 @@ mod tests {
                 .collect(),
             lint_overrides: Vec::new(),
             assemble_rules: Vec::new(),
+            entries: Vec::new(),
+            pseudo: None,
+            rc_dir: None,
             root: PathBuf::from("."),
         };
         // A non-matching file keeps the base (off); a matching one gets the
@@ -902,6 +1009,9 @@ mod tests {
             overrides: Vec::new(),
             lint_overrides,
             assemble_rules: Vec::new(),
+            entries: Vec::new(),
+            pseudo: None,
+            rc_dir: None,
             root: PathBuf::from("."),
         };
         assert_eq!(
@@ -999,5 +1109,93 @@ mod tests {
         assert!(parse_asm_rule_flag("value-out-of-range").is_err());
         assert!(parse_asm_rule_flag("nope=warn").is_err());
         assert!(parse_asm_rule_flag("value-out-of-range=loud").is_err());
+    }
+
+    // ─── Program entry and pseudo file (plan 023) ─────────────────────────────
+
+    /// Like [`load`], but keeps the directory so paths can be compared.
+    fn load_in(json: &str) -> (Result<Config, String>, PathBuf) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nessemble-rc-entry-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".nessemblerc");
+        std::fs::write(&path, json).unwrap();
+        let config = Config::from_file(&path);
+        let dir_c = dir.canonicalize().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        (config, dir_c)
+    }
+
+    #[test]
+    fn entry_as_a_string() {
+        let (c, dir) = load_in(r#"{"entry":"main.asm"}"#);
+        assert_eq!(c.unwrap().entries(), vec![dir.join("main.asm")]);
+    }
+
+    #[test]
+    fn entry_as_an_array() {
+        let (c, dir) = load_in(r#"{"entry":["main.asm","demo/demo.asm"]}"#);
+        assert_eq!(
+            c.unwrap().entries(),
+            vec![dir.join("main.asm"), dir.join("demo/demo.asm")]
+        );
+    }
+
+    #[test]
+    fn no_entry_and_defaults_have_no_entries() {
+        let (c, _) = load_in("{}");
+        let c = c.unwrap();
+        assert_eq!(c.entries().len(), 0);
+        assert!(c.pseudo().is_none());
+        assert_eq!(Config::defaults(PathBuf::from(".")).entries().len(), 0);
+    }
+
+    #[test]
+    fn entry_in_an_override_is_an_error() {
+        let err = load(r#"{"overrides":[{"files":"*.asm","options":{"entry":"main.asm"}}]}"#)
+            .err()
+            .unwrap();
+        assert!(err.contains("unknown field `entry`"), "{err}");
+        assert!(load(r#"{"entry":3}"#).is_err());
+    }
+
+    #[test]
+    fn assemble_pseudo_at_the_root() {
+        let (c, dir) = load_in(
+            r#"{"assemble":{"pseudo":"scripts/pseudo.txt","rules":{"duplicate-symbol":"error"}}}"#,
+        );
+        let c = c.unwrap();
+        assert_eq!(c.pseudo(), Some(dir.join("scripts/pseudo.txt")));
+        // Coexists with plan 017's `assemble.rules` in the same block.
+        assert_eq!(
+            c.assemble_rules().get(AsmRule::DuplicateSymbol),
+            RuleSeverity::Error
+        );
+    }
+
+    #[test]
+    fn assemble_pseudo_in_an_override_is_an_error() {
+        let err = load(
+            r#"{"overrides":[{"files":"src/*.asm","options":{"assemble":{"pseudo":"p.txt"}}}]}"#,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            err.contains(
+                "overrides for `src/*.asm`: `assemble.pseudo` may only be set at the top level"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unknown_assemble_key_is_an_error() {
+        let err = load(r#"{"assemble":{"pseudos":"p.txt"}}"#).err().unwrap();
+        assert!(err.contains("unknown field `pseudos`"), "{err}");
     }
 }

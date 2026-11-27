@@ -2154,3 +2154,25 @@ fn reference_describes_assert() {
         ".assert\n  fail the build unless an expression holds\n"
     );
 }
+
+// ─── lint: program mode (plan 023) ───────────────────────────────────────────
+
+#[test]
+fn lint_reports_a_missing_rc_entry() {
+    let dir = lint_dir("missing-entry");
+    std::fs::write(dir.join(".nessemblerc"), r#"{"entry":"main.asm"}"#).unwrap();
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "; doc\nmain:\n    rts\n").unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "a.asm"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("nessemble: entry `main.asm` (set in `.nessemblerc`) does not exist"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
