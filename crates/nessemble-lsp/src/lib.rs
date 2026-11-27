@@ -5394,12 +5394,12 @@ mod tests {
         let text = "p1:\n;\n@x:\n    RTS\n";
         assert!(documentable_routine_indent(text, Position::new(1, 1)).is_none());
         let uri = Url::parse("file:///s.asm").unwrap();
-        assert!(document_routine_actions(
+        let actions = document_routine_actions(
             &uri,
             text,
-            Range::new(Position::new(2, 0), Position::new(2, 0))
-        )
-        .is_empty());
+            Range::new(Position::new(2, 0), Position::new(2, 0)),
+        );
+        assert_eq!(actions, [] as [CodeActionOrCommand; 0]);
     }
 
     #[test]

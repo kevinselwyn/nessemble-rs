@@ -5522,7 +5522,7 @@ data:
                    helper:\n\
                    @inner:\n\
                    \x20   RTS\n";
-        assert!(lint_routines_with_doc_rule(src).is_empty());
+        assert_eq!(lint_routines_with_doc_rule(src), [] as [Finding; 0]);
     }
 
     #[test]

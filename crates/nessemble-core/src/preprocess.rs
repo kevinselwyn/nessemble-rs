@@ -718,6 +718,6 @@ mod tests {
         assert_eq!(ex.len(), 2);
         assert_eq!((ex[0].parent, ex[1].parent), (0, 1));
         assert_eq!(ex[0].unique_names, vec!["lb1".to_string()]);
-        assert!(ex[1].unique_names.is_empty());
+        assert_eq!(ex[1].unique_names, Vec::<String>::new());
     }
 }
