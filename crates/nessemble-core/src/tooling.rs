@@ -2369,11 +2369,14 @@ pub enum RuleId {
     /// A routine with a clobber list that the whole-program analysis cannot
     /// follow on some path (an indirect jump, …). Program mode only.
     UnverifiableClobbers,
+    /// A `@nessemble-lint-ignore…` suppression that no longer suppresses
+    /// anything.
+    UnusedLintIgnore,
 }
 
 impl RuleId {
     /// Every rule, in a stable order (also the [`SeverityMap`] index order).
-    pub const ALL: [RuleId; 9] = [
+    pub const ALL: [RuleId; 10] = [
         RuleId::RequireBlockComment,
         RuleId::UnknownCommentDirective,
         RuleId::DeprecatedCommentDirective,
@@ -2383,6 +2386,7 @@ impl RuleId {
         RuleId::OverdeclaredClobber,
         RuleId::RequireRoutineDoc,
         RuleId::UnverifiableClobbers,
+        RuleId::UnusedLintIgnore,
     ];
 
     /// The stable kebab-case identifier used in `.nessemblerc` and in reports.
@@ -2398,6 +2402,7 @@ impl RuleId {
             RuleId::OverdeclaredClobber => "overdeclared-clobber",
             RuleId::RequireRoutineDoc => "require-routine-doc",
             RuleId::UnverifiableClobbers => "unverifiable-clobbers",
+            RuleId::UnusedLintIgnore => "unused-lint-ignore",
         }
     }
 
@@ -2434,6 +2439,7 @@ impl RuleId {
             RuleId::OverdeclaredClobber => 6,
             RuleId::RequireRoutineDoc => 7,
             RuleId::UnverifiableClobbers => 8,
+            RuleId::UnusedLintIgnore => 9,
         }
     }
 
@@ -2622,8 +2628,14 @@ pub fn lint(source: &str, opts: &LintOptions) -> Vec<Finding> {
             run(&ctx, opts, &mut findings);
         }
     }
-    let suppressions = LintSuppressions::resolve(&lines, &directives);
-    findings.retain(|f| !suppressions.suppresses(f.rule, f.line));
+    let mut suppressions = LintSuppressions::resolve(source, &lines, &directives);
+    suppressions.apply(
+        &mut findings,
+        &Judge {
+            severities: &opts.severities,
+            program_lines: None,
+        },
+    );
     findings.sort_by_key(|f| (f.line, f.column));
     findings
 }
@@ -2758,9 +2770,28 @@ pub fn lint_programs(programs: &[ProgramMap], files: &[ProgramFile]) -> ProgramL
     let paths: Vec<PathBuf> = files.iter().map(|f| canonical(f.path)).collect();
     let mut merged: HashMap<(usize, u32), Merged> = HashMap::new();
     let mut called: HashSet<(usize, u32)> = HashSet::new();
+    // Per file, the label lines some program assembled: where the program
+    // rules ran (for judging suppressions).
+    let mut assembled: HashMap<usize, HashSet<u32>> = HashMap::new();
 
     for program in programs {
-        analyse_program(program, files, &prepared, &paths, &mut merged, &mut called);
+        analyse_program(
+            program,
+            files,
+            &prepared,
+            &paths,
+            &mut merged,
+            &mut called,
+            &mut assembled,
+        );
+    }
+    // A routine the editor could not fully model is not judged.
+    for (&(fi, line), m) in &merged {
+        if m.editor {
+            if let Some(lines) = assembled.get_mut(&fi) {
+                lines.remove(&line);
+            }
+        }
     }
 
     let mut out = ProgramLint {
@@ -2788,8 +2819,16 @@ pub fn lint_programs(programs: &[ProgramMap], files: &[ProgramFile]) -> ProgramL
             }
         }
         program_findings(fi, prep, opts, &merged, &called, &mut findings);
-        let suppressions = LintSuppressions::resolve(&prep.lines, &prep.directives);
-        findings.retain(|f| !suppressions.suppresses(f.rule, f.line));
+        let mut suppressions =
+            LintSuppressions::resolve(prep.source, &prep.lines, &prep.directives);
+        let assembled = assembled.get(&fi).cloned().unwrap_or_default();
+        suppressions.apply(
+            &mut findings,
+            &Judge {
+                severities: &opts.severities,
+                program_lines: Some(&assembled),
+            },
+        );
         findings.sort_by_key(|f| (f.line, f.column));
         out.findings.push(findings);
     }
@@ -2921,6 +2960,7 @@ fn analyse_program(
     paths: &[PathBuf],
     merged: &mut HashMap<(usize, u32), Merged>,
     called: &mut HashSet<(usize, u32)>,
+    assembled: &mut HashMap<usize, HashSet<u32>>,
 ) {
     use crate::clobbers::{analyze, Contract, Contracts, WalkOptions};
 
@@ -2950,6 +2990,7 @@ fn analyse_program(
         let Some(fi) = file_of.get(def.site.file as usize).copied().flatten() else {
             continue;
         };
+        assembled.entry(fi).or_default().insert(def.site.line);
         let Some(sig) = prepared[fi]
             .signatures
             .iter()
@@ -3242,8 +3283,39 @@ impl Render<'_> {
     }
 }
 
-/// The `@nessemble-lint-ignore…` suppressions in one file, as line ranges each
-/// carrying the rules it silences.
+/// One `@nessemble-lint-ignore…` suppression: the lines it covers, the rules it
+/// silences (empty: every rule), and its directive, for `unused-lint-ignore`.
+#[derive(Debug)]
+struct Suppression {
+    /// Inclusive line range (`last == u32::MAX`: to the end of the file).
+    first: u32,
+    last: u32,
+    rules: Vec<RuleId>,
+    /// The directive's line and `@` column.
+    line: u32,
+    column: u32,
+    /// The directive as messages quote it (`@nessemble-lint-ignore start`).
+    token: String,
+    /// What kind of suppression it is.
+    extent: Extent,
+    /// The rules it silenced a finding of (`None` in a bare suppression's
+    /// list stands for "something").
+    used: Vec<RuleId>,
+    used_any: bool,
+}
+
+/// The shape of a [`Suppression`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Extent {
+    /// `-next-line`.
+    NextLine,
+    /// A `start` … `end` region.
+    Region,
+    /// A `start` with no `end`: to the end of the file.
+    OpenRegion,
+}
+
+/// The `@nessemble-lint-ignore…` suppressions in one file.
 ///
 /// Matching is **by the line a finding is reported at**, which is what lets one
 /// mechanism cover both line-anchored rules (`require-block-comment`, reported at
@@ -3253,9 +3325,32 @@ impl Render<'_> {
 /// only the region form can reach it — see the docs.
 #[derive(Debug, Default)]
 struct LintSuppressions {
-    /// `(first, last, rules)` — inclusive line range, empty `rules` meaning
-    /// every rule.
-    ranges: Vec<(u32, u32, Vec<RuleId>)>,
+    entries: Vec<Suppression>,
+}
+
+/// Where each rule ran with full information in one file, which decides
+/// whether a suppression naming it can be judged unused
+/// (`plans/023-whole-program-clobber-analysis.md` §2.7).
+struct Judge<'a> {
+    severities: &'a SeverityMap,
+    /// Program mode: the lines of the labels the program assembled (where the
+    /// program rules ran), minus those whose analysis the editor could not
+    /// complete. `None` in file mode, where program rules are not judged.
+    program_lines: Option<&'a HashSet<u32>>,
+}
+
+impl Judge<'_> {
+    /// Whether `rule` ran with full information somewhere in `first..=last`.
+    fn ran(&self, rule: RuleId, first: u32, last: u32) -> bool {
+        if self.severities.get(rule) == RuleSeverity::Off || rule == RuleId::UnusedLintIgnore {
+            return false;
+        }
+        if !rule.needs_program() {
+            return true;
+        }
+        self.program_lines
+            .is_some_and(|lines| lines.iter().any(|l| (first..=last).contains(l)))
+    }
 }
 
 impl LintSuppressions {
@@ -3265,46 +3360,167 @@ impl LintSuppressions {
     /// block and still land on the label), `start` opens a region and `end`
     /// closes it, an unclosed region runs to end of file, regions do not nest,
     /// and a trailing-comment directive is inert.
-    fn resolve(lines: &[Vec<Lexeme>], directives: &[Directive]) -> LintSuppressions {
+    fn resolve(source: &str, lines: &[Vec<Lexeme>], directives: &[Directive]) -> LintSuppressions {
         let mut out = LintSuppressions::default();
-        let mut region: Option<(u32, Vec<RuleId>)> = None;
+        let mut region: Option<&Directive> = None;
+        let entry = |d: &Directive, first: u32, last: u32, rules: &[RuleId], extent| Suppression {
+            first,
+            last,
+            rules: rules.to_vec(),
+            line: d.line,
+            column: d.column,
+            token: source[d.start..d.end].to_string(),
+            extent,
+            used: Vec::new(),
+            used_any: false,
+        };
         for d in directives.iter().filter(|d| d.own_line) {
             match (d.name, &d.args) {
                 (DirectiveName::LintIgnoreNextLine, DirectiveArgs::Rules(rules)) => {
                     if let Some(target) = significant_line_after(lines, d.line) {
-                        out.ranges
-                            .push((target as u32 + 1, target as u32 + 1, rules.clone()));
+                        let t = target as u32 + 1;
+                        out.entries.push(entry(d, t, t, rules, Extent::NextLine));
                     }
                 }
-                (DirectiveName::LintIgnore, DirectiveArgs::RegionRules(bound, rules)) => {
-                    match bound {
-                        RegionBound::Start => {
-                            if region.is_none() {
-                                region = Some((d.line, rules.clone()));
-                            }
+                (DirectiveName::LintIgnore, DirectiveArgs::RegionRules(bound, _)) => match bound {
+                    RegionBound::Start => {
+                        if region.is_none() {
+                            region = Some(d);
                         }
-                        RegionBound::End => {
-                            if let Some((start, rules)) = region.take() {
-                                out.ranges.push((start, d.line, rules));
+                    }
+                    RegionBound::End => {
+                        if let Some(start) = region.take() {
+                            if let DirectiveArgs::RegionRules(_, rules) = &start.args {
+                                let mut e = entry(start, start.line, d.line, rules, Extent::Region);
+                                e.token = format!("{} start", e.token);
+                                out.entries.push(e);
                             }
                         }
                     }
-                }
+                },
                 _ => {}
             }
         }
         // An unclosed region runs to the end of the file.
-        if let Some((start, rules)) = region {
-            out.ranges.push((start, u32::MAX, rules));
+        if let Some(start) = region {
+            if let DirectiveArgs::RegionRules(_, rules) = &start.args {
+                let mut e = entry(start, start.line, u32::MAX, rules, Extent::OpenRegion);
+                e.token = format!("{} start", e.token);
+                out.entries.push(e);
+            }
         }
         out
     }
 
-    /// Whether `rule` is suppressed at 1-based `line`.
-    fn suppresses(&self, rule: RuleId, line: u32) -> bool {
-        self.ranges.iter().any(|(first, last, rules)| {
-            (*first..=*last).contains(&line) && (rules.is_empty() || rules.contains(&rule))
-        })
+    /// Whether `rule` is suppressed at 1-based `line`, recording which
+    /// suppressions silenced it. `skip` is a suppression that may not silence
+    /// this finding (the one the finding is about).
+    fn consume(&mut self, rule: RuleId, line: u32, skip: Option<usize>) -> bool {
+        let mut hit = false;
+        for (i, s) in self.entries.iter_mut().enumerate() {
+            if Some(i) == skip || !(s.first..=s.last).contains(&line) {
+                continue;
+            }
+            if s.rules.is_empty() || s.rules.contains(&rule) {
+                hit = true;
+                s.used_any = true;
+                if !s.used.contains(&rule) {
+                    s.used.push(rule);
+                }
+            }
+        }
+        hit
+    }
+
+    /// Filter `findings` through the suppressions, then add an
+    /// `unused-lint-ignore` finding for each suppression (or each named rule of
+    /// one) that silenced nothing where its rule ran (§2.7).
+    fn apply(&mut self, findings: &mut Vec<Finding>, judge: &Judge) {
+        findings.retain(|f| !self.consume(f.rule, f.line, None));
+        let on = judge.severities.get(RuleId::UnusedLintIgnore) != RuleSeverity::Off;
+        if !on {
+            return;
+        }
+        // (suppression, unused rules; empty for a bare one that silenced
+        // nothing)
+        let mut candidates: Vec<(usize, Vec<RuleId>)> = Vec::new();
+        for (i, s) in self.entries.iter().enumerate() {
+            let last = s.last;
+            if s.rules.is_empty() {
+                // A bare suppression is judged only where every rule ran.
+                let all_ran = RuleId::ALL.into_iter().all(|r| {
+                    r == RuleId::UnusedLintIgnore
+                        || judge.severities.get(r) == RuleSeverity::Off
+                        || judge.ran(r, s.first, last)
+                });
+                if all_ran && !s.used_any {
+                    candidates.push((i, Vec::new()));
+                }
+                continue;
+            }
+            let mut unused: Vec<RuleId> = s
+                .rules
+                .iter()
+                .copied()
+                .filter(|&r| judge.ran(r, s.first, last) && !s.used.contains(&r))
+                .collect();
+            unused.sort_by_key(|r| r.id());
+            unused.dedup();
+            if !unused.is_empty() {
+                candidates.push((i, unused));
+            }
+        }
+        // One pass: a finding about a suppression may itself be suppressed,
+        // never by the suppression it is about.
+        let mut kept: Vec<(usize, Vec<RuleId>)> = Vec::new();
+        for (i, rules) in candidates {
+            let line = self.entries[i].line;
+            if !self.consume(RuleId::UnusedLintIgnore, line, Some(i)) {
+                kept.push((i, rules));
+            }
+        }
+        // A suppression naming `unused-lint-ignore` that silenced none.
+        for (i, s) in self.entries.iter().enumerate() {
+            if s.rules.contains(&RuleId::UnusedLintIgnore)
+                && !s.used.contains(&RuleId::UnusedLintIgnore)
+            {
+                match kept.iter_mut().find(|(k, _)| *k == i) {
+                    Some((_, rules)) => rules.push(RuleId::UnusedLintIgnore),
+                    None => kept.push((i, vec![RuleId::UnusedLintIgnore])),
+                }
+            }
+        }
+        for (i, mut rules) in kept {
+            let s = &self.entries[i];
+            rules.sort_by_key(|r| r.id());
+            let lines = match s.extent {
+                Extent::NextLine => format!("line {}", s.first),
+                Extent::Region => format!("lines {}\u{2013}{}", s.first, s.last),
+                Extent::OpenRegion => format!("lines {} to the end of the file", s.first),
+            };
+            let message = if rules.is_empty() {
+                format!("`{}` suppresses nothing on {lines}", s.token)
+            } else {
+                let names: Vec<String> = rules.iter().map(|r| format!("`{}`", r.id())).collect();
+                let verb = if rules.len() == 1 {
+                    "reports"
+                } else {
+                    "report"
+                };
+                format!(
+                    "`{}` suppresses {}, which {verb} nothing on {lines}",
+                    s.token,
+                    names.join(", ")
+                )
+            };
+            findings.push(Finding {
+                rule: RuleId::UnusedLintIgnore,
+                line: s.line,
+                column: s.column,
+                subject: s.token.clone(),
+                message,
+            });
+        }
     }
 }
 

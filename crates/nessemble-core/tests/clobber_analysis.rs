@@ -817,3 +817,215 @@ caller:
         Some(vec![Slot::X])
     );
 }
+
+// ─── unused-lint-ignore (Phase 3) ────────────────────────────────────────────
+
+/// File-mode lint rows, with `require-block-comment` on (a text rule).
+fn file_rows(source: &str) -> Vec<String> {
+    let ignore = |_: &str| false;
+    lint(
+        source,
+        &LintOptions {
+            severities: SeverityMap::default(),
+            window: 1,
+            ignore: &ignore,
+        },
+    )
+    .iter()
+    .map(|f| format!("{} {}: {}", f.line, f.rule.id(), f.message))
+    .collect()
+}
+
+#[test]
+fn an_unneeded_next_line_suppression_is_reported() {
+    let src = "\
+; documented
+; @nessemble-lint-ignore-next-line require-block-comment
+documented:
+    rts
+";
+    assert_rows(
+        &file_rows(src),
+        &[
+            "2 unused-lint-ignore: `@nessemble-lint-ignore-next-line` suppresses \
+           `require-block-comment`, which reports nothing on line 3",
+        ],
+    );
+}
+
+#[test]
+fn an_unneeded_region_is_reported_with_its_lines() {
+    let src = "\
+; @nessemble-lint-ignore start require-block-comment
+; a comment
+documented:
+    rts
+; @nessemble-lint-ignore end
+
+; @nessemble-lint-ignore start require-block-comment
+; again
+also:
+    rts
+";
+    assert_rows(
+        &file_rows(src),
+        &[
+            "1 unused-lint-ignore: `@nessemble-lint-ignore start` suppresses \
+             `require-block-comment`, which reports nothing on lines 1\u{2013}5",
+            "7 unused-lint-ignore: `@nessemble-lint-ignore start` suppresses \
+             `require-block-comment`, which reports nothing on lines 7 to the end of the file",
+        ],
+    );
+}
+
+#[test]
+fn a_needed_suppression_is_not_reported() {
+    let src =
+        "\n\n\n\n; @nessemble-lint-ignore-next-line require-block-comment\n\nbare:\n    rts\n";
+    assert_rows(&file_rows(src), &[]);
+}
+
+#[test]
+fn each_named_rule_is_judged_on_its_own() {
+    let main = "\
+; @nessemble-lint-ignore-next-line undeclared-clobber, overdeclared-clobber
+; @nessemble-clobbers none
+routine:
+    ldx #1
+    rts
+";
+    assert_rows(
+        &lint_project(&[("main.asm", main)]),
+        &[
+            "main.asm:1 unused-lint-ignore: `@nessemble-lint-ignore-next-line` suppresses \
+           `overdeclared-clobber`, which reports nothing on line 3",
+        ],
+    );
+}
+
+#[test]
+fn a_rule_configured_off_is_not_judged() {
+    let main = "\
+; @nessemble-lint-ignore-next-line overdeclared-clobber
+; @nessemble-clobbers none
+routine:
+    rts
+";
+    let mut s = severities();
+    s.set(RuleId::OverdeclaredClobber, RuleSeverity::Off);
+    assert_rows(
+        &lint_with(
+            &[("main.asm", main)],
+            &s,
+            lenient_custom_resolver(HashSet::new()),
+        ),
+        &[],
+    );
+    // With it on, the suppression is unused.
+    assert_eq!(lint_project(&[("main.asm", main)]).len(), 1);
+}
+
+#[test]
+fn file_mode_does_not_judge_program_rules_or_bare_suppressions() {
+    let src = "\
+; @nessemble-lint-ignore-next-line undeclared-clobber
+; @nessemble-clobbers none
+routine:
+    rts
+
+; @nessemble-lint-ignore-next-line
+; doc
+other:
+    rts
+";
+    let rows: Vec<String> = file_rows(src)
+        .into_iter()
+        .filter(|r| r.contains("unused-lint-ignore"))
+        .collect();
+    assert_rows(&rows, &[]);
+}
+
+#[test]
+fn a_bare_suppression_is_judged_in_program_mode() {
+    let main = "\
+; @nessemble-lint-ignore-next-line
+; @nessemble-clobbers none
+routine:
+    rts
+";
+    assert_rows(
+        &lint_project(&[("main.asm", main)]),
+        &[
+            "main.asm:1 unused-lint-ignore: `@nessemble-lint-ignore-next-line` suppresses nothing \
+           on line 3",
+        ],
+    );
+}
+
+#[test]
+fn an_assembled_out_label_is_not_judged() {
+    let main = "\
+    .if 0
+; @nessemble-lint-ignore-next-line undeclared-clobber
+; @nessemble-clobbers none
+routine:
+    rts
+    .endif
+";
+    assert_rows(&lint_project(&[("main.asm", main)]), &[]);
+}
+
+#[test]
+fn a_region_naming_unused_lint_ignore_that_silences_one_counts_as_used() {
+    let main = "\
+; @nessemble-lint-ignore start unused-lint-ignore
+; @nessemble-lint-ignore-next-line undeclared-clobber
+; @nessemble-clobbers none
+routine:
+    rts
+; @nessemble-lint-ignore end
+
+; @nessemble-lint-ignore start unused-lint-ignore
+; @nessemble-clobbers none
+other:
+    rts
+; @nessemble-lint-ignore end
+";
+    assert_rows(
+        &lint_project(&[("main.asm", main)]),
+        &[
+            "main.asm:8 unused-lint-ignore: `@nessemble-lint-ignore start` suppresses \
+           `unused-lint-ignore`, which reports nothing on lines 8\u{2013}12",
+        ],
+    );
+}
+
+#[test]
+fn a_suppression_on_a_routine_with_no_clobber_list_is_flagged() {
+    let main = "\
+; @nessemble-lint-ignore-next-line undeclared-clobber
+; @nessemble-param A the value
+routine:
+    ldx #1
+    rts
+";
+    assert_rows(
+        &lint_project(&[("main.asm", main)]),
+        &[
+            "main.asm:1 unused-lint-ignore: `@nessemble-lint-ignore-next-line` suppresses \
+           `undeclared-clobber`, which reports nothing on line 3",
+        ],
+    );
+}
+
+#[test]
+fn a_still_needed_program_suppression_is_not_flagged() {
+    let main = "\
+; @nessemble-lint-ignore-next-line undeclared-clobber
+; @nessemble-clobbers none
+routine:
+    ldx #1
+    rts
+";
+    assert_rows(&lint_project(&[("main.asm", main)]), &[]);
+}
