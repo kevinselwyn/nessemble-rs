@@ -17,6 +17,7 @@ use crate::ast::{
     BinOp, CustomArg, Expr, InesField, Instruction, Line, Name, Operand, Pseudo, Stmt, UnOp,
 };
 use crate::diagnostic::{AsmRule, AsmRules, Diag, Expansion, RuleSeverity};
+use crate::locals::{self, LocalName};
 
 const BANK_PRG: i64 = 0x4000;
 const BANK_CHR: i64 = 0x2000;
@@ -184,6 +185,9 @@ struct Symbol {
     /// file included twice, which re-runs the very same definition, is not
     /// mistaken for a second one.
     site: (u32, u32, u32),
+    /// The `@local` scope (global label) open where the symbol was defined, if
+    /// any. Names a private local's parent in the list file.
+    parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -562,6 +566,21 @@ pub struct Assembler {
     deferred_seen: std::collections::HashSet<(u32, u32, u32, String)>,
     /// Every checked `.table` entry, for tooling.
     table_entries: Vec<TableEntryInfo>,
+    /// The `@local` scope of each source file: the last global label defined
+    /// in it so far this pass (`plans/021-local-labels.md` §2.3). Indexed by
+    /// file id; reset at the start of each pass.
+    scopes: Vec<Option<String>>,
+    /// The private-local id of each emitted-source expansion, keyed by where
+    /// it runs: (enclosing emitted id, file, line, expansion, index of the
+    /// directive in the enclosing emitted source). Kept across passes so an
+    /// expansion's id is the same on both. Ids continue after the `.macro`
+    /// expansion ids, so the two never collide.
+    emitted_ids: HashMap<(u32, u32, u32, u32, usize), u32>,
+    /// The directive name of each emitted-source expansion, by private id.
+    emitted_names: HashMap<u32, String>,
+    /// The emitted-source expansion running now (`0` for none) and the index of
+    /// the line it is executing.
+    emit_ctx: (u32, usize),
 }
 
 /// A source span as collected during assembly: like [`SourceSpan`] but keyed by
@@ -720,6 +739,10 @@ impl Assembler {
             deferred: Vec::new(),
             deferred_seen: std::collections::HashSet::new(),
             table_entries: Vec::new(),
+            scopes: Vec::new(),
+            emitted_ids: HashMap::new(),
+            emitted_names: HashMap::new(),
+            emit_ctx: (0, 0),
         }
     }
 
@@ -808,7 +831,7 @@ impl Assembler {
             .iter()
             .filter(|s| s.kind != SymType::Undefined)
             .map(|s| ListSymbol {
-                name: s.name.clone(),
+                name: list_name(s),
                 value: s.value,
                 bank: s.bank,
                 // `.rs` reservations list as labels; `.enum` entries and plain
@@ -892,6 +915,7 @@ impl Assembler {
         self.table = None;
         self.for_cursor = 0;
         self.offset_trainer = 0;
+        self.scopes.clear();
         // Spans are collected fresh on pass 2; clearing here drops any from an
         // earlier pass so the final map reflects only the emitting pass.
         self.spans.clear();
@@ -1143,6 +1167,8 @@ impl Assembler {
                 self.cur_file = line.file;
                 self.cur_from_macro = line.from_macro;
                 self.cur_expansion = line.expansion;
+            } else {
+                self.emit_ctx.1 = i;
             }
             match &line.stmt {
                 Stmt::Pseudo(Pseudo::For(start, end)) => i = self.exec_for(lines, i, start, end),
@@ -1583,7 +1609,8 @@ impl Assembler {
                 return self.resolve_key_set(&info, first);
             }
             let known = self
-                .find_symbol(name)
+                .resolve_ref(name)
+                .and_then(|key| self.find_symbol(&key))
                 .is_some_and(|id| self.symbols[id].kind != SymType::Undefined);
             if !known {
                 self.error(t!("table-arg-unknown", name = name.as_str()));
@@ -1973,12 +2000,20 @@ impl Assembler {
         let Some(name) = self.paste_name(base, depth) else {
             return;
         };
-        self.define_pasted(&name, kind, value);
+        let Some(key) = self.resolve_def(&name) else {
+            return;
+        };
+        self.define_pasted(&key, kind, value);
+        if kind == SymType::Label {
+            self.open_scope(&name);
+        }
     }
 
     /// Define the already-pasted name `name` (see [`Self::add_pasted_symbol`]).
     fn define_pasted(&mut self, name: &str, kind: SymType, value: Option<i64>) {
+        // A local's duplicate is reported by `define_symbol` (`local-duplicate`).
         if self.pass == 1
+            && !name.contains('@')
             && !self.if_suppressed()
             && self
                 .find_symbol(name)
@@ -2011,11 +2046,23 @@ impl Assembler {
             let d = self.diag_here(String::new());
             (d.file, d.line)
         });
+        let parent = self.scope().map(str::to_string);
         let site = self.cur_site();
+        // A local or private key (`p1@x`, `\@7@x`): global names never hold `@`.
+        let scoped = name.contains('@');
         match existing {
             Some(id) => {
                 if kind != SymType::Undefined && self.symbols[id].kind != SymType::Undefined {
-                    self.report_redefinition(id, value, kind, bank, site);
+                    if scoped {
+                        // The same definition seen again (a file included
+                        // twice) is not a second one.
+                        if !self.same_site(self.symbols[id].site, site) {
+                            self.report_local_duplicate(id);
+                            return;
+                        }
+                    } else {
+                        self.report_redefinition(id, value, kind, bank, site);
+                    }
                 }
                 let sym = &mut self.symbols[id];
                 sym.value = value;
@@ -2025,6 +2072,7 @@ impl Assembler {
                 if here.is_some() {
                     sym.defined_at = here;
                     sym.site = site;
+                    sym.parent = parent;
                 }
             }
             None => self.symbols.push(Symbol {
@@ -2035,8 +2083,167 @@ impl Assembler {
                 from_macro,
                 defined_at: here,
                 site,
+                parent,
             }),
         }
+    }
+
+    /// Report the `local-duplicate` error for a second definition of the local
+    /// (or private) symbol `id` at the current line.
+    fn report_local_duplicate(&mut self, id: usize) {
+        let prev = &self.symbols[id];
+        let (file, line) = prev.defined_at.clone().unwrap_or_default();
+        let message = match locals::classify(&prev.name) {
+            LocalName::Private { id: eid, local } => {
+                let eid: u32 = eid.parse().unwrap_or(0);
+                match self.emitted_names.get(&eid) {
+                    Some(pseudo) => t!(
+                        "local-duplicate-emitted",
+                        name = local,
+                        pseudo = format!(".{pseudo}"),
+                        line = line
+                    ),
+                    None => t!(
+                        "local-duplicate-macro",
+                        name = local,
+                        macro = self
+                            .expansions
+                            .get((eid as usize).wrapping_sub(1))
+                            .map(|e| e.name.clone())
+                            .unwrap_or_default(),
+                        line = line
+                    ),
+                }
+            }
+            LocalName::Qualified { parent, local } => {
+                if file == self.diag_here(String::new()).file {
+                    t!(
+                        "local-duplicate",
+                        name = local,
+                        parent = parent,
+                        line = line
+                    )
+                } else {
+                    t!(
+                        "local-duplicate-file",
+                        name = local,
+                        parent = parent,
+                        file = file,
+                        line = line
+                    )
+                }
+            }
+            _ => return,
+        };
+        self.error(message);
+    }
+
+    /// The current file's `@local` scope, if one is open.
+    fn scope(&self) -> Option<&str> {
+        self.scopes
+            .get(self.cur_file as usize)
+            .and_then(Option::as_deref)
+    }
+
+    /// Open the `@local` scope `name` in the current file, if a label named
+    /// `name` defined here opens one (§2.2): a global label that is executed
+    /// (not in a false conditional) and not built with a macro's `\@`.
+    fn open_scope(&mut self, name: &str) {
+        if name == ":"
+            || self.if_suppressed()
+            || !matches!(locals::classify(name), LocalName::Global(_))
+        {
+            return;
+        }
+        let unique = self
+            .cur_expansion
+            .checked_sub(1)
+            .and_then(|i| self.expansions.get(i as usize))
+            .is_some_and(|e| e.unique_names.iter().any(|n| n == name));
+        if unique {
+            return;
+        }
+        let file = self.cur_file as usize;
+        if self.scopes.len() <= file {
+            self.scopes.resize(file + 1, None);
+        }
+        self.scopes[file] = Some(name.to_string());
+    }
+
+    /// The symbol key a definition of `name` uses: `scope@x` for a local,
+    /// the name itself otherwise. A local with no scope is reported
+    /// (`local-no-scope`, on pass 1) and yields `None`.
+    fn resolve_def(&mut self, name: &str) -> Option<String> {
+        match locals::classify(name) {
+            LocalName::Local(local) => match self.scope() {
+                Some(scope) => Some(format!("{scope}{local}")),
+                None => {
+                    if self.pass == 1 && !self.if_suppressed() {
+                        self.error(t!("local-no-scope", name = local));
+                    }
+                    None
+                }
+            },
+            _ => Some(name.to_string()),
+        }
+    }
+
+    /// The symbol key a reference to `name` resolves to, or `None` for a
+    /// local with no scope open (never registers anything).
+    fn resolve_ref(&self, name: &str) -> Option<String> {
+        match locals::classify(name) {
+            LocalName::Local(local) => self.scope().map(|scope| format!("{scope}{local}")),
+            _ => Some(name.to_string()),
+        }
+    }
+
+    /// The pass-2 message for a reference to `name` (resolved to `key`) that
+    /// is not defined.
+    fn undefined_message(&self, name: &str, key: &str) -> String {
+        match locals::classify(name) {
+            LocalName::Local(local) => {
+                let parent = self.scope().unwrap_or_default();
+                match self.local_hint(local, key) {
+                    Some(hint) => t!(
+                        "local-undefined-hint",
+                        name = local,
+                        parent = parent,
+                        hint = hint
+                    ),
+                    None => t!("local-undefined", name = local, parent = parent),
+                }
+            }
+            LocalName::Qualified { parent, local } => {
+                let parent_known = self
+                    .find_symbol(parent)
+                    .is_some_and(|id| self.symbols[id].kind != SymType::Undefined);
+                if parent_known {
+                    t!("local-not-in-parent", parent = parent, local = local)
+                } else {
+                    t!("symbol-not-defined", name = parent)
+                }
+            }
+            _ => t!("symbol-not-defined", name = locals::display(name)),
+        }
+    }
+
+    /// A defined local named `local` in another scope, to suggest for an
+    /// undefined reference (resolved to `key`): the one in this file defined
+    /// nearest above the reference, else the first one defined.
+    fn local_hint(&self, local: &str, key: &str) -> Option<String> {
+        let (file, line, _) = self.cur_site();
+        let candidates = self.symbols.iter().filter(|s| {
+            s.kind != SymType::Undefined
+                && s.name != key
+                && matches!(locals::classify(&s.name), LocalName::Qualified { local: l, .. } if l == local)
+        });
+        let above = candidates
+            .clone()
+            .filter(|s| s.site.0 == file && s.site.1 <= line)
+            .max_by_key(|s| s.site.1);
+        above
+            .or_else(|| candidates.min_by_key(|s| s.defined_at.is_none()))
+            .map(|s| s.name.clone())
     }
 
     /// Report that the definition at the current line replaces symbol `id`'s:
@@ -2280,11 +2487,18 @@ impl Assembler {
             Stmt::Label(Name::Plain(name)) => {
                 // The parser rejects a plain label in a written-out `.for` body;
                 // this catches one that arrives later, in a custom pseudo-op's
-                // emitted source expanded inside a loop.
-                if !self.loop_stack.is_empty() && name != ":" {
-                    self.error(t!("label-in-for", name = name.as_str()));
+                // emitted source expanded inside a loop. An `@local` is guarded
+                // by `local-duplicate` instead (its scope may be per-iteration).
+                if !self.loop_stack.is_empty()
+                    && name != ":"
+                    && !matches!(locals::classify(name), LocalName::Local(_))
+                {
+                    self.error(t!("label-in-for", name = locals::display(name)));
                 }
-                self.add_label(name);
+                if let Some(key) = self.resolve_def(name) {
+                    self.add_label(&key);
+                }
+                self.open_scope(name);
             }
             Stmt::Label(Name::Pasted(base, depth)) => {
                 self.add_pasted_symbol(base, *depth, SymType::Label, None);
@@ -2493,11 +2707,11 @@ impl Assembler {
                 self.if_stack.push(cond != 0);
             }
             Pseudo::Ifdef(name) => {
-                let defined = self.find_symbol(name).is_some();
+                let defined = self.symbol_exists(name);
                 self.if_stack.push(defined);
             }
             Pseudo::Ifndef(name) => {
-                let defined = self.find_symbol(name).is_some();
+                let defined = self.symbol_exists(name);
                 self.if_stack.push(!defined);
             }
             Pseudo::Else => {
@@ -2740,7 +2954,22 @@ impl Assembler {
             return;
         }
 
-        let tokens = crate::lexer::Lexer::new(src).tokenize();
+        let mut tokens = crate::lexer::Lexer::new(src).tokenize();
+        // The source's own `@local` definitions are private to this
+        // invocation (`plans/021-local-labels.md` §2.6), under an id fixed by
+        // where it runs, so it is the same on both passes.
+        let site = (
+            self.emit_ctx.0,
+            self.cur_file,
+            self.cur_line,
+            self.cur_expansion,
+            self.emit_ctx.1,
+        );
+        let next_id = (self.expansions.len() + self.emitted_ids.len() + 1) as u32;
+        let emit_id = *self.emitted_ids.entry(site).or_insert(next_id);
+        self.emitted_names.insert(emit_id, name.to_string());
+        let defs = locals::local_defs(&tokens);
+        locals::privatize(&mut tokens, emit_id, &defs);
         let lines = match crate::parse::parse_fragment(tokens, &[src]) {
             Ok(lines) => lines,
             Err(e) => {
@@ -2778,10 +3007,13 @@ impl Assembler {
         }
 
         let saved_from_macro = self.cur_from_macro;
+        let saved_ctx = self.emit_ctx;
         self.cur_from_macro = true;
+        self.emit_ctx = (emit_id, 0);
         self.custom_expansion_depth += 1;
         self.run_lines(&lines, false);
         self.custom_expansion_depth -= 1;
+        self.emit_ctx = saved_ctx;
         self.cur_from_macro = saved_from_macro;
     }
 
@@ -3159,21 +3391,43 @@ impl Assembler {
     }
 
     fn eval_symbol(&mut self, name: &str) -> i64 {
-        if let Some(id) = self.find_symbol(name) {
+        let Some(key) = self.resolve_ref(name) else {
+            self.note_unknown(name);
+            if self.pass == 2 {
+                self.error(t!("local-no-scope", name = name));
+            }
+            return 1;
+        };
+        if let Some(id) = self.find_symbol(&key) {
             if self.symbols[id].kind == SymType::Undefined {
-                self.note_unknown(name);
+                self.note_unknown(locals::display(name));
                 if self.pass == 2 {
-                    let msg = t!("symbol-not-defined", name = self.symbols[id].name);
+                    let msg = self.undefined_message(name, &key);
                     self.error(msg);
                 }
             }
             self.symbols[id].value
         } else {
-            self.note_unknown(name);
+            self.note_unknown(locals::display(name));
             // Reference behavior: unknown symbols are registered as
             // undefined (value 1) during pass 1.
-            self.add_symbol(name, 1, SymType::Undefined);
+            self.add_symbol(&key, 1, SymType::Undefined);
             1
+        }
+    }
+
+    /// Whether `.ifdef name` holds: the name resolves to a symbol entry (an
+    /// earlier reference's placeholder counts, as it always has). A local with
+    /// no scope open is reported on pass 2 and does not hold.
+    fn symbol_exists(&mut self, name: &str) -> bool {
+        match self.resolve_ref(name) {
+            Some(key) => self.find_symbol(&key).is_some(),
+            None => {
+                if self.pass == 2 && !self.if_suppressed() {
+                    self.error(t!("local-no-scope", name = name));
+                }
+                false
+            }
         }
     }
 
@@ -3198,7 +3452,14 @@ impl Assembler {
     }
 
     fn eval_bank(&mut self, name: &str) -> i64 {
-        if let Some(id) = self.find_symbol(name) {
+        let Some(key) = self.resolve_ref(name) else {
+            self.note_unknown(name);
+            if self.pass == 2 {
+                self.error(t!("local-no-scope", name = name));
+            }
+            return 1;
+        };
+        if let Some(id) = self.find_symbol(&key) {
             self.symbols[id].bank as i64
         } else {
             self.note_unknown(name);
@@ -3279,6 +3540,18 @@ fn str2hash(inner: &str) -> u32 {
             .wrapping_add(b as u32);
     }
     hash
+}
+
+/// How symbol `s` is named in the list file: a private local as
+/// `parent@x\@id` (or `@x\@id` with no parent), anything else by its key.
+fn list_name(s: &Symbol) -> String {
+    match locals::classify(&s.name) {
+        LocalName::Private { id, local } => match &s.parent {
+            Some(parent) => format!("{parent}{local}\\@{id}"),
+            None => format!("{local}\\@{id}"),
+        },
+        _ => s.name.clone(),
+    }
 }
 
 /// Deduplicate diagnostics by (file, line, message), preserving first-seen

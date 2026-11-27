@@ -2057,3 +2057,39 @@ fn reference_describes_table() {
         ".table / .endtable\n  check an indexed table's entries against their keys\n"
     );
 }
+
+// ─── Local labels (plans/021-local-labels.md) ────────────────────────────────
+
+#[test]
+fn an_undefined_local_fails_with_the_did_you_mean_hint() {
+    let dir = diag_project(
+        "local-hint",
+        &[("t.asm", "p1:\n@x:\n    RTS\np2:\n    JMP @x\n")],
+    );
+    let (code, stderr, _) = assemble_in(&dir, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        stderr,
+        "Error in `t.asm` on line 5: `@x` is not defined in `p2`; did you mean `p1@x`?\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn local_labels_list_qualified_and_privates_only_with_mlist() {
+    let src = ".macrodef wait\n@spin:\n    BPL @spin\n.endm\np1:\n@loc:\n    .macro wait\np2:\n@loc:\n    RTS\n";
+    let dir = diag_project("local-list", &[("t.asm", src)]);
+    let (code, stderr, _) = assemble_in(&dir, &["-f", "raw", "-l", "t.txt"]);
+    assert_eq!((code, stderr.as_str()), (0, ""));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("t.txt")).unwrap(),
+        "[labels]\n00/0000 = p1\n00/0000 = p1@loc\n00/0002 = p2\n00/0002 = p2@loc\n"
+    );
+    let (code, _, _) = assemble_in(&dir, &["-f", "raw", "-l", "t.txt", "--mlist"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("t.txt")).unwrap(),
+        "[labels]\n00/0000 = p1\n00/0000 = p1@loc\n00/0000 = p1@spin\\@1\n00/0002 = p2\n00/0002 = p2@loc\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

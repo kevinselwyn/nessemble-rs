@@ -15,6 +15,7 @@ pub mod ast;
 pub mod coverage;
 mod diagnostic;
 mod lexer;
+mod locals;
 mod parse;
 mod paths;
 mod preprocess;
@@ -887,6 +888,25 @@ top:\n\
         assert!(full.contains("top"));
         assert!(full.contains("spot1"));
         assert!(full.contains("spot2"));
+    }
+
+    #[test]
+    fn local_labels_list_by_their_qualified_key() {
+        let raw = Options {
+            nes: false,
+            ..Options::default()
+        };
+        let a = assemble("p1:\n@loc:\n    BNE @loc\np2:\n@loc:\n    BNE @loc\n", &raw).unwrap();
+        let list = render_list_file(&a.symbols, false);
+        assert!(list.contains("00/0000 = p1@loc\n"), "{list}");
+        assert!(list.contains("00/0002 = p2@loc\n"), "{list}");
+
+        // A macro's private local lists only with `--mlist`, under its parent.
+        let src = ".macrodef wait\n@spin:\n    BPL @spin\n.endm\np1:\n    .macro wait\n";
+        let a = assemble(src, &raw).unwrap();
+        assert!(!render_list_file(&a.symbols, false).contains("@spin"));
+        let full = render_list_file(&a.symbols, true);
+        assert!(full.contains("00/0000 = p1@spin\\@1\n"), "{full}");
     }
 
     #[test]

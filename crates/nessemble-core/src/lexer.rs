@@ -484,7 +484,21 @@ impl<'a> Lexer<'a> {
             let starts = matches!(first, Some(b'.' | b'@' | b'_'))
                 || first.is_some_and(|c| c.is_ascii_alphabetic());
             if starts {
-                let n = 1 + rest[1..].iter().take_while(|c| is_ident_char(**c)).count();
+                let mut n = 1 + rest[1..].iter().take_while(|c| is_ident_char(**c)).count();
+                // A qualified local-label name (`routine@name`) is one word:
+                // an identifier that starts with a letter or `_`, then one
+                // `@` segment (`plans/021-local-labels.md` §3.1).
+                if n >= 2
+                    && first != Some(b'.')
+                    && first != Some(b'@')
+                    && rest.get(n) == Some(&b'@')
+                    && rest.get(n + 1).is_some_and(|c| is_ident_char(*c))
+                {
+                    n += 1 + rest[n + 1..]
+                        .iter()
+                        .take_while(|c| is_ident_char(**c))
+                        .count();
+                }
                 if n >= 2 {
                     if let Ok(word) = std::str::from_utf8(&rest[..n]) {
                         let tok = classify_word(word);
@@ -528,7 +542,7 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Classify a `[.@a-zA-Z_][a-zA-Z0-9_]+` word into a keyword, pseudo, or text.
+/// Classify a `[.@a-zA-Z_][a-zA-Z0-9_]+` (or `ident@ident`) word into a keyword, pseudo, or text.
 fn classify_word(word: &str) -> Tok {
     match word {
         "HIGH" => Tok::High,
@@ -619,6 +633,36 @@ mod tests {
             vec![Tok::Pseudo("inesprg".into()), Tok::Number(1)]
         );
         assert_eq!(kinds("test:"), vec![Tok::Text("test".into()), Tok::Colon]);
+    }
+
+    #[test]
+    fn qualified_local_names_are_one_word() {
+        assert_eq!(kinds("p1@x"), vec![Tok::Text("p1@x".into())]);
+        assert_eq!(kinds("@x"), vec![Tok::Text("@x".into())]);
+        assert_eq!(
+            kinds("@x@y"),
+            vec![Tok::Text("@x".into()), Tok::Text("@y".into())]
+        );
+        assert_eq!(
+            kinds("p1 @x"),
+            vec![Tok::Text("p1".into()), Tok::Text("@x".into())]
+        );
+        assert_eq!(
+            kinds("p1@"),
+            vec![Tok::Text("p1".into()), Tok::CharReg('@')]
+        );
+        assert_eq!(
+            kinds("p1@x@y"),
+            vec![Tok::Text("p1@x".into()), Tok::Text("@y".into())]
+        );
+        assert_eq!(kinds("'@'"), vec![Tok::Number(64)]);
+        assert_eq!(kinds(".db@x")[0], Tok::Pseudo("db".into()));
+        // The documented side effect: a hex-suffix word glued to `@`.
+        assert_eq!(kinds("A5h@x"), vec![Tok::Text("A5h@x".into())]);
+        assert_eq!(
+            kinds("JMP draw@clip"),
+            vec![Tok::Text("JMP".into()), Tok::Text("draw@clip".into())]
+        );
     }
 
     #[test]

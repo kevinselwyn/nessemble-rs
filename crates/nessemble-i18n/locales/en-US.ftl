@@ -104,6 +104,19 @@ macrodef-in-for = `.macrodef` is not allowed inside a `.for` body
 for-if-unbalanced = A conditional opened in a `.for` body must close in the same body (an `.if` and its `.endif` straddle the `.endfor`)
 for-iteration-suffix = { $message } (in `.for` iteration { $counters })
 
+## Local labels (`@name`, `plans/021-local-labels.md`)
+
+local-no-scope = Local label `{ $name }` has no enclosing label
+local-duplicate = `{ $name }` is already defined in `{ $parent }` (line { $line })
+local-duplicate-file = `{ $name }` is already defined in `{ $parent }` (`{ $file }` line { $line })
+local-duplicate-macro = `{ $name }` is already defined in macro `{ $macro }` (line { $line })
+local-duplicate-emitted = `{ $name }` is already defined in the source `{ $pseudo }` emitted (line { $line })
+local-undefined = `{ $name }` is not defined in `{ $parent }`
+local-undefined-hint = `{ $name }` is not defined in `{ $parent }`; did you mean `{ $hint }`?
+local-not-in-parent = `{ $parent }` has no local label `{ $local }`
+local-def-qualified = `{ $name }` is a qualified name and can only be referenced; define it as `{ $local }:` under `{ $parent }`
+local-not-label = `{ $name }` is a local name, so it can only be a label; give the constant a global name
+
 ## Enums (`.enum` / `.endenum`)
 
 enum-member-twice = Enum member `{ $name }` is defined twice in the same `.enum`

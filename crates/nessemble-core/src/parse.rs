@@ -12,6 +12,7 @@ use crate::ast::{
     RandTerm, Stmt, UnOp,
 };
 use crate::lexer::{Span, Tok, Token};
+use crate::locals::{self, LocalName};
 
 /// A parse error with the offending 1-based line, source-file id, and the
 /// macro expansion the line came from (`0` for none).
@@ -172,6 +173,10 @@ fn validate_loops(lines: &[Line]) -> Vec<ParseError> {
         file: u32,
         expansion: u32,
         if_depth: usize,
+        /// Whether this frame's body has defined a pasted global label
+        /// (`row\i:`), which gives each iteration its own scope, so a plain
+        /// `@x:` after it is one label per iteration.
+        pasted_scope: bool,
     }
     let mut errors = Vec::new();
     let mut open: Vec<Open> = Vec::new();
@@ -189,6 +194,7 @@ fn validate_loops(lines: &[Line]) -> Vec<ParseError> {
                 file: l.file,
                 expansion: l.expansion,
                 if_depth,
+                pasted_scope: false,
             }),
             Stmt::Pseudo(Pseudo::EndFor) => match open.pop() {
                 None => errors.push(err(t!("endfor-unmatched"))),
@@ -203,8 +209,19 @@ fn validate_loops(lines: &[Line]) -> Vec<ParseError> {
             },
             Stmt::Pseudo(Pseudo::If(_) | Pseudo::Ifdef(_) | Pseudo::Ifndef(_)) => if_depth += 1,
             Stmt::Pseudo(Pseudo::Endif) => if_depth = if_depth.saturating_sub(1),
+            Stmt::Label(Name::Pasted(base, _)) => {
+                if let (Some(frame), LocalName::Global(_)) =
+                    (open.last_mut(), locals::classify(base))
+                {
+                    frame.pasted_scope = true;
+                }
+            }
             Stmt::Label(Name::Plain(name)) if !open.is_empty() && name != ":" => {
-                errors.push(err(t!("label-in-for", name = name.as_str())));
+                let scoped_here = matches!(locals::classify(name), LocalName::Local(_))
+                    && open.last().is_some_and(|f| f.pasted_scope);
+                if !scoped_here {
+                    errors.push(err(t!("label-in-for", name = locals::display(name))));
+                }
             }
             _ => {}
         }
@@ -548,17 +565,20 @@ impl Parser<'_> {
                 let is_label = matches!(self.peek_at(1), Some(Tok::Colon))
                     && !(indented && matches!(self.peek_at(2), Some(Tok::Plus | Tok::Minus)));
                 if is_label {
+                    self.check_local_def(&name, true)?;
                     self.pos += 2;
                     return Ok(Some(Stmt::Label(Name::Plain(name))));
                 }
                 // `<label> .rs <size>` reserves a variable.
                 if matches!(self.peek_at(1), Some(Tok::Pseudo(p)) if p == "rs") {
+                    self.check_local_def(&name, false)?;
                     self.pos += 2;
                     let size = self.parse_expr()?;
                     return Ok(Some(Stmt::Pseudo(Pseudo::Rs(name, size))));
                 }
                 match self.peek_at(1) {
                     Some(Tok::Equ) => {
+                        self.check_local_def(&name, false)?;
                         self.pos += 2;
                         let e = self.parse_expr()?;
                         Ok(Some(Stmt::Constant(Name::Plain(name), Some(e))))
@@ -572,6 +592,7 @@ impl Parser<'_> {
                         })))
                     }
                     _ => {
+                        self.check_local_def(&name, false)?;
                         self.pos += 1;
                         Ok(Some(Stmt::Constant(Name::Plain(name), None)))
                     }
@@ -579,6 +600,24 @@ impl Parser<'_> {
             }
             _ if self.enum_depth > 0 && !indented => self.err(t!("enum-member-invalid")),
             _ => self.err("unexpected token at start of statement"),
+        }
+    }
+
+    /// Reject a definition of `name` that its spelling rules out
+    /// (`plans/021-local-labels.md` §2.1): a qualified name (`p1@x`) can only
+    /// be referenced, and a local name (`@x`) can only be a label (`label`).
+    fn check_local_def(&self, name: &str, label: bool) -> Result<(), ParseError> {
+        match locals::classify(name) {
+            LocalName::Qualified { parent, local } => self.err(t!(
+                "local-def-qualified",
+                name = name,
+                parent = parent,
+                local = local
+            )),
+            LocalName::Local(_) | LocalName::Private { .. } if !label => {
+                self.err(t!("local-not-label", name = locals::display(name)))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -597,10 +636,12 @@ impl Parser<'_> {
         }
         match self.peek_at(2) {
             Some(Tok::Colon) => {
+                self.check_local_def(base, true)?;
                 self.pos += 3;
                 Ok(Some(Stmt::Label(Name::Pasted(base.to_string(), depth))))
             }
             Some(Tok::Equ) => {
+                self.check_local_def(base, false)?;
                 self.pos += 3;
                 let e = self.parse_expr()?;
                 Ok(Some(Stmt::Constant(
@@ -609,6 +650,7 @@ impl Parser<'_> {
                 )))
             }
             Some(Tok::Endl) | None if !indented => {
+                self.check_local_def(base, false)?;
                 self.pos += 2;
                 Ok(Some(Stmt::Constant(
                     Name::Pasted(base.to_string(), depth),
@@ -1557,6 +1599,45 @@ mod tests {
         let e = parse(crate::lexer::Lexer::new(bad).tokenize(), &[bad]).expect_err("rejected");
         assert_eq!(e.line, 2);
         assert!(e.message.contains("`junk`"), "{}", e.message);
+    }
+
+    #[test]
+    fn local_definitions_are_checked_by_spelling() {
+        let qualified =
+            "`p1@a` is a qualified name and can only be referenced; define it as `@a:` under `p1`";
+        assert_eq!(parse_err("p1@a:\n").message, qualified);
+        assert_eq!(parse_err("p1@a = 1\n").message, qualified);
+        assert_eq!(parse_err("p1@a .rs 1\n").message, qualified);
+        assert_eq!(
+            parse_err(".for 0, 1\np1@a\\i:\n.endfor\n").message,
+            qualified
+        );
+        let not_label =
+            "`@a` is a local name, so it can only be a label; give the constant a global name";
+        assert_eq!(parse_err("@a = 1\n").message, not_label);
+        assert_eq!(parse_err("@a\n").message, not_label);
+        assert_eq!(parse_err("@a .rs 1\n").message, not_label);
+        assert_eq!(
+            parse_err(".for 0, 1\n@a\\i = 1\n.endfor\n").message,
+            not_label
+        );
+        assert_eq!(first_stmt("@a:\n"), Stmt::Label(Name::Plain("@a".into())));
+    }
+
+    #[test]
+    fn a_pasted_global_lets_its_own_loop_frame_define_plain_locals() {
+        let ok = |src: &str| {
+            let toks = crate::lexer::Lexer::new(src).tokenize();
+            parse(toks, &[src]).is_ok()
+        };
+        assert!(ok(".for 0, 1\nrow\\i:\n@x:\n.endfor\n"));
+        assert!(!ok(".for 0, 1\n@x:\nrow\\i:\n.endfor\n"));
+        assert!(!ok(".for 0, 1\n@x\\i:\n@y:\n.endfor\n"));
+        // An inner frame does not inherit the flag.
+        assert!(!ok(
+            ".for 0, 1\nrow\\i:\n.for 0, 1\n@x:\n.endfor\n.endfor\n"
+        ));
+        assert!(!ok(".for 0, 1\nrow\\i:\nother:\n.endfor\n"));
     }
 
     #[test]
