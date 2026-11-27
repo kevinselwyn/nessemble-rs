@@ -19,6 +19,7 @@ mod locals;
 mod parse;
 mod paths;
 mod preprocess;
+pub mod program;
 pub mod tooling;
 
 pub use assemble::{
@@ -57,6 +58,10 @@ pub struct Options {
     /// warning is reported as an error (`-W`, `--warnings-as-errors`, and a
     /// `.nessemblerc`'s `assemble.rules`). See [`AsmRule`].
     pub rules: AsmRules,
+    /// Record what pass 2 emitted (a [`program::ProgramMap`]) for whole-program
+    /// analysis. Off by default; it never changes the assembled bytes
+    /// (`plans/023-whole-program-clobber-analysis.md` §2.2).
+    pub record_program: bool,
 }
 
 impl Default for Options {
@@ -68,6 +73,7 @@ impl Default for Options {
             source_map: false,
             project_root: None,
             rules: AsmRules::default(),
+            record_program: false,
         }
     }
 }
@@ -439,6 +445,9 @@ pub struct ProjectDiagnostics {
     pub files: Vec<String>,
     /// Resolved path of each flattened file, parallel to `files`.
     pub paths: Vec<PathBuf>,
+    /// What the assembly emitted, when [`Options::record_program`] was set and
+    /// the parse succeeded (present even with errors; see [`build_program`]).
+    pub program: Option<program::ProgramMap>,
 }
 
 /// Diagnose the project rooted at `path` (with in-memory `source` as its
@@ -484,6 +493,7 @@ pub fn diagnose_project_with(
                 tables: Vec::new(),
                 files: vec![top_name],
                 paths: vec![path.to_path_buf()],
+                program: None,
             };
         }
     };
@@ -504,10 +514,12 @@ pub fn diagnose_project_with(
             tables: Vec::new(),
             files,
             paths,
+            program: None,
         };
     }
 
     let mut asm = new_assembler(options, pre.into_tables(), custom);
+    asm.set_record_program(options.record_program);
     let (errors, warnings) = asm.diagnostics(&lines);
     ProjectDiagnostics {
         errors,
@@ -516,6 +528,48 @@ pub fn diagnose_project_with(
         tables: asm.table_entries().to_vec(),
         files,
         paths,
+        program: asm.take_program(),
+    }
+}
+
+/// One program assembled for whole-program analysis
+/// (`plans/023-whole-program-clobber-analysis.md` §3.2).
+pub struct ProgramBuild {
+    /// What the assembly emitted — `None` when it had any error, since a
+    /// failed build's bytes are not the program that ships.
+    pub program: Option<program::ProgramMap>,
+    /// Every error (collect-all), in the build's own text.
+    pub errors: Vec<Diag>,
+    /// Every warning.
+    pub warnings: Vec<Diag>,
+    /// Display name of each flattened file, parallel to `paths`.
+    pub files: Vec<String>,
+    /// Resolved path of each flattened file.
+    pub paths: Vec<PathBuf>,
+}
+
+/// Assemble the program whose entry is `path` (with `source` as its text),
+/// recording what it emitted. Built on [`diagnose_project_with`], so every
+/// error is collected and the language server can share it.
+#[must_use]
+pub fn build_program(
+    path: &Path,
+    source: &str,
+    options: &Options,
+    overlay: &FileOverlay,
+    custom: CustomResolver,
+) -> ProgramBuild {
+    let options = Options {
+        record_program: true,
+        ..options.clone()
+    };
+    let diags = diagnose_project_with(path, source, &options, overlay, custom);
+    ProgramBuild {
+        program: diags.program.filter(|_| diags.errors.is_empty()),
+        errors: diags.errors,
+        warnings: diags.warnings,
+        files: diags.files,
+        paths: diags.paths,
     }
 }
 
@@ -683,6 +737,7 @@ fn assemble_impl(
     };
     let mut asm = new_assembler(options, pre.into_tables(), custom);
     asm.set_record_source_map(options.source_map);
+    asm.set_record_program(options.record_program);
     let rom = asm.run(&lines);
     let out = asm.take_out();
     let result = rom.map_err(AssembleError).map(|rom| {

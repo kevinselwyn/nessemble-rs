@@ -18,6 +18,7 @@ use crate::ast::{
 };
 use crate::diagnostic::{AsmRule, AsmRules, Diag, Expansion, RuleSeverity};
 use crate::locals::{self, LocalName};
+use crate::program::{Emit, EmitKind, LabelDef, ProgramBuilder, ProgramMap, Site, Unmodelled, Via};
 
 const BANK_PRG: i64 = 0x4000;
 const BANK_CHR: i64 = 0x2000;
@@ -192,6 +193,11 @@ struct Symbol {
     /// op in its bank, or a constant computed from such a symbol
     /// (`plans/022-assertions.md` §3).
     approx: bool,
+    /// The ROM offset the definition was at, so a control transfer naming a
+    /// label can be pinned to one ROM location
+    /// (`plans/023-whole-program-clobber-analysis.md` §2.2). Never read by
+    /// evaluation or the list file.
+    rom_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -539,6 +545,11 @@ pub struct Assembler {
     /// `Arc<str>` names only when [`Assembler::source_map`] is called.
     spans: Vec<RawSpan>,
 
+    /// When set, record what pass 2 emitted for whole-program analysis (see
+    /// [`ProgramMap`]). Off by default; it only reads state.
+    record_program: bool,
+    program: ProgramBuilder,
+
     symbols: Vec<Symbol>,
 
     enum_active: bool,
@@ -794,6 +805,8 @@ impl Assembler {
             offset_max: 0,
             record_source_map: false,
             spans: Vec::new(),
+            record_program: false,
+            program: ProgramBuilder::default(),
             symbols: Vec::new(),
             enum_active: false,
             enum_value: 0,
@@ -878,6 +891,27 @@ impl Assembler {
     /// [`source_map`]: Assembler::source_map
     pub fn set_record_source_map(&mut self, on: bool) {
         self.record_source_map = on;
+    }
+
+    /// Enable or disable program recording (see [`ProgramMap`]) for the next
+    /// run. Off by default; it never changes the emitted bytes.
+    pub fn set_record_program(&mut self, on: bool) {
+        self.record_program = on;
+    }
+
+    /// What the last run's pass 2 emitted, or `None` when recording was off.
+    pub fn take_program(&mut self) -> Option<ProgramMap> {
+        if !self.record_program {
+            return None;
+        }
+        let builder = std::mem::take(&mut self.program);
+        let files = self.paths.clone();
+        Some(builder.finish(
+            self.rom.clone(),
+            self.coverage.clone(),
+            files,
+            self.undocumented,
+        ))
     }
 
     /// The byte-exact source map collected during the last [`run`], or `None`
@@ -1028,6 +1062,7 @@ impl Assembler {
         // Spans are collected fresh on pass 2; clearing here drops any from an
         // earlier pass so the final map reflects only the emitting pass.
         self.spans.clear();
+        self.program.clear();
     }
 
     /// Whether the current statement is suppressed by a false conditional
@@ -2014,6 +2049,15 @@ impl Assembler {
         }
         let bank = self.layout_bank();
         self.approx_bank[bank] = true;
+        if self.recording() {
+            let (site, _) = self.author_site();
+            self.program.unmodelled.push(Unmodelled {
+                site,
+                rom_offset: self.rom_index(),
+                cpu_addr: self.address_offset() as u16,
+                bank: self.prg_index as u16,
+            });
+        }
         if let Some(e) = self.table.as_mut().and_then(|t| t.entries.last_mut()) {
             e.approx = true;
         }
@@ -2468,8 +2512,12 @@ impl Assembler {
             self.error(t!("for-paste-defined", name = name));
             return;
         }
+        let is_label = value.is_none() && kind == SymType::Label;
         let value = value.unwrap_or_else(|| self.address_offset());
         self.define_symbol(name, value, kind, true);
+        if is_label {
+            self.record_label(name);
+        }
     }
 
     fn define_symbol(&mut self, name: &str, value: i64, kind: SymType, from_macro: bool) {
@@ -2494,6 +2542,7 @@ impl Assembler {
         });
         let parent = self.scope().map(str::to_string);
         let site = self.cur_site();
+        let rom_offset = self.rom_index();
         let approx = match kind {
             SymType::Label => self.approx_bank[self.layout_bank()],
             SymType::Constant => self.def_taint,
@@ -2525,6 +2574,7 @@ impl Assembler {
                     sym.defined_at = here;
                     sym.site = site;
                     sym.parent = parent;
+                    sym.rom_offset = rom_offset;
                 }
             }
             None => self.symbols.push(Symbol {
@@ -2537,6 +2587,7 @@ impl Assembler {
                 site,
                 parent,
                 approx,
+                rom_offset,
             }),
         }
     }
@@ -2784,6 +2835,106 @@ impl Assembler {
     fn add_label(&mut self, name: &str) {
         let offset = self.address_offset();
         self.add_symbol(name, offset, SymType::Label);
+        self.record_label(name);
+    }
+
+    // -- program recording (`plans/023-whole-program-clobber-analysis.md`) --
+
+    /// Whether this statement's effects are being recorded.
+    fn recording(&self) -> bool {
+        self.record_program
+            && self.pass == 2
+            && self.segment_prg
+            && !self.ines.trn
+            && !self.if_suppressed()
+    }
+
+    /// The author's line for the current statement and what produced it: the
+    /// outermost `.macro` call for an expanded line, the pseudo-op's line for
+    /// emitted source.
+    fn author_site(&self) -> (Site, Option<Via>) {
+        let mut via = None;
+        let mut site = Site {
+            file: self.cur_file,
+            line: self.cur_line,
+        };
+        let mut id = self.cur_expansion;
+        let mut root = None;
+        while let Some(e) = id
+            .checked_sub(1)
+            .and_then(|i| self.expansions.get(i as usize))
+        {
+            root = Some(e);
+            id = e.parent;
+        }
+        if let Some(e) = root {
+            site = Site {
+                file: e.call_file,
+                line: e.call_line,
+            };
+            via = Some(Via::Macro(e.name.clone()));
+        }
+        if self.custom_expansion_depth > 0 {
+            if let Some(name) = self.emitted_names.get(&self.emit_ctx.0) {
+                via = Some(Via::Pseudo(name.clone()));
+            }
+        }
+        (site, via)
+    }
+
+    /// Record the definition of label `key` here (pass 2).
+    fn record_label(&mut self, key: &str) {
+        if !self.recording() || key == ":" {
+            return;
+        }
+        let (site, via) = self.author_site();
+        let local = matches!(locals::classify(key), LocalName::Local(_)) || key.contains('@');
+        self.program.labels.push(LabelDef {
+            name: key.to_string(),
+            cpu_addr: self.address_offset() as u16,
+            bank: self.prg_index as u16,
+            rom_offset: self.rom_index(),
+            site,
+            in_expansion: via.is_some() || self.cur_from_macro,
+            local,
+        });
+    }
+
+    /// The label an instruction's operand names, as `(rom_offset, value)`:
+    /// the first label symbol (or anonymous-label reference) in the operand.
+    fn operand_anchor(&self, instr: &Instruction) -> Option<(usize, i64)> {
+        let (Operand::Absolute(expr) | Operand::ZeroPage(expr)) = &instr.operand else {
+            return None;
+        };
+        self.expr_anchor(expr)
+    }
+
+    fn expr_anchor(&self, expr: &Expr) -> Option<(usize, i64)> {
+        let label = |id: usize| {
+            let s = &self.symbols[id];
+            (s.kind == SymType::Label).then_some((s.rom_offset, s.value))
+        };
+        match expr {
+            Expr::Symbol(name) => {
+                let key = self.resolve_ref(name)?;
+                label(self.find_symbol(&key)?)
+            }
+            Expr::PastedSymbol(base, depth) => {
+                let open = self.loop_stack.len();
+                let d = usize::from(*depth);
+                if d >= open {
+                    return None;
+                }
+                let name = format!("{base}{}", self.loop_stack[open - 1 - d].current);
+                let key = self.resolve_ref(&name)?;
+                label(self.find_symbol(&key)?)
+            }
+            Expr::LocalForward(n) => label(self.get_symbol_local(*n as i32)?),
+            Expr::LocalBackward(n) => label(self.get_symbol_local(-(*n as i32))?),
+            Expr::Binary(a, _, b) => self.expr_anchor(a).or_else(|| self.expr_anchor(b)),
+            Expr::Unary(_, e) => self.expr_anchor(e),
+            _ => None,
+        }
     }
 
     fn get_symbol_local(&self, direction: i32) -> Option<usize> {
@@ -2900,6 +3051,10 @@ impl Assembler {
             if self.record_source_map {
                 self.record_span(offset);
             }
+            if self.record_program && self.segment_prg {
+                let cpu = self.address_offset() as u16;
+                self.program.byte(offset, self.prg_index as u16, cpu);
+            }
         }
         if self.segment_prg {
             if self.pass == 1 && self.prg_offsets[self.prg_index] >= BANK_PRG {
@@ -2940,6 +3095,42 @@ impl Assembler {
     // -- statement execution -----------------------------------------------
 
     fn exec_stmt(&mut self, stmt: &Stmt) {
+        if !(self.record_program && self.pass == 2) {
+            self.exec_stmt_inner(stmt);
+            return;
+        }
+        let anchor = match stmt {
+            Stmt::Instruction(instr) => self.operand_anchor(instr),
+            _ => None,
+        };
+        let (site, via) = self.author_site();
+        let outer = std::mem::take(&mut self.program.cur);
+        self.exec_stmt_inner(stmt);
+        let pieces = std::mem::replace(&mut self.program.cur, outer);
+        for piece in pieces {
+            let kind = match stmt {
+                Stmt::Instruction(_) => EmitKind::Instruction { target: None },
+                Stmt::Pseudo(p) => EmitKind::Data {
+                    directive: pseudo_directive(p),
+                },
+                _ => EmitKind::Data {
+                    directive: String::new(),
+                },
+            };
+            self.program.emits.push(Emit {
+                rom_offset: piece.rom_offset,
+                len: piece.len,
+                bank: piece.bank,
+                cpu_addr: piece.cpu_addr,
+                site,
+                via: via.clone(),
+                kind,
+            });
+            self.program.anchors.push(anchor);
+        }
+    }
+
+    fn exec_stmt_inner(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Label(Name::Plain(name)) => {
                 // The parser rejects a plain label in a written-out `.for` body;
@@ -3970,6 +4161,31 @@ impl Assembler {
             BinOp::Ge => (a >= b) as i64,
         }
     }
+}
+
+/// The directive a data statement was written with, for messages.
+fn pseudo_directive(p: &Pseudo) -> String {
+    let name = match p {
+        Pseudo::Db(_) => "db",
+        Pseudo::Dw(_) => "dw",
+        Pseudo::Ascii(_) => "ascii",
+        Pseudo::Hibytes(_) => "hibytes",
+        Pseudo::Lobytes(_) => "lobytes",
+        Pseudo::Fill(_) => "fill",
+        Pseudo::Checksum(_) => "checksum",
+        Pseudo::Random(_) => "random",
+        Pseudo::Color(_) => "color",
+        Pseudo::Incbin(..) => "incbin",
+        Pseudo::Incpng(..) => "incpng",
+        Pseudo::Incpal(_) => "incpal",
+        Pseudo::Incrle(_) => "incrle",
+        Pseudo::Incwav(..) => "incwav",
+        Pseudo::Font(_) => "font",
+        Pseudo::Defchr(_) => "defchr",
+        Pseudo::Custom(name, _) => return format!(".{name}"),
+        _ => "data",
+    };
+    format!(".{name}")
 }
 
 /// CRC-32 (poly 0xEDB88320), matching the reference `crc_32`.
