@@ -2175,15 +2175,15 @@ impl Assembler {
     /// (`local-no-scope`, on pass 1) and yields `None`.
     fn resolve_def(&mut self, name: &str) -> Option<String> {
         match locals::classify(name) {
-            LocalName::Local(local) => match self.scope() {
-                Some(scope) => Some(format!("{scope}{local}")),
-                None => {
-                    if self.pass == 1 && !self.if_suppressed() {
-                        self.error(t!("local-no-scope", name = local));
-                    }
-                    None
+            LocalName::Local(local) => {
+                if let Some(scope) = self.scope() {
+                    return Some(format!("{scope}{local}"));
                 }
-            },
+                if self.pass == 1 && !self.if_suppressed() {
+                    self.error(t!("local-no-scope", name = local));
+                }
+                None
+            }
             _ => Some(name.to_string()),
         }
     }
@@ -3420,15 +3420,13 @@ impl Assembler {
     /// earlier reference's placeholder counts, as it always has). A local with
     /// no scope open is reported on pass 2 and does not hold.
     fn symbol_exists(&mut self, name: &str) -> bool {
-        match self.resolve_ref(name) {
-            Some(key) => self.find_symbol(&key).is_some(),
-            None => {
-                if self.pass == 2 && !self.if_suppressed() {
-                    self.error(t!("local-no-scope", name = name));
-                }
-                false
-            }
+        if let Some(key) = self.resolve_ref(name) {
+            return self.find_symbol(&key).is_some();
         }
+        if self.pass == 2 && !self.if_suppressed() {
+            self.error(t!("local-no-scope", name = name));
+        }
+        false
     }
 
     /// Remember the first thing an expression touched whose value is not known

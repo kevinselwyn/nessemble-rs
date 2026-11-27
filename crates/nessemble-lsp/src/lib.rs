@@ -73,6 +73,7 @@ use nessemble_core::{
 use nessemble_isa::{DIRECTIVES, OPCODES};
 
 mod api;
+mod locals;
 #[cfg(feature = "scripting")]
 mod scripting;
 
@@ -550,21 +551,33 @@ impl Server {
         if let Some(items) = self.path_completions(uri, pos) {
             return items;
         }
+        // Typing an `@local`: only the current scope's locals can go there.
+        if locals::typing_local(&doc.text, pos) {
+            return locals::locals_in_scope(&doc.text, pos.line)
+                .iter()
+                .map(|name| local_item(name))
+                .collect();
+        }
         let mut items = mnemonic_items();
         items.extend(directive_items());
         // A `.for` body's `row\i:` defines row0, row1, …: offer the pasted
         // base once as `row\i`, not every name the assembler made from it.
+        // Locals (`p1@x`) are offered by `@` completion, not here.
         let defs = definitions(&doc.text);
         items.extend(
             doc.symbols
                 .iter()
-                .filter(|s| pasted_match(&defs, &s.name).is_none())
+                .filter(|s| !s.name.contains('@') && pasted_match(&defs, &s.name).is_none())
                 .map(|s| symbol_item(&s.name)),
         );
         let mut seen = HashSet::new();
         items.extend(
             defs.iter()
-                .filter(|d| d.name.contains('\\') && seen.insert(d.name.as_str()))
+                .filter(|d| {
+                    d.name.contains('\\')
+                        && !d.name.starts_with('@')
+                        && seen.insert(d.name.as_str())
+                })
                 .map(|d| pasted_item(&d.name)),
         );
         items.extend(macro_names(&doc.text).iter().map(|name| macro_item(name)));
@@ -627,15 +640,27 @@ impl Server {
         }
         let text = &doc.text;
         let signatures = tooling::resolve_signatures(text);
-        Some(
-            definitions(text)
-                .into_iter()
-                .map(|d| {
-                    let signature = signatures.iter().find(|s| s.name == d.name);
-                    document_symbol(&d, signature)
-                })
-                .collect(),
-        )
+        // An `@local` nests under the label (or macro) defined above it.
+        let mut out: Vec<DocumentSymbol> = Vec::new();
+        let mut parent: Option<usize> = None;
+        for d in definitions(text) {
+            let signature = signatures.iter().find(|s| s.name == d.name);
+            let symbol = document_symbol(&d, signature);
+            let local = d.kind == DefKind::Label && d.name.starts_with('@');
+            if let Some(i) = parent.filter(|_| local) {
+                let host = &mut out[i];
+                if symbol.range.end > host.range.end {
+                    host.range.end = symbol.range.end;
+                }
+                host.children.get_or_insert_with(Vec::new).push(symbol);
+                continue;
+            }
+            if matches!(d.kind, DefKind::Label | DefKind::Macro) && !local {
+                parent = Some(out.len());
+            }
+            out.push(symbol);
+        }
+        Some(out)
     }
 
     /// Resolve go-to-definition for the token under `pos` in the document at
@@ -664,9 +689,51 @@ impl Server {
                     Range::new(Position::new(0, 0), Position::new(0, 0)),
                 ))
             }
+            LexKind::Ident if locals::is_local(&name) => {
+                let scope = locals::scope_at(&doc.text, pos.line, &name)?;
+                let range = locals::definition_in(&doc.text, &scope, &name)?;
+                Some(Location::new(uri.clone(), range))
+            }
             LexKind::Ident => self.definition_location(uri, &name),
             _ => None,
         }
+    }
+
+    /// The text of the document at `url`: the open buffer, else the file.
+    fn text_of(&self, url: &Url) -> Option<String> {
+        match self.documents.get(url) {
+            Some(doc) => Some(doc.text.clone()),
+            None => std::fs::read_to_string(url.to_file_path().ok()?).ok(),
+        }
+    }
+
+    /// The `@local` the token at `pos` names — an `@x` in its scope, or a
+    /// qualified `q@x` in `q`'s — as (the file holding the scope, its text,
+    /// the scope, the `@x` name).
+    fn local_target(
+        &self,
+        uri: &Url,
+        pos: Position,
+    ) -> Option<(Url, String, locals::Scope, String)> {
+        let doc = self.documents.get(uri)?;
+        let token = token_at(&doc.text, pos).filter(|t| t.kind == LexKind::Ident)?;
+        if locals::is_local(token.text) {
+            let scope = locals::scope_at(&doc.text, pos.line, token.text)?;
+            return Some((uri.clone(), doc.text.clone(), scope, token.text.to_string()));
+        }
+        let (parent, local) = tooling::split_qualified(token.text)?;
+        let (home, text, scope) = self.parent_scope(uri, parent)?;
+        Some((home, text, locals::Scope::Label(scope), local.to_string()))
+    }
+
+    /// Where global label `parent` (as seen from `uri`) is defined, with that
+    /// file's text and the label's scope there.
+    fn parent_scope(&self, uri: &Url, parent: &str) -> Option<(Url, String, locals::LabelScope)> {
+        let loc = self.definition_location(uri, parent)?;
+        let text = self.text_of(&loc.uri)?;
+        let scope =
+            locals::label_scope_at(&text, loc.range.start.line).filter(|s| s.parent == parent)?;
+        Some((loc.uri, text, scope))
     }
 
     /// Hover markdown for a custom pseudo-op directive (`.foo`): the script it
@@ -690,6 +757,12 @@ impl Server {
     /// The definition of `name` for the document at `uri`: the local definition
     /// if present, else the first one found in the project's include closure.
     fn definition_location(&self, uri: &Url, name: &str) -> Option<Location> {
+        // `q@x` is `@x:` inside the scope of `q`, wherever `q` is defined.
+        if let Some((parent, local)) = tooling::split_qualified(name) {
+            let (home, text, scope) = self.parent_scope(uri, parent)?;
+            let range = locals::definition_in(&text, &locals::Scope::Label(scope), local)?;
+            return Some(Location::new(home, range));
+        }
         // A reference with no plain definition (`row1`) may come from a `.for`
         // body's pasted `row\i:`; that is only the fallback, after every plain
         // definition in the project has been tried.
@@ -767,6 +840,24 @@ impl Server {
                 .map(|r| Location::new(uri.clone(), r))
                 .collect();
             return Some(locations);
+        }
+        if let Some((home, text, scope, local)) = self.local_target(uri, pos) {
+            let def = locals::definition_in(&text, &scope, &local);
+            let mut out: Vec<Location> = locals::local_tokens(&text, &scope, &local)
+                .into_iter()
+                .filter(|r| include_declaration || Some(*r) != def)
+                .map(|r| Location::new(home.clone(), r))
+                .collect();
+            if let locals::Scope::Label(s) = &scope {
+                for (doc_uri, d) in self.asm_documents_and(&home, &text) {
+                    out.extend(
+                        locals::qualified_tokens(&d, &s.parent, &local)
+                            .into_iter()
+                            .map(|(r, _)| Location::new(doc_uri.clone(), r)),
+                    );
+                }
+            }
+            return Some(out);
         }
         let text = &doc.text;
         let name = word_at(text, pos)?;
@@ -862,6 +953,18 @@ impl Server {
                     .into_iter()
                     .find(|arg| arg.token_range == token.range && !arg.path.is_empty())?;
                 path_arg_hover(root.as_deref(), &base, &arg)
+            }
+            LexKind::Ident if locals::is_local(token.text) => {
+                match locals::scope_at(&doc.text, pos.line, token.text)? {
+                    locals::Scope::Label(s) => {
+                        let key = format!("{}{}", s.parent, token.text);
+                        ident_hover(&key, &doc.text, &doc.symbols, None)?
+                    }
+                    locals::Scope::Macro { .. } => format!(
+                        "**{}** (local label, private to each expansion of its macro)",
+                        token.text
+                    ),
+                }
             }
             LexKind::Ident => {
                 let plain = ident_hover(
@@ -1147,6 +1250,9 @@ impl Server {
             return None;
         }
         let name = word_at(&doc.text, pos)?;
+        if let Some((home, text, scope, local)) = self.local_target(uri, pos) {
+            return self.rename_local(&home, &text, &scope, &local, new_name);
+        }
         if !is_identifier(new_name) {
             return None;
         }
@@ -1156,11 +1262,14 @@ impl Server {
             .iter()
             .filter(|(_, d)| d.kind == DocKind::Asm)
         {
+            // Every `name`, and the `name@` prefix of every `name@x`.
             let edits: Vec<TextEdit> = located_lexemes(&doc.text)
                 .into_iter()
                 .filter(|t| t.kind == LexKind::Ident && t.text == name)
-                .map(|t| TextEdit {
-                    range: t.range,
+                .map(|t| t.range)
+                .chain(locals::qualified_prefixes(&doc.text, &name))
+                .map(|range| TextEdit {
+                    range,
                     new_text: new_name.to_string(),
                 })
                 .collect();
@@ -1172,6 +1281,64 @@ impl Server {
             changes: Some(changes),
             ..Default::default()
         })
+    }
+
+    /// Rename the local `local` of `scope` (in `home`, whose text is `text`)
+    /// to `new_name`, which must itself be a local name: its in-scope `@x`
+    /// tokens, and the `@x` part of every `parent@x` in the open documents.
+    fn rename_local(
+        &self,
+        home: &Url,
+        text: &str,
+        scope: &locals::Scope,
+        local: &str,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        if !tooling::is_local_name(new_name) {
+            return None;
+        }
+        let edit = |range| TextEdit {
+            range,
+            new_text: new_name.to_string(),
+        };
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let own: Vec<TextEdit> = locals::local_tokens(text, scope, local)
+            .into_iter()
+            .map(edit)
+            .collect();
+        if !own.is_empty() {
+            changes.insert(home.clone(), own);
+        }
+        if let locals::Scope::Label(s) = scope {
+            for (doc_uri, d) in self.asm_documents_and(home, text) {
+                let suffixes: Vec<TextEdit> = locals::qualified_tokens(&d, &s.parent, local)
+                    .into_iter()
+                    .map(|(_, suffix)| edit(suffix))
+                    .collect();
+                if !suffixes.is_empty() {
+                    changes.entry(doc_uri).or_default().extend(suffixes);
+                }
+            }
+        }
+        (!changes.is_empty()).then(|| WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        })
+    }
+
+    /// Every open assembly document's (uri, text), plus `home` with `text`
+    /// when it is not open.
+    fn asm_documents_and(&self, home: &Url, text: &str) -> Vec<(Url, String)> {
+        let mut out: Vec<(Url, String)> = self
+            .documents
+            .iter()
+            .filter(|(_, d)| d.kind == DocKind::Asm)
+            .map(|(u, d)| (u.clone(), d.text.clone()))
+            .collect();
+        if !self.documents.contains_key(home) {
+            out.push((home.clone(), text.to_string()));
+        }
+        out
     }
 
     /// Code actions offered for `range` in the document at `uri`: base
@@ -2429,6 +2596,7 @@ fn pasted_hover(text: &str, name: &str) -> Option<String> {
 /// discipline is visible in one panel.
 fn document_symbol(def: &Definition, signature: Option<&tooling::Signature>) -> DocumentSymbol {
     let (kind, base) = match def.kind {
+        DefKind::Label if def.name.starts_with('@') => (SymbolKind::KEY, "local label"),
         DefKind::Label => (SymbolKind::FUNCTION, "label"),
         DefKind::Constant => (SymbolKind::CONSTANT, "constant"),
         DefKind::Macro => (SymbolKind::FUNCTION, "macro"),
@@ -3304,7 +3472,8 @@ fn folding_ranges(text: &str) -> Vec<FoldingRange> {
 fn subroutine_ranges(text: &str, lines: &[&str]) -> Vec<FoldingRange> {
     let mut ranges = Vec::new();
     for def in definitions(text) {
-        if def.kind != DefKind::Label {
+        // An `@local` is inside its routine, never a fold of its own.
+        if def.kind != DefKind::Label || def.name.starts_with('@') {
             continue;
         }
         let start = def.range.start.line;
@@ -3869,6 +4038,16 @@ fn symbol_item(name: &str) -> CompletionItem {
         label: name.to_string(),
         kind: Some(CompletionItemKind::VARIABLE),
         detail: Some("label / constant".to_string()),
+        ..Default::default()
+    }
+}
+
+/// An `@local` label of the current scope.
+fn local_item(name: &str) -> CompletionItem {
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(CompletionItemKind::VARIABLE),
+        detail: Some("local label".to_string()),
         ..Default::default()
     }
 }
@@ -5049,6 +5228,178 @@ mod tests {
         assert!(d.is_empty(), "thing should resolve under r1: {d:?}");
 
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    // -- @local labels (plans/021-local-labels.md §3.9) --------------------
+
+    const LOCALS: &str = "p1:\n@loc:\n    BNE @loc\np2:\n@loc:\n    BNE @loc\n    JMP p1@loc\n";
+
+    fn locals_server() -> (Server, Url) {
+        let mut server = Server::default();
+        open(&mut server, "file:///loc.asm", LOCALS);
+        (server, Url::parse("file:///loc.asm").unwrap())
+    }
+
+    #[test]
+    fn goto_definition_resolves_a_local_in_its_own_scope() {
+        let (server, uri) = locals_server();
+        let at = |line, col| {
+            server
+                .goto_definition(&uri, Position::new(line, col))
+                .expect("found")
+                .range
+                .start
+        };
+        assert_eq!(at(2, 9), Position::new(1, 0));
+        assert_eq!(at(5, 9), Position::new(4, 0));
+        // `p1@loc` jumps into `p1`'s scope.
+        assert_eq!(at(6, 10), Position::new(1, 0));
+    }
+
+    #[test]
+    fn goto_definition_resolves_a_qualified_local_across_files() {
+        let w = workspace("local-gotodef");
+        write(
+            &w,
+            "main.asm",
+            ".include \"lib.asm\"\n.include \"code.asm\"\n",
+        );
+        let lib = w.join("lib.asm");
+        write(&w, "lib.asm", "draw:\n    NOP\n@clip:\n    RTS\n");
+        let code = w.join("code.asm");
+        let code_text = "    JMP draw@clip\n";
+        write(&w, "code.asm", code_text);
+        let mut server = server_for(&w);
+        did_open(&mut server, &code, code_text);
+        let loc = server
+            .goto_definition(&Url::from_file_path(&code).unwrap(), Position::new(0, 12))
+            .expect("found");
+        assert_eq!(loc.uri, Url::from_file_path(&lib).unwrap());
+        assert_eq!(loc.range.start, Position::new(2, 0));
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn references_are_scope_aware_and_include_qualified_uses() {
+        let (server, uri) = locals_server();
+        let lines = |pos| {
+            let mut v: Vec<u32> = server
+                .references(&uri, pos, true)
+                .expect("found")
+                .iter()
+                .map(|l| l.range.start.line)
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(lines(Position::new(2, 9)), vec![1, 2, 6]);
+        assert_eq!(lines(Position::new(5, 9)), vec![4, 5]);
+    }
+
+    #[test]
+    fn renaming_a_local_edits_its_scope_and_qualified_suffixes() {
+        let (server, uri) = locals_server();
+        let edit = server
+            .rename(&uri, Position::new(2, 9), "@top")
+            .expect("renamed");
+        let mut edits = edit.changes.unwrap().remove(&uri).unwrap();
+        edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+        let got: Vec<(u32, u32, u32)> = edits
+            .iter()
+            .map(|e| {
+                (
+                    e.range.start.line,
+                    e.range.start.character,
+                    e.range.end.character,
+                )
+            })
+            .collect();
+        assert_eq!(got, vec![(1, 0, 4), (2, 8, 12), (6, 10, 14)]);
+        // A local can only be renamed to a local.
+        assert!(server.rename(&uri, Position::new(2, 9), "top").is_none());
+    }
+
+    #[test]
+    fn renaming_a_global_edits_qualified_prefixes() {
+        let (server, uri) = locals_server();
+        let edit = server
+            .rename(&uri, Position::new(0, 1), "first")
+            .expect("renamed");
+        let mut edits = edit.changes.unwrap().remove(&uri).unwrap();
+        edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+        let got: Vec<(u32, u32, u32)> = edits
+            .iter()
+            .map(|e| {
+                (
+                    e.range.start.line,
+                    e.range.start.character,
+                    e.range.end.character,
+                )
+            })
+            .collect();
+        assert_eq!(got, vec![(0, 0, 2), (6, 8, 10)]);
+    }
+
+    #[test]
+    fn at_completion_offers_only_the_current_scope() {
+        let mut server = Server::default();
+        let text = "p1:\n@a:\n@b:\np2:\n@c:\n    BNE @\n.macrodef mm\n@own:\n    BNE @\n.endm\n";
+        open(&mut server, "file:///c.asm", text);
+        let uri = Url::parse("file:///c.asm").unwrap();
+        assert_eq!(
+            labels(server.complete(&uri, Position::new(5, 9))),
+            vec!["@c"]
+        );
+        assert_eq!(
+            labels(server.complete(&uri, Position::new(8, 9))),
+            vec!["@c", "@own"]
+        );
+        // Qualified keys never appear in the general list.
+        let all = labels(server.complete(&uri, Position::new(5, 4)));
+        assert!(!all.iter().any(|l| l.contains('@')), "{all:?}");
+    }
+
+    #[test]
+    fn document_symbols_nest_locals_under_their_label() {
+        let (server, uri) = locals_server();
+        let syms = server.document_symbols(&uri).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["p1", "p2"]);
+        let child = &syms[0].children.as_ref().unwrap()[0];
+        assert_eq!(
+            (child.name.as_str(), child.detail.as_deref()),
+            ("@loc", Some("local label"))
+        );
+        assert!(syms[0].range.end >= child.range.end);
+    }
+
+    #[test]
+    fn locals_never_fold() {
+        let mut server = Server::default();
+        open(&mut server, "file:///f.asm", "p1:\n@a:\n    NOP\n    RTS\n");
+        let uri = Url::parse("file:///f.asm").unwrap();
+        let folds = server.folding_ranges(&uri).unwrap();
+        assert_eq!(folds.len(), 1);
+        assert_eq!((folds[0].start_line, folds[0].end_line), (0, 3));
+    }
+
+    #[test]
+    fn hover_on_a_local_shows_its_value() {
+        let md = hover_markdown("file:///hl.asm", LOCALS, Position::new(5, 9)).expect("hover");
+        assert!(md.contains("**p2@loc** (label) = 2"), "{md}");
+    }
+
+    #[test]
+    fn no_signature_scaffold_or_action_for_a_local() {
+        let text = "p1:\n;\n@x:\n    RTS\n";
+        assert!(documentable_routine_indent(text, Position::new(1, 1)).is_none());
+        let uri = Url::parse("file:///s.asm").unwrap();
+        assert!(document_routine_actions(
+            &uri,
+            text,
+            Range::new(Position::new(2, 0), Position::new(2, 0))
+        )
+        .is_empty());
     }
 
     #[test]
