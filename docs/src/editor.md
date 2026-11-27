@@ -32,12 +32,23 @@ Once connected, the server provides:
   the code — a routine that writes a register its `@nessemble-clobbers` omits is
   reported where the comment and the code disagree — and flags a mistyped or
   misplaced [comment directive](usage.md#comment-directives) — a directive that
-  would otherwise fail silently.
+  would otherwise fail silently. When the project's `.nessemblerc` names an
+  [`entry`](usage.md#entry), the routine rules run over the **assembled
+  program**, exactly as [`nessemble lint`](usage.md#program-mode-and-file-mode)
+  runs them: calls are followed across files, fall-through and save/restore
+  pairs are understood, and an unsaved edit in a callee updates its callers'
+  findings. The server never runs a custom pseudo-op's script to do this. It
+  reads what the last build cached; a pseudo-op it has no cached output for is
+  treated as unknown, which silences `overdeclared-clobber` for the routines
+  that reach it and is never reported as `unverifiable-clobbers`, so the editor
+  never shows a routine finding the CLI would not. (Run a build to warm the
+  cache; `emit_source` output is never cached.)
 - **Project-aware analysis** — when a workspace folder is open, a file that is
   `.include`d into a larger program is analyzed *in the context of that program*,
   so symbols defined in sibling or parent files are not reported as undefined.
   The server discovers entry points from the workspace's `.include` graph (no
-  configuration needed) and reflects unsaved edits across files. The open
+  configuration needed), or uses the `.nessemblerc` [`entry`](usage.md#entry)
+  when one is set, and reflects unsaved edits across files. The open
   workspace folder also doubles as the
   [project root](syntax.md#project-root-relative-paths) for `@/` paths,
   overriding the usual `.nessemblerc` walk-up the same way the CLI's
@@ -130,7 +141,10 @@ Once connected, the server provides:
   spelling (`@nessemble-format`), scaffold a signature block over an
   undocumented routine, and — when the linter catches a routine writing a
   register its `@nessemble-clobbers` omits — add that register to the list,
-  keeping the list in canonical order and any trailing prose intact.
+  keeping the list in canonical order and any trailing prose intact. On an
+  [`unused-lint-ignore`](usage.md#suppressing-a-finding) finding, **remove the
+  unused suppression**: the whole directive (and a region's `end`), or just the
+  rule that is no longer needed when others remain.
 - **Inlay hints** — a `JSR` whose target declares a clobber list shows that list
   at the end of the call line (`JSR draw_sprite  ‹A, X, Y›`), so the cost of a
   call is visible without hovering. Editors toggle inlay hints on and off with

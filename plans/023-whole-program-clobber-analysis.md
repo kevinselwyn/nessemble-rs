@@ -1,6 +1,7 @@
 # nessemble-rs: A Plan for Whole-Program Clobber Analysis
 
-> Status: **Proposed.** Builds on [plan 008](008-linting-rules.md) (the lint
+> Status: **Implemented** (Phases 0–6; the reference-corpus acceptance run in
+> §6 is the maintainer's, and its counts are not recorded yet). Builds on [plan 008](008-linting-rules.md) (the lint
 > engine), [plan 009](009-comment-directives.md) (the directive registry and
 > `@nessemble-lint-ignore…`) and [plan 010](010-routine-signatures.md)
 > (signatures, `undeclared-clobber`, `overdeclared-clobber`). It replaces plan
@@ -608,6 +609,23 @@ The three inert entries in otherwise live categories (two fall-through, one unre
 Also touched: `crates/nessemble-core/src/preprocess.rs`, `crates/nessemble-core/src/lexer.rs`, `crates/nessemble-core/src/ast.rs`, `crates/nessemble-core/src/parse.rs`, `crates/nessemble-core/src/lib.rs`, `crates/nessemble-cli/src/custom.rs`, `crates/nessemble-cli/src/lsp.rs`, `docs/src/usage.md`, `docs/src/editor.md`, `docs/src/upgrading.md`, and the new files `crates/nessemble-core/src/program.rs`, `crates/nessemble-core/src/clobbers.rs` and `crates/nessemble-core/tests/clobber_analysis.rs`.
 
 ---
+
+## As built
+
+Where the implementation differs in detail from the sections above:
+
+- **One PR, all phases.** Phases 0–6 shipped together, one commit and one changeset per phase (Phase 1's is `none`). Phase 4 (memory saves) is included, not dropped.
+- **`ProgramMap` carries more.** Besides §2.2's fields it has `written` (the write bitmap: an instruction byte that was never written ends the path), `undocumented` (`-u`), and `symbols` (every defined name and value, for resolving a contract's `[symbol]` memory slots). `Emit` has an `operand` field: the instruction's operand rendered back to source (`helper`, `[vec_ptr]`, `:+`), so messages can say `` `JSR helper` `` and `` `JMP [vec_ptr]` ``. `ProgramMap::resolve`, `resolve_addr` and `fall_through` implement §2.2's three resolution rules; `Resolution` is `At`, `Ambiguous(banks)` or `Nothing`.
+- **Where recording hooks in.** `exec_stmt` wraps the old body (`exec_stmt_inner`): on pass 2 it notes the operand anchor and the author's site, and `write_byte` accumulates the statement's bytes. A custom pseudo-op's `emit_source` lines record their own emits (they run through `exec_stmt`), so the enclosing statement records none. `LabelDef`s come from `add_label` and the pasted-label path. `Symbol.rom_offset` is set in `define_symbol` from `rom_index()`.
+- **The fixpoint joins.** Each round of the callee-summary fixpoint joins into the last (writes, reasons, stores and `pulls_return` only grow), so it is monotone by construction and stops when nothing changes; 64 rounds is a backstop. A single walk that exceeds 200,000 distinct states ends with the reason "it has too many paths to follow".
+- **A routine that pulls its own return address.** A contracted routine with a `PLA`/`PLP` at depth 0 is `unverifiable-clobbers`: `` `PLA` on line 7 pulls the routine's own return address ``. A `TXS` alone is not (a reset handler does `LDX #$FF / TXS`), but an `RTS` after it is, as §2.4 says.
+- **Open saves at an exit commit.** Any path end (including an unverifiable one) commits every save still open, so an `RTS` with a pushed register still on the stack reports the write.
+- **Memory saves**, as §2.5, with every non-indexed zero-page or absolute `STA`/`STX`/`STY` opening one. A reload that restores one is recorded, like a `PLA`, for `overdeclared-clobber`'s "(it is saved on line 4 and restored on line 6)".
+- **Message details.** Contract origins say `whose contract clobbers Y` for a `JMP` or branch into a contract too (`` `JMP next` on line 9, whose contract clobbers Y ``). An undocumented or unknown opcode inside an instruction emit reads `` the path reaches `$02` on line 40, which is not a known instruction ``; the "data" wording is kept for data emits. Overlapping `.phase` blocks in one bank read `which bank 0 assembles code at more than once`. "of `F`" uses the path the report prints: in the CLI the header path (closure files are shown relative to the current directory), in the editor the absolute path.
+- **`unused-lint-ignore`'s merge.** Findings from several programs are merged before suppressions are applied, so a suppression is used if its rule fired in any program — which is §2.1's "unused only if unused in all of them". A bare suppression is judged where every rule that is not `off` ran.
+- **LSP hooks.** `ServerHooks { custom_resolver: ResolverFactory }`, where `ResolverFactory` is `Box<dyn Fn(Option<&Path>) -> CustomResolver + Send + Sync>` (the server is sent across a thread in tests). The CLI's factory is `custom::build_cache_reader`. A name the hook does not know but a workspace mapping file declares still resolves to `Unmodeled`, so project pseudo-ops are never reported as unknown. `run()` keeps the lenient resolver. Program mode in the editor applies only when the discovered `.nessemblerc` has an `entry` whose closure holds the file; otherwise the include graph's roots are used, as before.
+- **The CLI's entry config** is the first path argument's `.nessemblerc` for building (`assemble.rules`, `assemble.pseudo`); every path's `entry` list is collected.
+- **Not done here:** the §6 acceptance run on the reference corpus (it is not in this repository).
 
 ## Decisions settled with the maintainer
 

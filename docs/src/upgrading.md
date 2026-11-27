@@ -46,6 +46,25 @@ unaffected.
 
   To keep the old values, move the `=` line outside the block.
 
+## Lint: whole-program clobber analysis
+
+The release that adds [program-mode lint](usage.md#program-mode-and-file-mode)
+changes what `nessemble lint` reports for routines with a clobber list.
+
+- **`unused-lint-ignore` is on by default** (`warn`). Every
+  `@nessemble-lint-ignore…` that silences nothing is now reported — in every
+  project, with or without an entry. Switch it off under the
+  [`lint`](usage.md#lint) key if you want to clean up later.
+- **Adding an [`entry`](usage.md#entry) changes the clobber findings.** The
+  routine rules then follow calls across files, fall-through, branches and
+  save/restore pairs, and see macros and custom pseudo-instructions as the code
+  they emit. Findings the text analysis could not see may appear (each names
+  where the write comes from), and findings it got wrong disappear. `lint main.asm`
+  on a file that assembles on its own already uses program mode, entry or not.
+- **To clean up suppressions**, run `nessemble lint <entry>` and delete what
+  `unused-lint-ignore` reports, or apply the editor's *Remove unused
+  suppression* quick fix to each.
+
 ## Include & asset paths
 
 - In 1.x, every filename-based directive resolved its path against a single
