@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.28.0 - 2026-11-27
+
+### Minor changes
+
+- Add assembler warnings, each with a rule id that can be set to `off`, `warn` or `error`: `duplicate-symbol` (a label, constant or macro redefined with a different value or kind), `duplicate-symbol-same-value` (redefined to the same value, e.g. a label placed by an includer and again by the included file), and `value-out-of-range` (a value narrowed to fit a byte, word, or zero-page or absolute operand it does not fit, such as `.db 300` or `STA <$1234`). Configure them per project under `assemble.rules` in `.nessemblerc`, or per run with `-W <rule>=<level>` and `--warnings-as-errors`. Assembly now reads `.nessemblerc`, so a malformed one fails the build. Warnings change nothing about what assembles; the language server shows them with their rule id, and `nessemble reference diagnostics` lists them.
+- Add `.assert EXPR[, "message"]` and `.error "message"` to fail the build when an invariant breaks, and make the documented `.out "message"` print to stderr while assembling. A `pseudo.txt` mapping named `.assert`, `.error` or `.out` is now shadowed by the built-in.
+- Add `.table`/`.endtable`: tag each entry of an indexed table with `[KEY]` and the assembler checks its index, size and count.
+- Add unary operators: `-x` (negate), `~x` (bitwise complement) and `!x` (logical not), usable in any expression, so `.db -4`, `.dw -40`, `LDA #-1` and `.if !FLAG` now assemble.
+- **Behavior change:** `@name` labels are now local to the nearest label above them, so routines can reuse names like `@loop` and `@done`; reference another routine's with `routine@name`. Code that used an `@` label as a global now gets an error suggesting the qualified name.
+- **Behaviour change:** `NAME = expr` inside an `.enum` now resets the counter, so the next member is `expr + STEP` (as in C). It used to leave the counter where it was.
+- Clobber checks treat a register stored to memory and reloaded before every exit as preserved.
+- `.enum` members can now be bare names, each taking the next value (`OP_DRAW` on its own line, in the first column), and `.enum START, STEP, NAME` names the enum and defines `NAME_COUNT`. **Behaviour change:** a bare name inside an `.enum` was silently the constant `1`; it is now a member.
+- `nessemble lint` analyses the whole program from its entry file: routine clobber checks follow calls across files, fall-through, branches and save/restore pairs, see macros, `.for` and custom pseudo-instructions as the code they emit, and report indirect jumps as the new `unverifiable-clobbers` warning. **Behaviour change** when an entry is configured, or when a linted file assembles on its own.
+- `.nessemblerc` accepts `entry` and `assemble.pseudo`, read by `nessemble lint` and the language server.
+- New lint rule `unused-lint-ignore` reports suppressions that no longer suppress anything. **Behaviour change** for every project: it is on (`warn`) by default.
+- **Potentially breaking:** the assembler now rejects three kinds of source it used to accept silently, so a project that assembled before may now fail. A label with anything after it on the same line (`foo: .db 1`, `: NOP`) is an error — v2.27.0 dropped the rest of the line and made `foo` a constant `= 1`. Tokens left over after a complete statement (`.db 1 2 3`, `LDA $10 garbage`, `QQ = 1 2`) are an error, with a hint about the missing comma or indentation. A `.macro` call passing a different number of arguments than the body's highest `\N` is an error at the call, naming the definition (a macro that reads `\#` is exempt). Each of these used to produce a ROM that differed from the source without any message.
+- `.table ENUM[, FIRST]` keys a table by a named `.enum`: one entry per member, in order, stepping by the enum's step, with a missing member reported by name.
+- The editor understands `@local` labels: scope-aware go-to-definition, references, rename, outline and `@` completion.
+- The formatter aligns the statements after a `.table`'s `[KEY]` tags into one column; the language server folds tables and hovers a tag with its entry's index and size.
+- The language server reports the same whole-program clobber findings as `nessemble lint` for projects with a `.nessemblerc` `entry`, never running a custom pseudo-op script to do so, and offers a quick fix to remove an unused suppression.
+
+### Patch changes
+
+- Diagnostics on a macro-expanded line now name the file the macro body is in, with a note for each `.macro` call that expanded it. Previously they paired the body's line number with the calling file's name.
+- The formatter no longer drops the trailing comma of a `.db`/`.dw`/`.color` list continued onto the next line, which left the continuation as a line that no longer assembled.
+
 ## 2.27.0 - 2026-11-25
 
 ### Minor changes
