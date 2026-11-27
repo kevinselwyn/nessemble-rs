@@ -147,7 +147,8 @@ timing](extending.md#runaway-script-guard-and-timing).
 
 ### -c, --check
 
-Checks the input for syntax errors only; produces no output.
+Checks the input for errors only; produces no output. Assertions
+([`.assert`](syntax.md#assert), [`.error`](syntax.md#error)) are checked too.
 
 ### -W &lt;rule&gt;=&lt;off|warn|error&gt;
 
@@ -180,6 +181,10 @@ Errors and warnings go to stderr, one per line, naming the file and line:
 Error in `game.asm` on line 12: a label must be on a line of its own; move `.db 1` to the next line
 Warning in `game.asm` on line 40: value 300 ($012C) does not fit in a byte; emitting $2C  [value-out-of-range]
 ```
+
+Lines printed by [`.out`](syntax.md#out) come first, on stderr as well, so a ROM
+written to stdout is never mixed with them. A failed
+[`.assert`](syntax.md#assert) or [`.error`](syntax.md#error) is an ordinary error.
 
 A run with only warnings succeeds (exit 0); any error fails it (exit 1). A
 diagnostic may be followed by indented `note:` lines with supporting locations.

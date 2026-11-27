@@ -1281,6 +1281,7 @@ mod tests {
         result.map(|output| match output {
             CustomOutput::Bytes(b) => b,
             CustomOutput::Source(s) => panic!("expected bytes, got emit_source({s:?})"),
+            CustomOutput::Unmodeled => panic!("a script never returns `Unmodeled`"),
         })
     }
 

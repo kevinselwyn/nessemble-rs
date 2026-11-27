@@ -101,6 +101,16 @@ pub struct Assembly {
     pub enums: Vec<EnumInfo>,
 }
 
+/// An assembly's result together with the `.out` lines it printed
+/// (`plans/022-assertions.md` §2.6). The lines are collected even when the
+/// build fails partway through its final pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub result: Result<Assembly, AssembleError>,
+    /// Each `.out` line, in execution order; the message is the text printed.
+    pub out: Vec<Diag>,
+}
+
 /// Render the list-file (`-l`) contents from the defined symbols, mirroring the
 /// reference `output_list` format: a `[constants]` section (`VALUE = NAME`) and
 /// a `[labels]` section (`BANK/VALUE = NAME`), each sorted lexicographically by
@@ -162,6 +172,13 @@ pub fn assemble_with(
     options: &Options,
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
+    assemble_with_out(source, options, custom).result
+}
+
+/// Like [`assemble_with`], also returning the `.out` lines the build printed
+/// (`plans/022-assertions.md` §2.6).
+#[must_use]
+pub fn assemble_with_out(source: &str, options: &Options, custom: CustomResolver) -> Outcome {
     let cwd = std::env::current_dir().ok();
     let base = cwd.clone().unwrap_or_else(|| PathBuf::from("."));
     let root = resolve_root(options, cwd.as_deref());
@@ -182,13 +199,26 @@ pub fn assemble_file_with(
     options: &Options,
     custom: CustomResolver,
 ) -> Result<Assembly, AssembleError> {
-    let source = std::fs::read_to_string(path).map_err(|e| {
-        AssembleError(Diag::new(
-            display_name(path),
-            0,
-            format!("Could not open `{}`: {e}", path.display()),
-        ))
-    })?;
+    assemble_file_with_out(path, options, custom).result
+}
+
+/// Like [`assemble_file_with`], also returning the `.out` lines the build
+/// printed (`plans/022-assertions.md` §2.6).
+#[must_use]
+pub fn assemble_file_with_out(path: &Path, options: &Options, custom: CustomResolver) -> Outcome {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(e) => {
+            return Outcome {
+                result: Err(AssembleError(Diag::new(
+                    display_name(path),
+                    0,
+                    format!("Could not open `{}`: {e}", path.display()),
+                ))),
+                out: Vec::new(),
+            }
+        }
+    };
     let base = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -274,6 +304,7 @@ pub fn assemble_source_as(
         root,
         default_custom_resolver(),
     )
+    .result
 }
 
 /// A best-effort diagnostic scan of an in-memory buffer, for tooling (the
@@ -619,7 +650,7 @@ fn is_directive_name(name: &str) -> bool {
 pub fn lenient_custom_resolver(known: std::collections::HashSet<String>) -> CustomResolver {
     Box::new(move |name, _ints, _texts, _base, _root| {
         if known.contains(name) {
-            Ok(CustomOutput::Bytes(Vec::new()))
+            Ok(CustomOutput::Unmodeled)
         } else {
             Err(nessemble_i18n::t!(
                 "unknown-custom",
@@ -636,24 +667,36 @@ fn assemble_impl(
     top_name: &str,
     root: Option<PathBuf>,
     custom: CustomResolver,
-) -> Result<Assembly, AssembleError> {
-    let mut pre =
-        preprocess::preprocess(source, base_dir, top_name, root).map_err(AssembleError)?;
+) -> Outcome {
+    let failed = |d| Outcome {
+        result: Err(AssembleError(d)),
+        out: Vec::new(),
+    };
+    let mut pre = match preprocess::preprocess(source, base_dir, top_name, root) {
+        Ok(pre) => pre,
+        Err(d) => return failed(d),
+    };
     let sources = source_refs(&pre.sources);
-    let lines = parse::parse(std::mem::take(&mut pre.tokens), &sources)
-        .map_err(|e| AssembleError(parse_diag(&pre.files, &pre.expansions, e)))?;
+    let lines = match parse::parse(std::mem::take(&mut pre.tokens), &sources) {
+        Ok(lines) => lines,
+        Err(e) => return failed(parse_diag(&pre.files, &pre.expansions, e)),
+    };
     let mut asm = new_assembler(options, pre.into_tables(), custom);
     asm.set_record_source_map(options.source_map);
-    let rom = asm.run(&lines).map_err(AssembleError)?;
-    let symbols = asm.list_symbols();
-    let source_map = asm.source_map();
-    Ok(Assembly {
-        rom,
-        warnings: asm.take_warnings(),
-        symbols,
-        source_map,
-        enums: asm.enums().to_vec(),
-    })
+    let rom = asm.run(&lines);
+    let out = asm.take_out();
+    let result = rom.map_err(AssembleError).map(|rom| {
+        let symbols = asm.list_symbols();
+        let source_map = asm.source_map();
+        Assembly {
+            rom,
+            warnings: asm.take_warnings(),
+            symbols,
+            source_map,
+            enums: asm.enums().to_vec(),
+        }
+    });
+    Outcome { result, out }
 }
 
 #[cfg(test)]

@@ -2093,3 +2093,64 @@ fn local_labels_list_qualified_and_privates_only_with_mlist() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ─── Assertions (plans/022-assertions.md) ────────────────────────────────────
+
+#[test]
+fn out_goes_to_stderr_and_stdout_holds_only_the_rom() {
+    let src = "    .out \"building bank 0\"\n    .db 1, 2\n    .out \"done\"\n";
+    let dir = diag_project("assert-out", &[("t.asm", src), ("u.asm", "    .db 1, 2\n")]);
+    let run = |file: &str| {
+        bin()
+            .current_dir(&dir)
+            .arg(file)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let with = run("t.asm");
+    let without = run("u.asm");
+    assert_eq!(with.status.code(), Some(0));
+    assert_eq!(with.stdout, without.stdout);
+    assert_eq!(with.stdout, vec![1, 2]);
+    assert_eq!(
+        String::from_utf8_lossy(&with.stderr),
+        "building bank 0\ndone\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failing_assertion_exits_1_with_one_error() {
+    let src =
+        "LIMIT = 4\nCOUNT = 5\n    .out \"checking\"\n    .assert COUNT <= LIMIT, \"too many\"\n";
+    let dir = diag_project("assert-fail", &[("t.asm", src)]);
+    let expected = "checking\nError in `t.asm` on line 4: assertion failed: too many — \
+                    `COUNT <= LIMIT` is 0 (5 <= 4; COUNT = 5, LIMIT = 4)\n";
+    let (code, stderr, bytes) = assemble_in(&dir, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(stderr, expected);
+    assert_eq!(bytes, Vec::<u8>::new());
+    // `--check` runs the assertions too.
+    let out = bin()
+        .current_dir(&dir)
+        .args(["t.asm", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), expected);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reference_describes_assert() {
+    let out = bin()
+        .args(["reference", "directives", ".assert"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        ".assert\n  fail the build unless an expression holds\n"
+    );
+}

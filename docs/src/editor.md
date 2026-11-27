@@ -334,7 +334,12 @@ works the same way.
   workspace (or next to the open file) whose `.name = script` entries point at
   existing scripts — the same mapping you pass to the CLI's `--pseudo`. Their
   scripts are **not** executed during analysis, so the bytes they emit aren't
-  modeled; addresses after a custom pseudo-op may be approximate.
+  modeled; addresses after a custom pseudo-op may be approximate. A failed
+  [`.assert`](syntax.md#assert) or [`.table`](syntax.md#table) check that reads
+  such an address (a label after the custom pseudo-op in the same bank, before
+  the next `.org`, or a constant computed from one) is therefore not shown in
+  the editor; the CLI build still checks it. Checks on constants alone are
+  always shown.
 - A `.rhai` script's completion, hover, and signature help are compiled in
   unconditionally — even a build with no scripting host at all serves them.
   Its diagnostics, lints, outline, folding, and script-local

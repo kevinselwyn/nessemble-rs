@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use nessemble_core::{
-    assemble_file_with, assemble_with, prewarm_candidates, prewarm_candidates_file,
+    assemble_file_with_out, assemble_with_out, prewarm_candidates, prewarm_candidates_file,
     render_list_file, AsmRules, AssembleError, Diag, Options,
 };
 use nessemble_i18n::t;
@@ -290,10 +290,10 @@ fn assemble_mode(cli: &Cli) -> u8 {
         cli.time_scripts.then(|| Arc::new(Mutex::new(Vec::new())));
 
     let input: Option<PathBuf> = cli.infile.as_deref().map(PathBuf::from);
-    let result = match &input {
+    let outcome = match &input {
         Some(path) => {
             let candidates = prewarm_candidates_file(path, &options);
-            assemble_file_with(
+            assemble_file_with_out(
                 path,
                 &options,
                 custom::build_resolver_prewarmed(
@@ -308,7 +308,7 @@ fn assemble_mode(cli: &Cli) -> u8 {
         None => match read_stdin() {
             Ok(source) => {
                 let candidates = prewarm_candidates(&source, &options);
-                assemble_with(
+                assemble_with_out(
                     &source,
                     &options,
                     custom::build_resolver_prewarmed(
@@ -327,7 +327,9 @@ fn assemble_mode(cli: &Cli) -> u8 {
         },
     };
 
-    match result {
+    // `.out` lines go to stderr (stdout may be the ROM), before anything else.
+    print_out_lines(&outcome.out);
+    match outcome.result {
         Ok(assembly) => {
             for w in &assembly.warnings {
                 print_diag("warning-line", w);
@@ -357,6 +359,14 @@ fn assemble_mode(cli: &Cli) -> u8 {
             print_diag("error-line", &d);
             RETURN_EPERM
         }
+    }
+}
+
+/// Print each `.out` line to stderr, as written (`plans/022-assertions.md`
+/// §2.6).
+pub(crate) fn print_out_lines(lines: &[Diag]) {
+    for line in lines {
+        eprintln!("{}", line.message);
     }
 }
 

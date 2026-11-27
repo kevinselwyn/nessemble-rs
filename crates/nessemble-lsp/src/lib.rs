@@ -6724,6 +6724,25 @@ mod tests {
     }
 
     #[test]
+    fn an_assertion_failure_is_an_error_diagnostic() {
+        let uri = Url::parse("file:///assert.asm").unwrap();
+        let src = "COUNT = 5\n    .assert COUNT < 4, \"too many\"\n    .out \"never shown\"\n";
+        let diags = analyze(&uri, src, &HashSet::new()).diagnostics;
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(diags[0].range.start.line, 1);
+        assert!(diags[0].message.starts_with("assertion failed: too many"));
+        // A label after a known custom op whose bytes the editor does not
+        // model is not checked.
+        let known: HashSet<String> = ["blob".to_string()].into_iter().collect();
+        let after = ".org $C000\n    .blob\nend:\n    .assert end == $C010\n";
+        assert_eq!(
+            analyze(&uri, after, &known).diagnostics,
+            [] as [Diagnostic; 0]
+        );
+    }
+
+    #[test]
     fn unary_operators_assemble_without_diagnostics() {
         let uri = Url::parse("file:///unary.asm").unwrap();
         let src = ".db -1, ~$0F, !0\n    LDA #-1\n";

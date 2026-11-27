@@ -829,6 +829,9 @@ impl Parser<'_> {
                 }
             }
             "endtable" => Pseudo::EndTable,
+            "assert" => self.parse_assert()?,
+            "error" => Pseudo::Error(self.parse_message("error")?),
+            "out" => Pseudo::Out(self.parse_message("out")?),
             "incbin" => {
                 let (file, a, b) = self.parse_inc_args("incbin")?;
                 Pseudo::Incbin(file, a, b)
@@ -885,6 +888,43 @@ impl Parser<'_> {
             other => Pseudo::Custom(other.to_string(), self.parse_custom_args()?),
         };
         Ok(p)
+    }
+
+    /// Parse `.assert EXPR[, "message"]` (`plans/022-assertions.md` §2.1),
+    /// keeping the expression's source text for the failure message.
+    fn parse_assert(&mut self) -> Result<Pseudo, ParseError> {
+        if matches!(self.peek(), Some(Tok::Endl | Tok::QuotString(_)) | None) {
+            return self.err(t!("assert-needs-expression"));
+        }
+        let start = self.pos;
+        let expr = self.parse_expr()?;
+        let text = self.render(start, self.pos);
+        let message = if matches!(self.peek(), Some(Tok::Comma)) {
+            self.pos += 1;
+            match self.peek() {
+                Some(Tok::QuotString(s)) => {
+                    let s = strip_quotes(s);
+                    self.pos += 1;
+                    Some(s)
+                }
+                _ => return self.err(t!("assert-message-not-string")),
+            }
+        } else {
+            None
+        };
+        Ok(Pseudo::Assert(expr, text, message))
+    }
+
+    /// Parse the one quoted message `.error` and `.out` take.
+    fn parse_message(&mut self, directive: &str) -> Result<String, ParseError> {
+        match self.peek() {
+            Some(Tok::QuotString(s)) => {
+                let s = strip_quotes(s);
+                self.pos += 1;
+                Ok(s)
+            }
+            _ => self.err(t!("directive-needs-message", directive = directive)),
+        }
     }
 
     /// Parse a custom pseudo-op's comma-separated arguments (numbers or quoted
@@ -1177,7 +1217,7 @@ fn is_mnemonic(name: &str) -> bool {
 }
 
 /// A normalized spelling of `tok`, for quoting a token with no source text.
-fn tok_text(tok: &Tok) -> String {
+pub(crate) fn tok_text(tok: &Tok) -> String {
     let s = match tok {
         Tok::Endl | Tok::Indent => "",
         Tok::Plus => "+",
@@ -1651,5 +1691,55 @@ mod tests {
             Stmt::Pseudo(Pseudo::Table(Some(Expr::Num(24)), Some(Expr::Num(1))))
         );
         assert_eq!(stmts(".endtable\n")[0], Stmt::Pseudo(Pseudo::EndTable));
+    }
+
+    #[test]
+    fn assertions_keep_their_expression_text_and_message() {
+        assert_eq!(
+            stmts(".assert -LEN == (2 * KIND), \"one pointer\"\n")[0],
+            Stmt::Pseudo(Pseudo::Assert(
+                bin(
+                    un(UnOp::Neg, sym("LEN")),
+                    BinOp::Eq,
+                    bin(Expr::Num(2), BinOp::Mul, sym("KIND"))
+                ),
+                "-LEN == (2 * KIND)".to_string(),
+                Some("one pointer".to_string()),
+            ))
+        );
+        assert_eq!(
+            stmts(".assert BANK(lvl) == 3\n")[0],
+            Stmt::Pseudo(Pseudo::Assert(
+                bin(Expr::Bank("lvl".to_string()), BinOp::Eq, Expr::Num(3)),
+                "BANK(lvl) == 3".to_string(),
+                None,
+            ))
+        );
+        assert_eq!(
+            stmts(".error \"unsupported\"\n")[0],
+            Stmt::Pseudo(Pseudo::Error("unsupported".to_string()))
+        );
+        assert_eq!(
+            stmts(".out \"bank \\i\"\n")[0],
+            Stmt::Pseudo(Pseudo::Out("bank \\i".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_assertion_in_a_macro_body_quotes_the_body() {
+        let pre = crate::preprocess::preprocess(
+            ".macrodef chk\n    .assert \\1 < 4, \"\\1\"\n.endm\n    .macro chk, 1+2\n",
+            std::path::PathBuf::from("."),
+            "t.asm",
+            None,
+        )
+        .expect("preprocesses");
+        let sources: Vec<&str> = pre.sources.iter().map(String::as_str).collect();
+        let lines = parse(pre.tokens, &sources).expect("parses");
+        let Stmt::Pseudo(Pseudo::Assert(_, text, message)) = &lines[0].stmt else {
+            panic!("{:?}", lines[0].stmt);
+        };
+        assert_eq!(text, "\\1 < 4");
+        assert_eq!(message.as_deref(), Some("1+2"));
     }
 }

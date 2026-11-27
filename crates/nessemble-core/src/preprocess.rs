@@ -420,7 +420,10 @@ impl Pre<'_> {
         if matches!(body.last().map(|t| &t.tok), Some(Tok::Indent)) {
             body.pop();
         }
-        let arity = body
+        // A `\N` or `\#` inside an `.assert`/`.error`/`.out` message counts
+        // too, since it is substituted (`plans/022-assertions.md` §2.4).
+        let messages = message_strings(&body);
+        let mut arity = body
             .iter()
             .filter_map(|t| match t.tok {
                 Tok::NumberArg(n) if n >= 1 => Some(n as usize),
@@ -428,7 +431,18 @@ impl Pre<'_> {
             })
             .max()
             .unwrap_or(0);
-        let variadic = body.iter().any(|t| matches!(t.tok, Tok::NumberArgc));
+        let mut variadic = body.iter().any(|t| matches!(t.tok, Tok::NumberArgc));
+        for (t, _) in body.iter().zip(&messages).filter(|(_, m)| **m) {
+            if let Tok::QuotString(text) = &t.tok {
+                for r in message_refs(text) {
+                    match r {
+                        MessageRef::Arg(n) if n >= 1 => arity = arity.max(n),
+                        MessageRef::Argc => variadic = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
         let def_file = self.shown_file(&toks[i], file_id);
         if let Some(prev) = self.macros.get(&name) {
             let mut d = self.diag_at(
@@ -534,7 +548,17 @@ impl Pre<'_> {
             unique_names: Vec::new(),
         });
         let expansion = self.expansions.len() as u32;
-        let (expanded, unique_names) = substitute(&def.body, &args, unique, file_id, expansion);
+        let arg_texts: Vec<String> = args.iter().map(|a| arg_text(a, &self.sources)).collect();
+        let (expanded, unique_names) = substitute(
+            &def.body,
+            &Args {
+                tokens: &args,
+                texts: &arg_texts,
+            },
+            unique,
+            file_id,
+            expansion,
+        );
         if let Some(e) = self.expansions.last_mut() {
             e.unique_names = unique_names;
         }
@@ -621,11 +645,13 @@ fn split_args(toks: &[Token]) -> Vec<Vec<Token>> {
 /// with `\@`, which open no local-label scope.
 fn substitute(
     body: &[Token],
-    args: &[Vec<Token>],
+    call: &Args<'_>,
     unique: u32,
     file_id: usize,
     expansion: u32,
 ) -> (Vec<Token>, Vec<String>) {
+    let args = call.tokens;
+    let messages = message_strings(body);
     let defs = crate::locals::local_defs(body);
     let mut owned;
     let body = if defs.is_empty() {
@@ -675,11 +701,165 @@ fn substitute(
                 k += 1; // consume the `\@`
             }
             Tok::NumberArgu => out.push(mk(Tok::Number(unique as i64), t, t.span)),
+            Tok::QuotString(text) if messages[k] => {
+                let text = substitute_message(text, call.texts, unique);
+                out.push(mk(Tok::QuotString(text), t, t.span));
+            }
             other => out.push(mk(other.clone(), t, t.span)),
         }
         k += 1;
     }
     (out, unique_names)
+}
+
+/// A macro call's arguments: their tokens, and each one's source text as
+/// written at the call (for `\N` inside a message string).
+struct Args<'a> {
+    tokens: &'a [Vec<Token>],
+    texts: &'a [String],
+}
+
+/// For each token of `body`, whether it is the quoted message of an
+/// `.assert`, `.error` or `.out` line: the only strings a macro expansion
+/// rewrites (`plans/022-assertions.md` §2.4).
+fn message_strings(body: &[Token]) -> Vec<bool> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut at_start = true;
+    let mut directive = false;
+    for t in body {
+        match &t.tok {
+            Tok::Endl => {
+                at_start = true;
+                directive = false;
+            }
+            Tok::Indent if at_start => {}
+            Tok::Pseudo(p) if at_start => {
+                directive = matches!(p.as_str(), "assert" | "error" | "out");
+                at_start = false;
+            }
+            _ => at_start = false,
+        }
+        out.push(directive && matches!(t.tok, Tok::QuotString(_)));
+    }
+    out
+}
+
+/// A `\` sequence inside a message string.
+enum MessageRef {
+    /// `\N`: argument `N`.
+    Arg(usize),
+    /// `\#`: the argument count.
+    Argc,
+    /// `\@`: the expansion's unique number.
+    Unique,
+}
+
+/// Each substitutable sequence in `text`, with its byte range.
+fn message_scan(text: &str) -> Vec<(std::ops::Range<usize>, MessageRef)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        let digits = bytes[i + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        if digits > 0 {
+            let n = text[i + 1..=i + digits].parse().unwrap_or(usize::MAX);
+            out.push((i..i + 1 + digits, MessageRef::Arg(n)));
+            i += 1 + digits;
+        } else if bytes.get(i + 1) == Some(&b'#') {
+            out.push((i..i + 2, MessageRef::Argc));
+            i += 2;
+        } else if bytes.get(i + 1) == Some(&b'@') {
+            out.push((i..i + 2, MessageRef::Unique));
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The substitutable sequences in `text`.
+fn message_refs(text: &str) -> impl Iterator<Item = MessageRef> {
+    message_scan(text).into_iter().map(|(_, r)| r)
+}
+
+/// Rewrite `\N`, `\#` and `\@` in a message string: an argument as written
+/// at the call, the argument count, the unique number. Nothing else changes.
+fn substitute_message(text: &str, args: &[String], unique: u32) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (range, r) in message_scan(text) {
+        out.push_str(&text[last..range.start]);
+        match r {
+            MessageRef::Arg(n) => {
+                if let Some(a) = n.checked_sub(1).and_then(|i| args.get(i)) {
+                    out.push_str(a);
+                }
+            }
+            MessageRef::Argc => out.push_str(&args.len().to_string()),
+            MessageRef::Unique => out.push_str(&unique.to_string()),
+        }
+        last = range.end;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// A macro argument's source text as written at the call, from its tokens'
+/// spans. Tokens that share a span were substituted for one `\N` (an
+/// enclosing macro's argument), so those are rendered from the tokens
+/// themselves, without the parentheses the substitution added.
+fn arg_text(arg: &[Token], sources: &[String]) -> String {
+    let mut out = String::new();
+    let mut prev: Option<Span> = None;
+    let mut k = 0;
+    while k < arg.len() {
+        let span = arg[k].span;
+        let mut end = k + 1;
+        while end < arg.len() && arg[end].span == span {
+            end += 1;
+        }
+        let group = &arg[k..end];
+        let written = sources
+            .get(span.src as usize)
+            .and_then(|s| s.get(span.start as usize..span.end as usize))
+            .filter(|s| !s.is_empty() && !s.starts_with('\\'));
+        let text = match written {
+            Some(w) if group.len() == 1 => w.to_string(),
+            _ => {
+                let inner = match group {
+                    [first, mid @ .., last]
+                        if matches!(first.tok, Tok::OpenParen)
+                            && matches!(last.tok, Tok::CloseParen) =>
+                    {
+                        mid
+                    }
+                    _ => group,
+                };
+                inner
+                    .iter()
+                    .map(|t| crate::parse::tok_text(&t.tok))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+        };
+        if let Some(p) = prev {
+            if !(p.src == span.src && p.end == span.start) {
+                out.push(' ');
+            }
+        }
+        out.push_str(&text);
+        prev = Some(span);
+        k = end;
+    }
+    out
 }
 
 #[cfg(test)]

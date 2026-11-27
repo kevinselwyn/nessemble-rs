@@ -31,7 +31,7 @@ use nessemble_core::coverage::{
     FileKind, FlatMaskCdl,
 };
 use nessemble_core::tooling;
-use nessemble_core::{assemble_file_with, AssembleError, Assembly, Options};
+use nessemble_core::{assemble_file_with_out, AssembleError, Assembly, Options};
 
 use crate::custom;
 use crate::{RETURN_EPERM, RETURN_OK};
@@ -180,7 +180,9 @@ pub fn run(args: &CoverageArgs) -> u8 {
         custom::build_resolver(args.pseudo.as_deref(), false, args.max_operations)
     };
 
-    let assembly = match assemble_file_with(Path::new(&args.infile), &options, resolver) {
+    let outcome = assemble_file_with_out(Path::new(&args.infile), &options, resolver);
+    crate::print_out_lines(&outcome.out);
+    let assembly = match outcome.result {
         Ok(a) => a,
         Err(AssembleError(d)) => {
             eprintln!(

@@ -469,6 +469,7 @@ Read more about 6502 addressing modes
 | Pseudo-Instruction     | Description                                                                         |
 |------------------------|-------------------------------------------------------------------------------------|
 | [.ascii](#ascii)       | Convert ASCII string to bytes                                                       |
+| [.assert](#assert)     | Fail the build unless an expression holds                                           |
 | [.byte](#db)           | Alias for [`.db`](#db)                                                              |
 | [.checksum](#checksum) | Calculate crc32 checksum                                                            |
 | [.chr](#chr)           | Set CHR bank index                                                                  |
@@ -484,6 +485,7 @@ Read more about 6502 addressing modes
 | [.endm](#endm)         | End [`.macrodef`](#macrodef)                                                        |
 | [.endtable](#endtable) | End a [`.table`](#table)                                                            |
 | [.enum](#enum)         | Start a block of sequential constants                                               |
+| [.error](#error)       | Fail the build with a message                                                       |
 | [.fill](#fill)         | Fill with bytes                                                                     |
 | [.font](#font)         | Generate font character tile                                                        |
 | [.for](#loops)         | Repeat a block, unrolled                                                            |
@@ -523,7 +525,7 @@ Read more about 6502 addressing modes
 | [.macro](#macro)       | Call macro                                                                          |
 | [.macrodef](#macrodef) | Start macro definition                                                              |
 | [.org](#org)           | Organize code                                                                       |
-| [.out](#out)           | Output debugging message                                                            |
+| [.out](#out)           | Print a message while assembling                                                    |
 | [.phase](#phase)       | Assemble code for a different run-time address                                      |
 | [.prg](#prg)           | Set PRG bank index                                                                  |
 | [.random](#random)     | Output random byte(s)                                                               |
@@ -585,6 +587,78 @@ Output:
 00000023
 ```
 
+
+### .assert
+
+Fail the build unless an expression holds.
+
+Usage:
+
+```nessemble
+.assert EXPRESSION[, "MESSAGE"]
+```
+
+* `EXPRESSION` - Expression, required. The build fails when it evaluates to 0.
+* `"MESSAGE"` - String, optional. Shown when the assertion fails. Must be on the
+  same line.
+
+An assertion emits nothing, moves nothing and defines nothing: a program
+assembles to the same bytes with or without it. It is checked once, after the
+last pass, against the final symbol table, so it can name a label defined later
+in the file, and a [`.phase`](#phase)d label reads its run-time address.
+
+Example:
+
+```nessemble
+KIND_LAST = $07
+ptr_table:
+    .dw kind_0, kind_1, kind_2, kind_3, kind_4, kind_5, kind_6
+kind_table:
+    .assert (kind_table - ptr_table) == (2 * (KIND_LAST + 1)), "one pointer per KIND_*"
+```
+
+Output:
+
+```text
+Error in `tables.asm` on line 5: assertion failed: one pointer per KIND_* — `(kind_table - ptr_table) == (2 * (KIND_LAST + 1))` is 0 ($0E == $10; kind_table = $0E, ptr_table = 0, KIND_LAST = 7)
+```
+
+The failure quotes the expression as written. In parentheses it shows both sides
+of a top-level comparison, then the value of each name the expression reads (up
+to eight). Values from 0 to 9 and negative values print in decimal, others in
+hexadecimal.
+
+Binary operators all share one precedence and group right to left, so
+`A + B == 0` means `A + (B == 0)`. Write the parentheses: the values in the
+failure show what each side came to.
+
+A constant assigned more than once is read at its final value, the value the
+last pass emits for it.
+
+A name the assertion uses that is never defined is its own error
+(``Symbol `x` in `.assert` was not defined``), with no failure message.
+
+Rules:
+
+* **In a `.macrodef` body**, `\1`, `\#` and `\@` in the message are replaced by
+  the argument as written at the call, the argument count and the unique
+  number. A failure is reported at the body line, with a note naming each call.
+  No other string in a macro body is rewritten.
+* **In a [`.for`](#loops) body**, `\i`, `\j` and `\k` in the message are replaced
+  by the counters. Each iteration is checked, but a failing line is reported
+  once, naming the first iteration that failed.
+* **In a false [`.if`](#if) branch** the assertion is skipped, however deeply it
+  is nested. It is checked only when every enclosing `.if` is true.
+* **The CLI stops at the first error.** The language server reports every
+  failing assertion at once.
+
+Try it:
+
+<nessemble-assembler>
+SIZE = 4
+.assert SIZE == 4, "SIZE changed"
+.db SIZE
+</nessemble-assembler>
 
 ### .checksum
 
@@ -1028,6 +1102,37 @@ Notes:
   both. When either one is named, nesting is an error.
 * A named `.enum` without a matching `.endenum` is an error; defining the same
   name twice is an error, as is defining one member twice in a named enum.
+
+### .error
+
+Fail the build with a message whenever the line is assembled.
+
+Usage:
+
+```nessemble
+.error "MESSAGE"
+```
+
+* `"MESSAGE"` - String, required. The error to report.
+
+Example:
+
+```nessemble
+.if LEVEL_TYPE > 4
+    .error "unsupported LEVEL_TYPE"
+.endif
+```
+
+Output:
+
+```text
+Error in `level.asm` on line 2: unsupported LEVEL_TYPE
+```
+
+`.error` follows the same rules as [`.assert`](#assert): it is checked after the
+last pass, so the branch it is in is the one that produced the bytes; it is
+skipped in any false `.if` branch; and `\1`/`\i` in its message are replaced the
+same way.
 
 ### .fill
 
@@ -2064,6 +2169,40 @@ Example:
 
 ```nessemble
 .org $C000
+```
+
+### .out
+
+Print a message while assembling.
+
+Usage:
+
+```nessemble
+.out "MESSAGE"
+```
+
+* `"MESSAGE"` - String, required. The line to print.
+
+The line goes to stderr, never stdout, so a ROM written to stdout is not
+disturbed. It is printed once per build, after assembly and before any warnings
+or errors, in the order the lines ran. A `.out` in a [`.for`](#loops) body
+prints once per iteration; one in a false [`.if`](#if) branch prints nothing.
+`\1`/`\i` in the message are replaced as in [`.assert`](#assert). The language
+server never shows `.out` lines.
+
+Example:
+
+```nessemble
+.for 0, 1
+.out "building bank \i"
+.endfor
+```
+
+Output (stderr):
+
+```text
+building bank 0
+building bank 1
 ```
 
 ### .phase
