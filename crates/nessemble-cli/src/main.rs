@@ -373,7 +373,7 @@ pub(crate) fn print_out_lines(lines: &[Diag]) {
 /// Print a diagnostic to stderr in the reference framing (`Error in …` /
 /// `Warning in …`, per `framing`), with its rule id and one `note:` line per
 /// note.
-fn print_diag(framing: &str, d: &Diag) {
+pub(crate) fn print_diag(framing: &str, d: &Diag) {
     eprintln!(
         "{}",
         t!(

@@ -347,9 +347,11 @@ The rules:
 | `deprecated-comment-directive` | A directive written with a deprecated alias — today, `@fmt` for `@nessemble-format`. |
 | `ineffective-comment-directive` | A well-formed directive that cannot apply where it is written: in a trailing comment, a `-next-line` with no following line, a stride hint with no data run after it, or an unbalanced ignore-region bound. (An unclosed region is *not* flagged — that is the documented whole-file opt-out.) |
 | `invalid-routine-signature` | A [routine annotation](#documenting-routines) that binds to no label (code intervenes, or the file ends), or names the same slot twice. |
-| `undeclared-clobber` | A routine that **writes a register its `@nessemble-clobbers` omits** — the annotation and the code disagree. Only routines that declared a clobber list are checked. |
-| `overdeclared-clobber` | A routine that declares a clobber its body cannot produce. Fires only when the body holds no unknowns (no macro invocation, unannotated call, indirect jump, or data run). |
-| `require-routine-doc` | A called routine with no annotations at all. **Off by default** — switch it on per project once you are using the convention. |
+| `undeclared-clobber` | A routine that **writes a register its `@nessemble-clobbers` omits** — the annotation and the code disagree. Only routines that declared a clobber list are checked. In [program mode](#program-mode-and-file-mode) the message names where each write comes from. |
+| `overdeclared-clobber` | A routine that declares a clobber its body cannot produce. Fires only when every path was followed: in program mode, no [unverifiable path](#what-the-analysis-follows); in file mode, no macro invocation, unannotated call, indirect jump, or data run in the body. |
+| `unverifiable-clobbers` | *(program mode only)* A routine with a clobber list that the analysis cannot follow on some path: an indirect `JMP`, an `RTS` through values the routine pushed, a call that pulls its own return address, a jump to an address several banks share, … The message names the first reason. |
+| `require-routine-doc` | A called routine with no annotations at all. In program mode "called" means the target of any `JSR` in the program, or of a `JMP` from another text block (a tail call). **Off by default** — switch it on per project once you are using the convention. |
+| `unused-lint-ignore` | A [`@nessemble-lint-ignore…`](#suppressing-a-finding) suppression — or one rule named in it — that no longer suppresses anything. |
 
 - Each finding prints as `LINE:COL  severity  message  rule-id`, grouped by file,
   with a problem-count footer; a clean run prints `✓ No problems.`
@@ -361,6 +363,12 @@ The rules:
 - `--quiet` reports errors only (suppresses warnings).
 - `--config <file>` uses `<file>` as the [`.nessemblerc`](#nessemblerc);
   `--no-config` ignores any `.nessemblerc` and uses built-in defaults.
+- `--entry <file>` (repeatable) assembles the program from `<file>` for
+  [program mode](#program-mode-and-file-mode), overriding the `.nessemblerc`
+  [`entry`](#entry).
+- `-p, --pseudo <pseudo.txt>`, `--root <dir>` and `--no-cache` are the build's
+  own flags, used when assembling the entry. `-p` falls back to the
+  `.nessemblerc` [`assemble.pseudo`](#assemble).
 
 Every rule defaults to `warn` except `require-routine-doc`, which defaults to
 `off`. Rules, their severities, the comment window, and the label-name ignore
@@ -368,6 +376,83 @@ list are configured under the [`lint`](#lint) key of `.nessemblerc`. The editor
 [Language Server](editor.md) surfaces the same findings inline as you type,
 including quick fixes for the deprecated directive spelling and for a register
 missing from a clobber list.
+
+#### Program mode and file mode
+
+The routine rules (`undeclared-clobber`, `overdeclared-clobber`,
+`unverifiable-clobbers`, `require-routine-doc`) are most accurate over the
+**assembled program**: a routine's body is then the code reachable from its
+label, across files and banks, rather than the text block under it. `lint` runs
+them that way — **program mode** — whenever it can assemble the project:
+
+1. from each `--entry <file>`;
+2. else from the `.nessemblerc` [`entry`](#entry);
+3. else from each **file** named on the command line that assembles on its own
+   (not files found by walking a directory). One that does not assemble — a
+   fragment meant to be included — is linted in file mode, silently.
+
+Every other file is linted in **file mode**, exactly as before: the routine rules
+read the text block under each label and follow calls within the file, and
+`unverifiable-clobbers` does not run. The text rules are the same in both modes.
+
+What is reported:
+
+- `nessemble lint main.asm`, where `main.asm` is an entry (by any route): every
+  file in its include closure, each under its own header. Files matched by
+  [`.nessembleignore`](#nessembleignore) are analysed — their contracts still
+  count — but not reported.
+- `nessemble lint src/` (or a single file) with an `entry` configured: only the
+  named or walked files, each in program mode if the entry includes it.
+
+If an explicit entry (`--entry` or `.nessemblerc`) **fails to assemble**, `lint`
+prints the build's errors (`Error in …`), says
+`` nessemble: lint: `main.asm` did not assemble, so routine rules were skipped for it ``,
+runs the text rules only, and exits non-zero. It does not fall back to the text
+analysis. Assembler warnings and `.out` lines belong to the build and are not
+printed.
+
+With several entries (an `entry` array), a file in more than one program is
+analysed in each, and the results merged: a register undeclared in any build is
+reported, a clobber is over-declared only if no build writes it, and a
+suppression is unused only if it is unused in every build.
+
+#### What the analysis follows
+
+In program mode each routine with a clobber list is walked from its label
+through the bytes the assembler emitted:
+
+- both arms of a branch — except where the previous instruction fixes the flag
+  (`CLC`+`BCC`, `SEC`+`BCS`, `CLV`+`BVC`, and `LDA`/`LDX`/`LDY #imm` before
+  `BEQ`/`BNE`/`BMI`/`BPL`), so a never-taken arm cannot run into a table;
+- fall-through, including through an `.include` into the next file;
+- `JMP` and `JSR`, across files and banks. A callee **with** a clobber list is
+  trusted (its contract counts, and its own mistakes are reported on it); one
+  **without** is walked, and its writes reach the caller ("reached through `JSR
+  helper`"). Falling or jumping into another contracted routine uses its
+  contract, unless a save is still open;
+- **saves**: `PHA` … `PLA` preserves `A`; `TXA PHA` … `PLA TAX` preserves `X`
+  (and clobbers `A`), likewise `TYA`/`TAY`; and `STX tmp` … `LDX tmp` preserves
+  `X` until something else stores to `tmp`, an `INC`/`DEC`/shift of it, or a
+  callee that clobbers `[tmp]`. A save restored on one path but not another
+  reports the register;
+- macros, `.for`, `.if`, and custom pseudo-instructions, as the bytes they
+  produced — a write inside one is reported at the call site
+  (`` `LDA` in `.macro set_bank` on line 22 ``);
+- hand-encoded instructions in `.db` (`.db $2C` to skip the next instruction, a
+  branch split across two `.db` lines), decoded as the CPU would.
+
+Code after an `RTS` that nothing jumps to is never visited. What it cannot follow
+makes the routine `unverifiable-clobbers` (and silences `overdeclared-clobber`
+for it): an indirect `JMP [ptr]`; an `RTS` through values the routine pushed
+(`PHA PHA RTS` dispatch); an `RTS` after `TXS`; a callee that pulls its own
+return address; inline arguments after a `JSR` (the return site is data); a jump
+to an address no bank or several banks assemble; data that is not an
+instruction; or running past the last byte assembled. A definite write is still
+reported by `undeclared-clobber`.
+
+Known limits: indexed and indirect stores (`STA tmp,X`) are not treated as
+overwriting a memory save; only `A`, `X`, `Y` and `S` are verified; and
+annotated labels inside a macro body are not analysed.
 
 #### Suppressing a finding
 
@@ -384,43 +469,21 @@ those. An unknown rule name is reported as
 [`unknown-comment-directive`](#lint-opt--path-), so a typo cannot silently
 silence nothing.
 
-**These exist because the clobber analysis has two known blind spots**, both of
-which force an author to choose between a false annotation and a false finding.
-Suppressing at the site is the third, better option:
-
-**Fall-through entry points.** A routine's body is read as its own block plus
-the `JSR`/`JMP` targets it names; a routine that falls through into the next one
-is not followed. So `assign_chr_bank` below really does clobber `A, X, Y` — via
-the routine it falls into — but its own block writes no register, and
-`overdeclared-clobber` fires:
+In program mode the analysis follows fall-through, save/restore pairs and
+cross-file calls, so most suppressions written for the text analysis are no
+longer needed — [`unused-lint-ignore`](#lint-opt--path-) reports them. What is
+left is a rule that is wrong about one routine on purpose, such as a dispatch
+routine whose indirect jump makes it unverifiable:
 
 ```asm
-; @nessemble-lint-ignore-next-line overdeclared-clobber
-; @nessemble-clobbers A, X, Y, [chr_bank_arg]
-assign_chr_bank:
-    STA <chr_bank_arg
-                            ; falls through ↓
+; @nessemble-lint-ignore-next-line unverifiable-clobbers
 ; @nessemble-clobbers A, X, Y
-find_or_evict_chr_slot:
-    ...
+dispatch_handler:
+    JMP [handler_vector]
 ```
 
-**Save/restore pairs.** A `PHA` … `PLA` around a routine's body preserves `A`,
-but the restore is not modeled, so `undeclared-clobber` asks you to declare `A`
-clobbered — inverting what the tag means:
-
-```asm
-; @nessemble-lint-ignore-next-line undeclared-clobber
-; @nessemble-clobbers X, Y, [draw_tmp]
-ppu_set_xy_addr:
-    PHA
-    ...
-    PLA
-    RTS
-```
-
-In both cases the annotation stays **truthful** — it is what a caller needs to
-know — and exactly one bogus finding is suppressed.
+The annotation stays **truthful** — it is what a caller needs to know — and
+exactly one finding is suppressed.
 
 The rules are the coverage directives' rules, because it is the same mechanism:
 
@@ -442,6 +505,25 @@ The rules are the coverage directives' rules, because it is the same mechanism:
   `.nessemblerc`, so it is not a reason to withhold the escape hatch.
 - Suppression applies to lint findings only. It never silences a parse or
   assembly error.
+
+**Unused suppressions.** `unused-lint-ignore` (on by default) reports a
+suppression that silences nothing, at the directive:
+
+```text
+      1:1   warning  `@nessemble-lint-ignore-next-line` suppresses `overdeclared-clobber`, which reports nothing on line 3  unused-lint-ignore
+```
+
+- It is judged **per named rule**, so of a two-rule list only the unneeded one
+  is reported. A region is judged over its lines.
+- A rule is judged only where it ran with full information: a rule configured
+  `off` is not judged (so switching one off for a while does not ask you to
+  delete the suppressions you will want back); the routine rules are judged only
+  in program mode, at a label the program assembled; and a bare suppression
+  only where every rule ran, which in practice means program mode.
+- Its own findings can be suppressed (a region naming `unused-lint-ignore`
+  counts as used when it does), but never by the suppression they are about.
+- The editor offers a quick fix that removes the directive, or just the unneeded
+  rule.
 
 ### coverage &lt;infile.asm&gt; --cdl &lt;file.cdl&gt; ...
 
@@ -675,19 +757,18 @@ src/prg/sprite.asm
   Memory slots are documentation too.
 - Only routines that **declared** a clobber list are checked, so a project adopts
   this one routine at a time.
-- A routine's body runs from its label to the next block-opening label. An
-  `@local` label never opens a block, so its lines belong to the routine above
-  it, and a `JMP` to one of the routine's own locals stays inside the body. A call to
-  another **annotated** routine contributes that routine's declared clobbers; a
-  call to an unannotated one, a macro invocation, an indirect jump, or a data run
-  inside the body makes the body "not fully understood", which silences
-  `overdeclared-clobber` but never `undeclared-clobber`.
-- A routine that falls through into the next one is under-reported rather than
-  over-reported: the analysis prefers a missed warning to a wrong one. Where that
-  costs a *wrong* finding — a fall-through entry point, or a `PHA`/`PLA` pair the
-  analysis does not model — suppress it at the site with
-  [`@nessemble-lint-ignore…`](#suppressing-a-finding) and keep the annotation
-  truthful.
+- In [program mode](#program-mode-and-file-mode), a routine's body is the code
+  reachable from its label in the assembled program — see
+  [what the analysis follows](#what-the-analysis-follows).
+- In file mode, a routine's body runs from its label to the next block-opening
+  label. An `@local` label never opens a block, so its lines belong to the
+  routine above it, and a `JMP` to one of the routine's own locals stays inside
+  the body. A call to another **annotated** routine contributes that routine's
+  declared clobbers; a call to an unannotated one, a macro invocation, an
+  indirect jump, or a data run inside the body makes the body "not fully
+  understood", which silences `overdeclared-clobber` but never
+  `undeclared-clobber`. A routine that falls through into the next one is
+  under-reported rather than over-reported.
 - The stack pointer counts as clobbered only for `TXS`. Pushes and pulls move
   `S`, but routines balance them.
 
@@ -880,6 +961,25 @@ directory can loosen or disable a rule for its files:
 }
 ```
 
+### entry
+
+The program's entry file, for [program-mode lint](#program-mode-and-file-mode)
+and the editor. A string, or an array for a project that builds several ROMs;
+relative to the directory of the `.nessemblerc` that declares it.
+
+```json
+{
+  "entry": "main.asm",
+  "assemble": { "pseudo": "scripts/pseudo.txt" }
+}
+```
+
+`entry` is allowed only at the top level, not inside `overrides`. A missing entry
+file is reported when `lint` uses it
+(`` nessemble: entry `main.asm` (set in `.nessemblerc`) does not exist ``), so a
+checkout without generated files still formats. The plain build
+(`nessemble main.asm`) does not read `entry`.
+
 ### assemble
 
 The assembler's [configurable diagnostics](#configurable-warnings) are set under
@@ -898,6 +998,11 @@ rules and levels are rejected, as is any other key in the block.
   }
 }
 ```
+
+`assemble.pseudo` names the custom pseudo-instruction file (what
+[`-p`](#-p---pseudo-pseudotxt) takes), relative to the `.nessemblerc`'s directory.
+`nessemble lint` and the language server read it when assembling the
+[`entry`](#entry); the plain build does not.
 
 [`-W`](#-w-ruleoffwarnerror) flags override these for one run. The `assemble`
 block is project-wide (an assembly is one program), so it is not allowed inside

@@ -2154,3 +2154,229 @@ fn reference_describes_assert() {
         ".assert\n  fail the build unless an expression holds\n"
     );
 }
+
+// ─── lint: program mode (plan 023) ───────────────────────────────────────────
+
+#[test]
+fn lint_reports_a_missing_rc_entry() {
+    let dir = lint_dir("missing-entry");
+    std::fs::write(dir.join(".nessemblerc"), r#"{"entry":"main.asm"}"#).unwrap();
+    let file = dir.join("a.asm");
+    std::fs::write(&file, "; doc\nmain:\n    rts\n").unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "a.asm"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("nessemble: entry `main.asm` (set in `.nessemblerc`) does not exist"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A two-file program: `main.asm` calls `util.asm`'s `helper`, whose contract
+/// clobbers X that `caller` does not declare.
+fn write_program(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("main.asm"),
+        "; @nessemble-clobbers A\ncaller:\n    lda #0\n    jsr helper\n    rts\n\n.include \"util.asm\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("util.asm"),
+        "; @nessemble-clobbers X\nhelper:\n    ldx #2\n    ldy #3\n    rts\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lint_an_entry_reports_its_whole_closure_under_each_header() {
+    let dir = lint_dir("program-closure");
+    write_program(&dir);
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "main.asm"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("\nmain.asm\n"), "{text}");
+    assert!(
+        text.contains(
+            "routine `caller` writes X but does not declare it clobbered (X: `JSR helper` on \
+             line 4, whose contract clobbers X)"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\nutil.asm\n"), "{text}");
+    assert!(
+        text.contains("routine `helper` writes Y but does not declare it clobbered"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_a_directory_with_an_rc_entry_reports_only_the_walked_files() {
+    let dir = lint_dir("program-rc-dir");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    write_program(&dir.join("src"));
+    std::fs::write(dir.join(".nessemblerc"), r#"{"entry":"src/main.asm"}"#).unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "src/util.asm"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains("main.asm"), "{text}");
+    assert!(
+        text.contains("routine `helper` writes Y but does not declare it clobbered (Y: `LDY`"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_a_fragment_with_no_entry_is_file_mode_as_before() {
+    let dir = lint_dir("program-fragment");
+    // `missing` is undefined, so this does not assemble on its own.
+    let file = dir.join("frag.asm");
+    std::fs::write(
+        &file,
+        "; @nessemble-clobbers none\nfrag:\n    ldx #1\n    jsr missing\n    rts\n",
+    )
+    .unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "frag.asm"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        text,
+        "\nfrag.asm\n      2:1   warning  routine `frag` writes X but does not declare it \
+         clobbered  undeclared-clobber\n\n✖ 1 problem (0 errors, 1 warning)\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_an_explicit_entry_that_fails_prints_the_build_error_and_fails() {
+    let dir = lint_dir("program-fails");
+    std::fs::write(dir.join("main.asm"), "; doc\nmain:\n    jmp nowhere\n").unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "--entry", "main.asm", "main.asm"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("Error in `main.asm` on line 3:"), "{err}");
+    assert!(
+        err.contains(
+            "nessemble: lint: `main.asm` did not assemble, so routine rules were skipped for it"
+        ),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_entry_and_pseudo_flags_assemble_the_program() {
+    let dir = lint_dir("program-flags");
+    write_program(&dir);
+    std::fs::write(dir.join("pseudo.txt"), "").unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args([
+            "lint",
+            "--entry",
+            "main.asm",
+            "-p",
+            "pseudo.txt",
+            "util.asm",
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    // `util.asm` alone does not know it is called; the entry makes it program
+    // mode, where the X write is seen through the program.
+    assert!(
+        text.contains("routine `helper` writes Y but does not declare it clobbered (Y: `LDY`"),
+        "{text}"
+    );
+    assert!(!text.contains("main.asm"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_ignored_included_files_are_analysed_but_not_reported() {
+    let dir = lint_dir("program-ignored");
+    write_program(&dir);
+    std::fs::write(dir.join(".nessembleignore"), "util.asm\n").unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "main.asm"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains("util.asm"), "{text}");
+    // Its contract still informs the caller.
+    assert!(
+        text.contains("(X: `JSR helper` on line 4, whose contract"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lint_two_entries_merge_by_union_and_intersection() {
+    let dir = lint_dir("program-two");
+    // `shared.asm` is in both programs; `HELPER_WRITES_Y` differs by build.
+    std::fs::write(
+        dir.join("shared.asm"),
+        "; @nessemble-clobbers A, Y\nshared:\n    jsr helper\n    rts\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("one.asm"),
+        ".include \"shared.asm\"\n\n; @nessemble-clobbers X\nhelper:\n    ldx #1\n    rts\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("two.asm"),
+        ".include \"shared.asm\"\n\n; @nessemble-clobbers Y\nhelper:\n    ldy #1\n    rts\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".nessemblerc"),
+        r#"{"entry":["one.asm","two.asm"]}"#,
+    )
+    .unwrap();
+    let out = bin()
+        .current_dir(&dir)
+        .args(["lint", "shared.asm"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    // Undeclared: X in one build is enough. Over-declared: A is written in
+    // neither build; Y is needed by `two`, so it is not over-declared.
+    assert!(
+        text.contains("routine `shared` writes X but does not declare"),
+        "{text}"
+    );
+    assert!(
+        text.contains("routine `shared` declares A clobbered but never writes it"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -6,7 +6,15 @@
 /// Run the language server, returning the process exit code.
 #[cfg(feature = "lsp")]
 pub fn run() -> u8 {
-    match nessemble_lsp::run() {
+    // The editor reads custom pseudo-ops from the cache a build left, and
+    // never runs a script (`plans/023-whole-program-clobber-analysis.md` §3.6).
+    let hooks = nessemble_lsp::ServerHooks {
+        custom_resolver: Box::new(|pseudo| {
+            let pseudo = pseudo.map(|p| p.display().to_string());
+            crate::custom::build_cache_reader(pseudo.as_deref())
+        }),
+    };
+    match nessemble_lsp::run_with(hooks) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("nessemble: language server error: {e}");

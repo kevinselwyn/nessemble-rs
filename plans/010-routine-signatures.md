@@ -398,6 +398,12 @@ see it — a **false negative**, which costs a missed report. The alternative
 another routine's writes to this one — a **false positive**, which costs the
 rule its credibility. For a warn-level lint, that trade is not close.
 
+> **As built (plan 023):** this text-block body is now **file mode** only. When
+> the project assembles from an entry, the body is the code reachable from the
+> label in the assembled program, following fall-through, branches, calls and
+> save/restore pairs — see
+> [`plans/023-whole-program-clobber-analysis.md`](023-whole-program-clobber-analysis.md).
+
 ### 8.2 The two rules
 
 | Rule | Default | Fires when |
